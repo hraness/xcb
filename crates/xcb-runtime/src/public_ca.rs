@@ -3,27 +3,13 @@
 use crate::private;
 use crate::{Error, Result};
 use std::{
-    fs::{self, File, Metadata},
+    fs::{self, File},
     io::Read,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
+use xcb_core::FileIdentity;
 const LIMIT: u64 = 2 * 1024 * 1024;
-
-fn stamp(m: &Metadata) -> (u64, u64, u32, u32, u64, u64, i64, i64, i64, i64) {
-    (
-        m.dev(),
-        m.ino(),
-        m.uid(),
-        m.mode(),
-        m.nlink(),
-        m.len(),
-        m.mtime(),
-        m.mtime_nsec(),
-        m.ctime(),
-        m.ctime_nsec(),
-    )
-}
 
 fn read_trusted(source: &Path, owner: u32) -> Result<Vec<u8>> {
     let fd = rustix::fs::open(
@@ -54,8 +40,8 @@ fn read_trusted(source: &Path, owner: u32) -> Result<Vec<u8>> {
         .read_to_end(&mut bytes)?;
     let named = fs::symlink_metadata(source)?;
     if !named.is_file()
-        || stamp(&before) != stamp(&file.metadata()?)
-        || stamp(&before) != stamp(&named)
+        || FileIdentity::of(&before) != FileIdentity::of(&file.metadata()?)
+        || FileIdentity::of(&before) != FileIdentity::of(&named)
         || bytes.len() as u64 != before.len()
     {
         return Err(Error::Conflict(
@@ -126,8 +112,12 @@ mod tests {
     #[test]
     fn public_ca_snapshot_is_private_single_link_and_not_replaced() {
         let directory = tempfile::tempdir().unwrap();
-        let root =
-            private::directory(&directory.path().canonicalize().unwrap().join("launch")).unwrap();
+        let root = private::directory(
+            &xcb_core::canonical(directory.path())
+                .unwrap()
+                .join("launch"),
+        )
+        .unwrap();
         let target = snapshot(&root).unwrap();
         let first = private::read(&target, LIMIT as usize).unwrap();
         assert_eq!(target.metadata().unwrap().nlink(), 1);

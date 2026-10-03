@@ -11,6 +11,7 @@ fn codec() -> CodexProtocol {
         observed_at_ms: 1,
     };
     CodexProtocol::new(CodexOptions {
+        native_mcp: None,
         cwd: "/synthetic/work".into(),
         account_home: "/synthetic/profile".into(),
         catalog_path: "/synthetic/catalog.json".into(),
@@ -43,6 +44,322 @@ fn call_item() -> Value {
 }
 fn callback() -> Value {
     json!({"id":80,"method":"item/tool/call","params":{"threadId":"thread1","turnId":"turn1","callId":"call1","tool":"workspace_read","namespace":null,"arguments":{"path":"note.txt"}}})
+}
+
+fn native_definition() -> Value {
+    json!({"command":"/synthetic/helper","args":["native-mcp-stdio"],"enabled":true,
+        "enabled_tools":["js","js_reset"],
+        "env":{"XCB_MCP_SOCKET":"/synthetic/mcp.sock","XCB_MCP_TOKEN":"a".repeat(64)}})
+}
+
+fn native_review_notice(completed: bool, status: &str) -> Value {
+    let mut params = json!({"threadId":"thread1","turnId":"turn1","reviewId":"review1","targetItemId":"native1",
+        "action":{"type":"mcpToolCall","server":"cua_repl","toolName":"js","connectorId":null,"connectorName":null,"toolTitle":null},
+        "review":{"status":status,"riskLevel":"low","userAuthorization":"high","rationale":"SYNTHETIC_PRIVATE_REASON"},"startedAtMs":100});
+    if completed {
+        params["completedAtMs"] = json!(101);
+        params["decisionSource"] = json!("agent");
+    }
+    json!({"method": if completed { "item/autoApprovalReview/completed" } else { "item/autoApprovalReview/started" }, "params":params})
+}
+
+#[test]
+fn native_automatic_review_observations_never_manufacture_approval() {
+    let mut c = started();
+    c.options.native_mcp = Some(native_definition());
+    let begin = native_review_notice(false, "inProgress");
+    let (events, replies) = c.accept(begin.clone()).unwrap();
+    assert!(events.is_empty() && replies.is_empty() && c.native_calls.is_empty());
+    assert!(c.accept(begin).is_err());
+    let done = native_review_notice(true, "approved");
+    let (events, replies) = c.accept(done.clone()).unwrap();
+    assert!(events.is_empty() && replies.is_empty() && c.native_calls.is_empty());
+    assert!(c.accept(done).is_err());
+    assert!(!c.completed);
+}
+
+#[test]
+fn native_node_repl_strict_review_keeps_exact_connector_and_review_identity() {
+    let mut c = started();
+    c.options.native_mcp = Some(native_definition());
+    let strict = |completed, status| {
+        let mut notice = native_review_notice(completed, status);
+        notice["params"]["action"]["connectorId"] = json!("node_repl");
+        notice["params"]["action"]["connectorName"] = json!("Node REPL");
+        notice["params"]["action"]["toolTitle"] = json!("Run JavaScript");
+        notice
+    };
+    c.accept(strict(false, "inProgress")).unwrap();
+    let (events, replies) = c.accept(strict(true, "approved")).unwrap();
+    assert!(events.is_empty() && replies.is_empty() && c.native_calls.is_empty());
+    for (key, value) in [
+        ("connectorId", json!("other")),
+        ("connectorName", json!("other")),
+        ("toolName", json!("js_reset")),
+        ("server", json!("other")),
+    ] {
+        let mut c = started();
+        c.options.native_mcp = Some(native_definition());
+        let mut changed = strict(false, "inProgress");
+        changed["params"]["action"][key] = value;
+        assert!(c.accept(changed).is_err());
+    }
+}
+
+#[test]
+fn native_automatic_review_denial_is_terminal_attention_without_fallback() {
+    for status in ["denied", "aborted", "timedOut"] {
+        let mut c = started();
+        c.options.native_mcp = Some(native_definition());
+        c.accept(native_review_notice(false, "inProgress")).unwrap();
+        let (events, replies) = c.accept(native_review_notice(true, status)).unwrap();
+        assert!(replies.is_empty());
+        assert!(matches!(events.last(), Some(Event::Attention)));
+        assert!(c.completed && c.native_calls.is_empty());
+        assert!(c.host_pending_attention());
+        assert!(c.accept(notice("item/started", call_item())).is_err());
+    }
+    let mut c = started();
+    c.options.native_mcp = Some(native_definition());
+    c.accept(native_review_notice(false, "inProgress")).unwrap();
+    let (events, replies) = c.accept(json!({"method":"turn/completed","params":{"threadId":"thread1","turn":{"id":"turn1","status":"completed"}}})).unwrap();
+    assert!(replies.is_empty() && matches!(events.last(), Some(Event::Attention)) && c.completed);
+}
+
+#[tokio::test]
+async fn native_automatic_review_interruption_retains_attention_after_shutdown() {
+    let mut c = started();
+    c.options.native_mcp = Some(native_definition());
+    c.accept(native_review_notice(false, "inProgress")).unwrap();
+    // Let the configured reviewer finish while the turn is healthy. If the
+    // process fails, cancellation arrives, or the wire closes first, the
+    // unfinished review prevents retry under another provider.
+    assert!(!c.host_pending_attention());
+    assert!(c.shutdown().await);
+    assert!(c.host_pending_attention());
+}
+
+#[test]
+fn native_automatic_review_rejects_other_authority_or_changed_identity() {
+    assert!(
+        started()
+            .accept(native_review_notice(false, "inProgress"))
+            .is_err()
+    );
+    for (pointer, value) in [
+        ("/params/threadId", json!("foreign")),
+        ("/params/turnId", json!("foreign")),
+        ("/params/action/type", json!("command")),
+        ("/params/action/server", json!("other")),
+        ("/params/action/toolName", json!("shell")),
+        ("/params/action/connectorId", json!("ambient")),
+        ("/params/review/status", json!("approved")),
+    ] {
+        let mut c = started();
+        c.options.native_mcp = Some(native_definition());
+        let mut notice = native_review_notice(false, "inProgress");
+        *notice.pointer_mut(pointer).unwrap() = value;
+        assert!(c.accept(notice).is_err());
+    }
+    for (pointer, value) in [
+        ("/params/reviewId", json!("foreign")),
+        ("/params/targetItemId", json!("foreign")),
+        ("/params/startedAtMs", json!(99)),
+        ("/params/completedAtMs", json!(99)),
+        ("/params/decisionSource", json!("human")),
+        ("/params/action/toolName", json!("js_reset")),
+    ] {
+        let mut c = started();
+        c.options.native_mcp = Some(native_definition());
+        c.accept(native_review_notice(false, "inProgress")).unwrap();
+        let mut notice = native_review_notice(true, "approved");
+        *notice.pointer_mut(pointer).unwrap() = value;
+        assert!(c.accept(notice).is_err());
+    }
+}
+
+#[test]
+fn native_computer_tools_require_exact_config_and_bound_item_lifecycle() {
+    let item = json!({"id":"native1","type":"mcpToolCall","server":"cua_repl","tool":"js",
+        "arguments":{"code":"await cua.getState();"},"status":"inProgress"});
+    assert!(
+        started()
+            .accept(notice("item/started", item.clone()))
+            .is_err()
+    );
+    let mut c = started();
+    c.options.native_mcp = Some(native_definition());
+    for (key, value) in [
+        ("server", json!("other")),
+        ("tool", json!("exec")),
+        ("pluginId", json!("ambient")),
+    ] {
+        let mut changed = item.clone();
+        changed[key] = value;
+        assert!(c.native_item(&changed, false).is_err());
+    }
+    c.accept(notice("item/started", item.clone())).unwrap();
+    c.accept(json!({"method":"item/mcpToolCall/progress","params":{"threadId":"thread1","turnId":"turn1","itemId":"native1","message":"working"}})).unwrap();
+    let mut done = item;
+    done["status"] = json!("completed");
+    done["result"] = json!({"content":[{"type":"text","text":"bounded observation"}]});
+    let mut changed = done.clone();
+    changed["arguments"] = json!({"code":"changed"});
+    assert!(c.native_item(&changed, true).is_err());
+    c.accept(notice("item/completed", done.clone())).unwrap();
+    assert!(c.accept(notice("item/completed", done)).is_err());
+}
+
+#[test]
+fn codex_server_admits_only_read_only_mcp_introspection() {
+    let mut c = started();
+    c.options.native_mcp = Some(native_definition());
+    for tool in [
+        "list_mcp_resources",
+        "list_mcp_resource_templates",
+        "read_mcp_resource",
+    ] {
+        let id = format!("introspection_{tool}");
+        let item = json!({"id":id,"type":"mcpToolCall","server":"codex","tool":tool,
+            "arguments":{},"status":"inProgress"});
+        c.accept(notice("item/started", item)).unwrap();
+    }
+    for tool in ["exec_command", "js", "shell"] {
+        let mut item = json!({"id":"denied","type":"mcpToolCall","server":"codex","tool":tool,
+            "arguments":{},"status":"inProgress"});
+        assert!(c.native_item(&item, false).is_err());
+        item["server"] = json!("other");
+        item["tool"] = json!("list_mcp_resources");
+        assert!(c.native_item(&item, false).is_err());
+    }
+}
+
+#[test]
+fn native_configuration_readback_rejects_extra_authority() {
+    let definition = native_definition();
+    let catalog = std::path::Path::new("/synthetic/catalog.json");
+    let text = config::configuration_with_native(catalog, Some(&definition)).unwrap();
+    assert!(text.contains("[mcp_servers.cua_repl]"));
+    assert!(text.contains("approvals_reviewer = \"auto_review\""));
+    let mut readback: Value = serde_json::from_str(include_str!("config-readback.json")).unwrap();
+    let mut normalized = definition.clone();
+    normalized["environment_id"] = json!("local");
+    normalized["tool_timeout_sec"] = Value::Null;
+    readback["config"]["mcp_servers"] = json!({"cua_repl":normalized});
+    config::validate_config_with_native(&readback, catalog, Some(&definition)).unwrap();
+    readback["config"]["mcp_servers"]["cua_repl"]["env_vars"] = json!(["HOME"]);
+    assert!(config::validate_config_with_native(&readback, catalog, Some(&definition)).is_err());
+}
+
+#[test]
+fn native_inventory_requires_connected_declared_tools_before_inference() {
+    let mut c = started();
+    c.options.native_mcp = Some(native_definition());
+    let inventory = json!({"data":[{"name":"cua_repl","runtimeStatus":"connected","tools":{
+        "mcp__cua_repl__js":{"name":"js","inputSchema":{"type":"object"}},
+        "mcp__cua_repl__js_reset":{"name":"js_reset","inputSchema":{"type":"object"}}
+    }}],"nextCursor":null});
+    c.native_inventory(&inventory).unwrap();
+    assert!(!c.native_ready);
+    for status in [
+        "notStarted",
+        "starting",
+        "failed",
+        "cancelled",
+        "disabled",
+        "authenticationRequired",
+    ] {
+        let mut invalid = inventory.clone();
+        invalid["data"][0]["runtimeStatus"] = json!(status);
+        assert!(c.native_inventory(&invalid).is_err());
+    }
+    for invalid in [
+        json!({"data":[],"nextCursor":null}),
+        json!({"data":[{"name":"cua_repl","runtimeStatus":"connected","tools":{}}]}),
+    ] {
+        assert!(c.native_inventory(&invalid).is_err());
+    }
+    let mut invalid = inventory.clone();
+    invalid["data"][0]["toolsError"] = json!("private upstream error");
+    assert!(c.native_inventory(&invalid).is_err());
+    let mut invalid = inventory;
+    invalid["data"][0]["tools"]["extra"] = json!({"name":"shell","inputSchema":{}});
+    assert!(c.native_inventory(&invalid).is_err());
+}
+
+#[test]
+fn native_startup_status_is_thread_bound_and_never_authorizes_active_work() {
+    let mut codec = codec();
+    codec.thread_id = Some("thread1".into());
+    codec.options.native_mcp = Some(serde_json::json!({"enabled":true}));
+    for state in ["idle", "notLoaded"] {
+        assert!(codec.startup_notice(&json!({"method":"thread/status/changed","params":{"threadId":"thread1","status":{"type":state}}})).is_ok());
+    }
+    for (thread, status) in [
+        ("foreign", json!({"type":"idle"})),
+        ("thread1", json!({"type":"active","activeFlags":[]})),
+        ("thread1", json!({"type":"systemError"})),
+    ] {
+        assert!(codec.startup_notice(&json!({"method":"thread/status/changed","params":{"threadId":thread,"status":status}})).is_err());
+    }
+}
+
+#[tokio::test]
+async fn native_unready_relay_never_sends_a_model_turn() {
+    let mut codec = codec();
+    codec.initialized = true;
+    codec.thread_id = Some("thread1".into());
+    codec.options.native_mcp = Some(json!({"enabled":true}));
+    let mut process = StreamProcess::spawn(tokio::process::Command::new("/bin/cat")).unwrap();
+    let result = codec
+        .start(
+            &mut process,
+            Prompt {
+                text: "do not submit".into(),
+                images: vec![],
+            },
+        )
+        .await;
+    drop(process.stdin.take());
+    let output = tokio::time::timeout(Duration::from_secs(2), process.frame()).await;
+    assert!(process.join().await);
+    assert!(result.is_err());
+    assert!(output.unwrap().unwrap().is_none());
+}
+
+#[test]
+fn startup_deprecation_notice_is_bounded_information_not_authority() {
+    let mut codec = codec();
+    for details in [Value::Null, json!("Synthetic migration guidance")] {
+        assert!(codec.startup_notice(&json!({"method":"deprecationNotice","params":{"summary":"Synthetic deprecation", "details":details}})).is_ok());
+    }
+    for params in [
+        json!({"summary":false}),
+        json!({"summary":"valid","details":{}}),
+        json!({"summary":"valid","details":"x".repeat(8193)}),
+        json!({"summary":"valid","approvalPolicy":"never"}),
+    ] {
+        assert!(
+            codec
+                .startup_notice(&json!({"method":"deprecationNotice","params":params}))
+                .is_err()
+        );
+    }
+    assert!(!codec.initialized);
+    assert!(!codec.native_ready);
+    assert!(codec.turn_id.is_none());
+}
+
+#[test]
+fn native_additional_approval_is_declined_and_requires_attention() {
+    let mut c = started();
+    c.options.native_mcp = Some(native_definition());
+    let (events,replies) = c.accept(json!({"id":"approval1","method":"mcpServer/elicitation/request","params":{
+        "threadId":"thread1","turnId":"turn1","serverName":"cua_repl","mode":"form","message":"permission","requestedSchema":{}
+    }})).unwrap();
+    assert!(events.iter().any(|event| matches!(event, Event::Attention)));
+    assert_eq!(replies[0]["result"]["action"], "decline");
+    assert!(replies[0]["result"]["content"].is_null());
 }
 
 #[test]
@@ -96,9 +413,21 @@ fn forged_or_replayed_tools_never_reach_the_broker() {
 
 #[test]
 fn native_execution_and_permission_requests_are_not_granted() {
+    for method in [
+        "item/commandExecution/requestApproval",
+        "item/fileChange/requestApproval",
+        "item/permissions/requestApproval",
+    ] {
+        let (events, replies) = started()
+            .accept(
+                json!({"id":1,"method":method,"params":{"threadId":"thread1","turnId":"turn1"}}),
+            )
+            .unwrap();
+        assert!(matches!(events.as_slice(), [Event::Attention]));
+        assert_eq!(replies[0]["error"]["code"], -32601);
+        assert!(replies[0].get("result").is_none());
+    }
     let mut c = started();
-    let (_, replies) = c.accept(json!({"id":1,"method":"item/commandExecution/requestApproval","params":{"threadId":"thread1","turnId":"turn1"}})).unwrap();
-    assert_eq!(replies[0]["error"]["code"], -32601);
     assert!(
         c.accept(notice(
             "item/started",
@@ -107,6 +436,138 @@ fn native_execution_and_permission_requests_are_not_granted() {
         .is_err()
     );
     assert!(started().accept(json!({"id":1,"method":"account/chatgptAuthTokens/refresh","params":{"threadId":"thread1","turnId":"turn1"}})).is_err());
+}
+
+#[test]
+fn unqualified_descendants_cannot_claim_the_root_broker_or_lifecycle() {
+    // Exact 0.159.0's v2 delegation emits this parent activity record, then
+    // child-scoped turns. It is execution, even though its type is not the
+    // older collabAgentToolCall shape. A child without qualified inherited
+    // broker tools is never admitted as display-only traffic.
+    let activity = json!({"id":"spawn_one","type":"subAgentActivity","agentPath":"/root/child_one","agentThreadId":"child1","kind":"started"});
+    assert!(started().accept(notice("item/started", activity)).is_err());
+    for notification in [
+        json!({"method":"thread/status/changed","params":{"threadId":"child1","status":{"type":"idle"}}}),
+        json!({"method":"turn/started","params":{"threadId":"child1","turn":{"id":"child-turn1"}}}),
+        json!({"method":"turn/completed","params":{"threadId":"child1","turn":{"id":"child-turn1","status":"completed","error":null}}}),
+        json!({"method":"thread/tokenUsage/updated","params":{"threadId":"child1","turnId":"child-turn1","tokenUsage":{}}}),
+    ] {
+        assert!(started().accept(notification).is_err());
+    }
+    let mut c = started();
+    c.accept(notice("item/started", call_item())).unwrap();
+    let mut forged = callback();
+    forged["params"]["threadId"] = json!("child1");
+    forged["params"]["turnId"] = json!("child-turn1");
+    assert!(c.accept(forged).is_err());
+    assert!(c.calls["call1"].rpc_id.is_none());
+    assert!(!c.completed);
+}
+
+#[test]
+fn unknown_mutating_notice_diagnostic_only_contains_method_fingerprint() {
+    let method = "item/SYNTHETIC_PRIVATE_METHOD";
+    let mut diagnostics = vec![];
+    for secret in [
+        "SYNTHETIC_PRIVATE_PAYLOAD_ONE",
+        "SYNTHETIC_PRIVATE_PAYLOAD_TWO",
+    ] {
+        let error = started()
+            .accept(json!({"method":method,"params":{"private":secret}}))
+            .unwrap_err();
+        assert!(matches!(error, Error::CodexNotification { .. }));
+        assert_eq!(error.failure(), xcb_core::policy::Failure::Unknown);
+        let diagnostic = crate::runner::Diagnostic::from_error(&error);
+        assert!(!diagnostic.as_str().contains("PRIVATE"));
+        assert!(
+            diagnostic
+                .as_str()
+                .ends_with(&format!("{})", crate::digest(method.as_bytes())))
+        );
+        diagnostics.push(diagnostic.as_str().to_owned());
+    }
+    assert_eq!(diagnostics[0], diagnostics[1]);
+}
+
+#[test]
+fn unknown_non_executable_items_become_one_bounded_diagnostic() {
+    let mut c = started();
+    // A display-only item kind the pinned schema does not list: tolerated once
+    // inside an admitted turn instead of failing work already underway.
+    let item = json!({"id":"odd1","type":"mysteryWidget","secret":"SYNTHETIC_SECRET","text":"provider controlled text"});
+    let (events, replies) = c.accept(notice("item/started", item.clone())).unwrap();
+    assert!(replies.is_empty());
+    assert!(
+        matches!(&events[..], [Event::Diagnostic(detail)] if detail.as_str() == "Codex sent an unrecognized item kind; it was ignored")
+    );
+    // Completion of the tolerated item resolves without another notice, and a
+    // second unknown kind does not spam the diagnostic channel.
+    let (events, _) = c.accept(notice("item/completed", item)).unwrap();
+    assert!(events.is_empty());
+    let (events, _) = c
+        .accept(notice(
+            "item/started",
+            json!({"id":"odd2","type":"otherWidget"}),
+        ))
+        .unwrap();
+    assert!(events.is_empty());
+    // The admitted turn continues normally.
+    c.accept(notice("item/started", call_item())).unwrap();
+    // Every kind that records native execution stays fatal, started or
+    // completed alike.
+    for kind in [
+        "commandExecution",
+        "fileChange",
+        "mcpToolCall",
+        "webSearch",
+        "collabAgentToolCall",
+        "subAgentActivity",
+        "functionCallOutput",
+    ] {
+        let mut c = started();
+        assert!(
+            c.accept(notice("item/started", json!({"id":"native1","type":kind})))
+                .is_err(),
+            "{kind}"
+        );
+        let mut c = started();
+        c.items.insert(
+            "native1".into(),
+            Item {
+                kind: kind.into(),
+                completed: false,
+            },
+        );
+        assert!(
+            c.accept(notice(
+                "item/completed",
+                json!({"id":"native1","type":kind})
+            ))
+            .is_err(),
+            "{kind} completion"
+        );
+    }
+}
+
+#[test]
+fn interruption_names_only_the_admitted_turn() {
+    // Turn RPC minted but not yet admitted: the provider owns nothing to
+    // interrupt, so the runner's stdin-close grace is the whole signal.
+    let mut c = codec();
+    c.initialized = true;
+    c.thread_id = Some("thread1".into());
+    c.turn_rpc = Some(7);
+    assert!(c.interruption().is_none());
+    // Admission pins the exact thread/turn pair into the request.
+    let mut c = started();
+    let frame = c.interruption().unwrap();
+    assert_eq!(frame["method"], "turn/interrupt");
+    assert_eq!(frame["params"]["threadId"], "thread1");
+    assert_eq!(frame["params"]["turnId"], "turn1");
+    assert_eq!(frame["id"], json!(c.next_id));
+    // Once the turn has completed there is nothing left to interrupt.
+    c.completed = true;
+    assert!(c.interruption().is_none());
 }
 
 #[test]
@@ -128,6 +589,221 @@ fn readiness_requires_the_matching_rpc_and_rejects_early_execution() {
             .accept(json!({"id":7,"result":{"turn":{"id":"turn1"}}}))
             .is_err()
     );
+}
+
+#[test]
+fn pinned_thread_statuses_are_observations_not_turn_admission_or_completion() {
+    // Exported unchanged by the qualified 0.156.1 executable:
+    // v2/ThreadStatusChangedNotification.json SHA256
+    // 26f3c60c1b73f7fa2d31c74429cdc36f8746c76c33e3d314b3fb61d3661f05f6.
+    for status in [
+        json!({"type":"notLoaded"}),
+        json!({"type":"idle"}),
+        json!({"type":"systemError"}),
+        json!({"type":"active","activeFlags":[]}),
+    ] {
+        let mut c = codec();
+        c.thread_id = Some("thread1".into());
+        c.turn_rpc = Some(7);
+        let notification = json!({"method":"thread/status/changed","params":{"threadId":"thread1","status":status}});
+        let (events, replies) = c.accept(notification.clone()).unwrap();
+        assert!(replies.is_empty());
+        assert!(!c.ready && !c.completed && c.turn_id.is_none());
+        assert_eq!(c.turn_rpc, Some(7));
+        assert!(
+            events
+                .iter()
+                .all(|event| matches!(event, Event::Diagnostic(_)))
+        );
+        if status["type"] == "systemError" {
+            assert!(
+                matches!(&events[..], [Event::Diagnostic(detail)] if detail.as_str() == "unavailable: Codex thread reported a system error")
+            );
+        } else {
+            assert!(events.is_empty());
+        }
+        assert!(c.accept(notice("item/started", call_item())).is_err());
+        c.accept(json!({"id":7,"result":{"turn":{"id":"turn1"}}}))
+            .unwrap();
+        c.accept(notification).unwrap();
+        assert!(c.ready && !c.completed);
+        assert_eq!(c.turn_id.as_deref(), Some("turn1"));
+    }
+}
+
+#[test]
+fn thread_statuses_reject_foreign_identity_unknown_shapes_and_permission_flags() {
+    for status in [
+        json!({"type":"futureStatus"}),
+        json!({"type":"idle","activeFlags":[]}),
+        json!({"type":"notLoaded","extra":true}),
+        json!({"type":"systemError","message":"SYNTHETIC_SECRET"}),
+        json!({"type":"active"}),
+        json!({"type":"active","activeFlags":null}),
+        json!({"type":"active","activeFlags":["waitingOnApproval"]}),
+        json!({"type":"active","activeFlags":["waitingOnUserInput"]}),
+        json!({"type":"active","activeFlags":["futureFlag"]}),
+        json!("idle"),
+    ] {
+        assert!(started().accept(json!({"method":"thread/status/changed","params":{"threadId":"thread1","status":status}})).is_err());
+    }
+    for thread in [Value::Null, json!("foreign")] {
+        assert!(started().accept(json!({"method":"thread/status/changed","params":{"threadId":thread,"status":{"type":"notLoaded"}}})).is_err());
+    }
+    assert!(started().accept(json!({"method":"thread/status/changed","params":{"threadId":"thread1","status":{"type":"idle"},"extra":true}})).is_err());
+}
+
+#[test]
+fn turn_start_errors_are_sanitized_only_after_matching_the_expected_rpc() {
+    let mut c = codec();
+    c.thread_id = Some("thread1".into());
+    c.turn_rpc = Some(7);
+    let error = json!({"code":-32000,"message":"401 Unauthorized Bearer SYNTHETIC_SECRET user@example.invalid","data":{"token":"SYNTHETIC_DATA_SECRET"}});
+    for id in [json!(8), json!("7"), Value::Null] {
+        assert!(matches!(
+            c.accept(json!({"id":id,"error":error})),
+            Err(Error::Protocol(_))
+        ));
+    }
+    let failure = c.accept(json!({"id":7,"error":error})).unwrap_err();
+    assert!(matches!(
+        failure,
+        Error::CodexRpc {
+            method: "turn/start",
+            code: -32000,
+            ..
+        }
+    ));
+    let displayed = failure.to_string();
+    assert!(displayed.contains("authentication rejected"));
+    assert!(!displayed.contains("SYNTHETIC"));
+    assert!(!displayed.contains("example.invalid"));
+    assert!(!c.ready && c.turn_id.is_none());
+    assert!(matches!(
+        started().accept(json!({"id":7,"error":error})),
+        Err(Error::Protocol(_))
+    ));
+}
+
+#[test]
+fn failed_turns_preserve_fixed_diagnostics_and_terminal_classification() {
+    for (tag, terminal, failure, category) in [
+        (
+            "usageLimitExceeded",
+            Terminal::Failed,
+            Some(Failure::AccountQuota),
+            "provider usage limit exceeded",
+        ),
+        (
+            "unauthorized",
+            Terminal::Failed,
+            Some(Failure::Authentication),
+            "authentication rejected",
+        ),
+        (
+            "contextWindowExceeded",
+            Terminal::TokenLimit,
+            None,
+            "provider context window exceeded",
+        ),
+        (
+            "sandboxError",
+            Terminal::Failed,
+            Some(Failure::Policy),
+            "provider policy rejected",
+        ),
+        // Codex 0.159.0 ends a turn whose actions its own review layer denied
+        // too often. That is the provider's policy, not the account's usage
+        // limit, so it neither exhausts the account nor triggers quota failover.
+        (
+            "tooManyDenials",
+            Terminal::Failed,
+            Some(Failure::Policy),
+            "provider policy rejected",
+        ),
+        // Codex 0.158.0 reports an unavailable Flex tier separately from an
+        // overloaded service. Both are transient provider capacity, not the
+        // account's usage limit, so neither triggers quota failover.
+        (
+            "flexUnavailable",
+            Terminal::Failed,
+            Some(Failure::Transport),
+            "provider capacity temporarily unavailable",
+        ),
+        (
+            "serverOverloaded",
+            Terminal::Failed,
+            Some(Failure::Transport),
+            "provider capacity temporarily unavailable",
+        ),
+        (
+            "SYNTHETIC_UNKNOWN_SECRET",
+            Terminal::Failed,
+            Some(Failure::Unknown),
+            "provider rejected the operation",
+        ),
+    ] {
+        for code in [
+            json!(tag),
+            json!({tag: {"secret":"SYNTHETIC_NESTED_SECRET"}}),
+        ] {
+            let mut c = started();
+            let (events, replies) = c.accept(json!({"method":"turn/completed","params":{"threadId":"thread1","turn":{"id":"turn1","status":"failed","error":{"codexErrorInfo":code,"message":"SYNTHETIC_SECRET user@example.invalid"}}}})).unwrap();
+            assert!(replies.is_empty());
+            let diagnostic = events
+                .iter()
+                .find_map(|event| match event {
+                    Event::Diagnostic(value) => Some(serde_json::to_value(value).unwrap()),
+                    _ => None,
+                })
+                .expect("failed turns retain a safe diagnostic");
+            let diagnostic = diagnostic.as_str().unwrap();
+            assert!(diagnostic.contains("turn/completed"));
+            assert!(diagnostic.contains(category));
+            assert!(!diagnostic.contains("SYNTHETIC"));
+            assert!(!diagnostic.contains("example.invalid"));
+            assert!(events.iter().any(|event| matches!(event, Event::Result { terminal: observed, .. } if *observed == terminal)));
+            assert_eq!(
+                events.iter().find_map(|event| match event {
+                    Event::Quota { failure, .. } => *failure,
+                    _ => None,
+                }),
+                failure
+            );
+            assert!(c.completed);
+        }
+    }
+}
+
+#[test]
+fn error_notices_require_scope_and_do_not_persist_a_retried_failure() {
+    let mut notification = json!({"method":"error","params":{"threadId":"thread1","turnId":"turn1","willRetry":false,"error":{"message":"model is not supported: SYNTHETIC_SECRET user@example.invalid"}}});
+    let (events, _) = started().accept(notification.clone()).unwrap();
+    let diagnostic = events
+        .iter()
+        .find_map(|event| match event {
+            Event::Diagnostic(value) => Some(serde_json::to_value(value).unwrap()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        diagnostic
+            .as_str()
+            .unwrap()
+            .contains("selected model or reasoning effort")
+    );
+    assert!(!diagnostic.as_str().unwrap().contains("SYNTHETIC"));
+    notification["params"]["willRetry"] = json!(true);
+    assert!(
+        !started()
+            .accept(notification.clone())
+            .unwrap()
+            .0
+            .iter()
+            .any(|event| matches!(event, Event::Diagnostic(_)))
+    );
+    notification["params"]["threadId"] = json!("foreign");
+    assert!(started().accept(notification).is_err());
 }
 
 #[test]
@@ -225,8 +901,17 @@ fn current_settings_shape_preserves_the_strict_controls() {
     let mut c = codec();
     c.thread_id = Some("thread1".into());
     c.turn_rpc = Some(7);
-    let p = json!({"threadId":"thread1","threadSettings":{"model":"gpt-6-astra","modelProvider":"openai","effort":"ultra","approvalPolicy":"never","approvalsReviewer":"user","cwd":"/synthetic/work","sandboxPolicy":{"type":"readOnly","networkAccess":false},"multiAgentMode":"explicitRequestOnly","collaborationMode":{"mode":"default"},"serviceTier":null,"activePermissionProfile":null}});
+    let p = json!({"threadId":"thread1","threadSettings":{"model":"gpt-6-astra","modelProvider":"openai","effort":"ultra","approvalPolicy":"on-request","approvalsReviewer":"auto_review","cwd":"/synthetic/work","sandboxPolicy":{"type":"readOnly","networkAccess":false},"multiAgentMode":"explicitRequestOnly","collaborationMode":{"mode":"default"},"serviceTier":null,"activePermissionProfile":null}});
     c.settings_update(&p).unwrap();
+    for (key, value) in [
+        ("approvalPolicy", json!("never")),
+        ("approvalsReviewer", json!("user")),
+        ("approvalsReviewer", Value::Null),
+    ] {
+        let mut changed = p.clone();
+        changed["threadSettings"][key] = value;
+        assert!(c.settings_update(&changed).is_err(), "{key}");
+    }
     let mut altered = p;
     altered["threadSettings"]["sandboxPolicy"]["networkAccess"] = json!(true);
     assert!(c.settings_update(&altered).is_err());
@@ -239,6 +924,10 @@ fn native_configuration_readback_detects_authority_changes() {
     config::validate_config(&native, catalog).unwrap();
     for pointer in [
         "/config/features/shell_tool",
+        "/config/features/daemon_auto_start",
+        "/config/features/guardianv2.thread_context",
+        "/config/features/multi_agent",
+        "/config/features/multi_agent_v2",
         "/config/apps/_default/enabled",
         "/config/analytics/enabled",
     ] {
@@ -251,6 +940,9 @@ fn native_configuration_readback_detects_authority_changes() {
     }
     for (key, value) in [
         ("model_provider", json!("custom")),
+        ("approval_policy", json!("never")),
+        ("approvals_reviewer", json!("user")),
+        ("approvals_reviewer", Value::Null),
         ("model_catalog_json", json!("/different/catalog.json")),
         ("developer_instructions", json!("inherited")),
         ("mcp_servers", json!({"inherited":{}})),
@@ -262,10 +954,65 @@ fn native_configuration_readback_detects_authority_changes() {
 }
 
 #[test]
+fn automatic_review_is_explicit_without_widening_the_sandbox() {
+    let mut options = codec().options;
+    options.model.effort = Some(Id::new("low").unwrap());
+    let c = CodexProtocol::new(options).unwrap();
+    let config = configuration(&c.options.catalog_path).unwrap();
+    assert!(config.contains("approval_policy = \"on-request\"\n"));
+    assert!(config.contains("approvals_reviewer = \"auto_review\"\n"));
+    assert!(config.contains("sandbox_mode = \"read-only\"\n"));
+    // Recorded from exact 0.159.0 against the credential-free loopback
+    // provider. Only provider label, scratch paths, and IDs are normalized;
+    // the approval and sandbox settings are the native readback unchanged.
+    let readback: Value = serde_json::from_str(include_str!("thread-start-readback.json")).unwrap();
+    assert_eq!(c.thread_readback(&readback).unwrap(), "thread1");
+    for (key, value) in [
+        ("approvalPolicy", json!("never")),
+        ("approvalsReviewer", json!("user")),
+        ("approvalsReviewer", Value::Null),
+        ("sandbox", json!({"type":"dangerFullAccess"})),
+        ("sandbox", json!({"type":"readOnly","networkAccess":true})),
+    ] {
+        let mut changed = readback.clone();
+        changed[key] = value;
+        assert!(c.thread_readback(&changed).is_err(), "{key}");
+    }
+    for key in ["parentThreadId", "forkedFromId"] {
+        let mut changed = readback.clone();
+        changed["thread"][key] = json!("foreign-thread");
+        assert!(c.thread_readback(&changed).is_err(), "{key}");
+    }
+}
+
+#[test]
+fn initialization_requires_explicit_gateway_sign_in() {
+    let params = initialize_params();
+    assert_eq!(params["capabilities"]["explicitGatewayOauth"], true);
+    assert_eq!(params["capabilities"]["requestAttestation"], false);
+    // New auth messages do not grant the provider an implicit recovery path.
+    let notice = json!({"method":"account/gatewayOAuth/changed","params":{"providerId":"openai","status":"started","authUrl":"https://synthetic.invalid/auth","error":null}});
+    assert!(codec().startup_notice(&notice).is_err());
+    assert!(started().accept(notice).is_err());
+}
+
+#[test]
 fn exact_native_echo_trace_replays_with_current_wire_shapes() {
+    // Refreshed from the exact 0.159.0 binary with mandatory Auto Review.
+    replay_native_echo_trace(include_str!("wire-echo-frames.json"));
+}
+
+// Codex 0.157.1 and 0.158.0 recorded the current echo trace apart from
+// timestamps and IDs.
+#[test]
+fn previous_supported_build_echo_trace_replays_with_current_controls() {
+    replay_native_echo_trace(include_str!("wire-echo-frames-0.156.1.json"));
+}
+
+fn replay_native_echo_trace(trace: &str) {
     // Recorded from the qualified binary; IDs and the synthetic echo tool are
     // mapped to stable local names. No account data or model prompts retained.
-    let frames: Vec<Value> = serde_json::from_str(include_str!("wire-echo-frames.json")).unwrap();
+    let frames: Vec<Value> = serde_json::from_str(trace).unwrap();
     let mut c = codec();
     c.initialized = true;
     c.thread_id = Some("thread1".into());
@@ -334,6 +1081,59 @@ fn quota_read_prefers_multi_bucket_data_without_inventing_recovery() {
         .unwrap()
         .is_empty()
     );
+}
+
+#[test]
+fn reset_credit_consume_only_spends_on_exhaustion_and_stays_bounded() {
+    let pool = Id::new("account1").unwrap();
+    let limited = json!({"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":100,"resetsAt":2000}}},
+        "ordinaryUsageAllowed":false,
+        "rateLimitResetCredits":{"availableCount":1,"credits":[{"id":"credit-one","resetType":"primary","grantedAt":1}]}});
+    let points = parse_quotas(&limited, &pool, 1000).unwrap();
+    let request = reset_credit_consume(&limited, &pool, &points)
+        .unwrap()
+        .unwrap();
+    assert_eq!(request["creditId"], "credit-one");
+    assert_eq!(request["idempotencyKey"].as_str().unwrap().len(), 64);
+    // The same account, credit, and window reproduce one key; a new credit or
+    // window is a new spend.
+    assert_eq!(
+        reset_credit_consume(&limited, &pool, &points)
+            .unwrap()
+            .unwrap()["idempotencyKey"],
+        request["idempotencyKey"]
+    );
+    // Under-limit or credit-less reads never spend.
+    let healthy = json!({"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":40,"resetsAt":2000}}},
+        "rateLimitResetCredits":{"availableCount":1,"credits":[{"id":"credit-one"}]}});
+    let points = parse_quotas(&healthy, &pool, 1000).unwrap();
+    assert!(
+        reset_credit_consume(&healthy, &pool, &points)
+            .unwrap()
+            .is_none()
+    );
+    let broke = json!({"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":100,"resetsAt":2000}}},
+        "rateLimitResetCredits":{"availableCount":0,"credits":[]}});
+    let points = parse_quotas(&broke, &pool, 1000).unwrap();
+    assert!(
+        reset_credit_consume(&broke, &pool, &points)
+            .unwrap()
+            .is_none()
+    );
+    // A missing credits field is the pre-feature response shape, not an error.
+    let no_field =
+        json!({"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":100,"resetsAt":2000}}}});
+    let points = parse_quotas(&no_field, &pool, 1000).unwrap();
+    assert!(
+        reset_credit_consume(&no_field, &pool, &points)
+            .unwrap()
+            .is_none()
+    );
+    // Malformed credit shapes and oversized lists still fail closed.
+    let bad = json!({"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":100,"resetsAt":2000}}},
+        "rateLimitResetCredits":{"availableCount":1,"credits":"yes"}});
+    let points = parse_quotas(&bad, &pool, 1000).unwrap();
+    assert!(reset_credit_consume(&bad, &pool, &points).is_err());
 }
 
 #[test]
@@ -417,9 +1217,12 @@ fn completed_status_alone_cannot_claim_a_successful_answer() {
 async fn preplanted_config_or_catalog_hardlinks_are_rejected_before_initialization() {
     for target in ["config", "catalog"] {
         let directory = tempfile::tempdir().unwrap();
-        let base =
-            crate::private::directory(&directory.path().canonicalize().unwrap().join("private"))
-                .unwrap();
+        let base = crate::private::directory(
+            &xcb_core::canonical(directory.path())
+                .unwrap()
+                .join("private"),
+        )
+        .unwrap();
         let cwd = crate::private::directory(&base.join("work")).unwrap();
         let profile = crate::private::directory(&base.join("profile")).unwrap();
         let catalog = base.join("catalog.json");
@@ -497,7 +1300,8 @@ fn broker_guidance_keeps_native_sandbox_read_only_and_zero_tool_launches_empty()
         let protocol = CodexProtocol::new(options).unwrap();
         let request = protocol.thread_request("Synthetic host instructions");
         assert_eq!(request["sandbox"], "read-only");
-        assert_eq!(request["approvalPolicy"], "never");
+        assert_eq!(request["approvalPolicy"], "on-request");
+        assert_eq!(request["config"]["approvals_reviewer"], "auto_review");
         assert_eq!(request["cwd"], "/synthetic/work");
         assert_eq!(request["runtimeWorkspaceRoots"], json!([]));
         assert_eq!(request["selectedCapabilityRoots"], json!([]));
@@ -527,9 +1331,21 @@ fn broker_guidance_keeps_native_sandbox_read_only_and_zero_tool_launches_empty()
                 names,
                 [
                     "workspace_exec",
+                    "xcb_tools_list",
+                    "xcb_tools_call",
+                    "xcb_tools_image",
+                    "xcb_require_capability",
                     "xcb_swarm_status",
+                    "xcb_context_query",
                     "xcb_message_list",
                     "xcb_message_send",
+                    "xcb_backlog_list",
+                    "xcb_backlog_get",
+                    "xcb_backlog_add",
+                    "xcb_backlog_update",
+                    "xcb_memory_recent",
+                    "xcb_backlog_complete",
+                    "xcb_memory_search",
                     "workspace_list",
                     "workspace_read",
                     "workspace_search",
@@ -546,4 +1362,303 @@ fn broker_guidance_keeps_native_sandbox_read_only_and_zero_tool_launches_empty()
             assert!(!instructions.contains("workspace_write"));
         }
     }
+}
+
+#[test]
+fn delta_bursts_beyond_legacy_frame_fixtures_are_streamed_load() {
+    // --include-partial-messages style streaming makes every delta a frame;
+    // the codec backstop sits far above a long turn, so 65,536+ deltas are
+    // ordinary load, never a protocol error.
+    let mut c = started();
+    c.accept(notice(
+        "item/started",
+        json!({"id":"answer1","type":"agentMessage","text":"","phase":"commentary"}),
+    ))
+    .unwrap();
+    let frame = serde_json::to_vec(&json!({
+        "method":"item/agentMessage/delta",
+        "params":{"threadId":"thread1","turnId":"turn1","itemId":"answer1","delta":"x"}
+    }))
+    .unwrap();
+    let mut deltas = 0usize;
+    for _ in 0..70_000 {
+        let value = c.envelope(&frame).unwrap();
+        let (events, replies) = c.accept(value).unwrap();
+        assert!(replies.is_empty());
+        deltas += events
+            .iter()
+            .filter(|event| matches!(event, Event::Delta { .. }))
+            .count();
+    }
+    assert_eq!(deltas, 70_000);
+    assert!(c.frames > 65_536 && c.frames < MAX_FRAMES);
+}
+
+#[test]
+fn usage_tolerates_new_provider_counters_while_reconciling_known_ones() {
+    let mut value = json!({"totalTokens":150,"inputTokens":120,"cachedInputTokens":80,"cacheWriteInputTokens":10,"outputTokens":30,"reasoningOutputTokens":20});
+    value["futureProviderCounter"] = json!(9);
+    let (counters, total) = usage(&value).unwrap();
+    assert_eq!(total, 150);
+    assert_eq!(counters.output, 30);
+    // Drift is only tolerated on top of counters that still reconcile: a
+    // broken total or a missing required counter still fails closed.
+    for broken in [
+        json!({"totalTokens":151,"inputTokens":120,"cachedInputTokens":80,"outputTokens":30,"reasoningOutputTokens":20,"futureProviderCounter":9}),
+        json!({"totalTokens":150,"inputTokens":120,"cachedInputTokens":80,"outputTokens":30,"futureProviderCounter":9}),
+        json!({"totalTokens":150,"inputTokens":120,"cachedInputTokens":130,"cacheWriteInputTokens":10,"outputTokens":30,"reasoningOutputTokens":20}),
+    ] {
+        assert!(usage(&broken).is_err());
+    }
+    // An unreconciled total reports the provider's own counters so the next
+    // drift incident is evidence, not an unlabeled failure.
+    let error = usage(
+        &json!({"totalTokens":200,"inputTokens":120,"cachedInputTokens":80,"outputTokens":30}),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            Error::CodexUsage {
+                input: 120,
+                output: 30,
+                total: 200
+            }
+        ),
+        "{error:?}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("input 120 + output 30 != total 200")
+    );
+}
+
+#[test]
+fn failed_terminal_classifies_and_abandons_unresolved_tool_calls() {
+    // A failed turn with an in-progress dynamic tool call hides behind no
+    // protocol error: the account settles from the provider's own category.
+    let mut c = started();
+    c.accept(notice("item/started", call_item())).unwrap();
+    let (events, replies) = c
+        .accept(json!({"method":"turn/completed","params":{"threadId":"thread1","turn":{"id":"turn1","status":"failed","error":{"codexErrorInfo":"usageLimitExceeded","message":"SYNTHETIC_SECRET"}}}}))
+        .unwrap();
+    assert!(replies.is_empty());
+    assert_eq!(
+        events.iter().find_map(|event| match event {
+            Event::Quota { failure, .. } => *failure,
+            _ => None,
+        }),
+        Some(Failure::AccountQuota)
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::Result {
+            terminal: Terminal::Failed,
+            ..
+        }
+    )));
+    assert!(c.completed && c.calls["call1"].completed);
+    // An interrupted turn abandons the same way; a completed turn still
+    // requires every call resolved.
+    let mut c = started();
+    c.accept(notice("item/started", call_item())).unwrap();
+    let (events, _) = c
+        .accept(json!({"method":"turn/completed","params":{"threadId":"thread1","turn":{"id":"turn1","status":"interrupted","error":null}}}))
+        .unwrap();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::Result {
+            terminal: Terminal::Cancelled,
+            ..
+        }
+    )));
+    assert!(c.calls["call1"].completed);
+    // Codex 0.159.0 documents `turn.error` for interrupted turns too. The
+    // interruption still settles as cancelled, and the error's text is not
+    // surfaced.
+    let mut c = started();
+    c.accept(notice("item/started", call_item())).unwrap();
+    let (events, _) = c
+        .accept(json!({"method":"turn/completed","params":{"threadId":"thread1","turn":{"id":"turn1","status":"interrupted","error":{"codexErrorInfo":"tooManyDenials","message":"SYNTHETIC_SECRET user@example.invalid"}}}}))
+        .unwrap();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::Result {
+            terminal: Terminal::Cancelled,
+            ..
+        }
+    )));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Quota { .. }))
+    );
+    assert!(!format!("{events:?}").contains("SYNTHETIC"));
+    let mut c = started();
+    c.accept(notice("item/started", call_item())).unwrap();
+    assert!(
+        c.accept(json!({"method":"turn/completed","params":{"threadId":"thread1","turn":{"id":"turn1","status":"completed","error":null}}}))
+            .is_err()
+    );
+}
+
+#[test]
+fn early_turn_errors_classify_before_turn_admission() {
+    // A turn announced by turn/started while turn/start is still pending can
+    // already fail; the classification must survive admission never arriving.
+    let early = |codec: &mut CodexProtocol| {
+        codec.thread_id = Some("thread1".into());
+        codec.turn_rpc = Some(7);
+        codec
+            .accept(json!({"method":"turn/started","params":{"threadId":"thread1","turn":{"id":"turn9"}}}))
+            .unwrap();
+    };
+    let mut c = codec();
+    early(&mut c);
+    let (events, _) = c
+        .accept(json!({"method":"error","params":{"threadId":"thread1","turnId":"turn9","willRetry":false,"error":{"codexErrorInfo":"usageLimitExceeded","message":"SYNTHETIC_SECRET"}}}))
+        .unwrap();
+    assert_eq!(
+        events.iter().find_map(|event| match event {
+            Event::Quota { failure, .. } => *failure,
+            _ => None,
+        }),
+        Some(Failure::AccountQuota)
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::Diagnostic(_)))
+    );
+    // Authentication classifies the same way; unknown turn scopes still fail.
+    let mut c = codec();
+    early(&mut c);
+    let (events, _) = c
+        .accept(json!({"method":"error","params":{"threadId":"thread1","turnId":"turn9","willRetry":false,"error":{"codexErrorInfo":"unauthorized","message":"SYNTHETIC_SECRET"}}}))
+        .unwrap();
+    assert_eq!(
+        events.iter().find_map(|event| match event {
+            Event::Quota { failure, .. } => *failure,
+            _ => None,
+        }),
+        Some(Failure::Authentication)
+    );
+    // Codex 0.159.0's `tooManyDenials` is a policy outcome on the error
+    // notification as well, in both the string and nested tag forms.
+    for code in [
+        json!("tooManyDenials"),
+        json!({"tooManyDenials": {"secret": "SYNTHETIC_NESTED_SECRET"}}),
+    ] {
+        let mut c = codec();
+        early(&mut c);
+        let (events, _) = c
+            .accept(json!({"method":"error","params":{"threadId":"thread1","turnId":"turn9","willRetry":false,"error":{"codexErrorInfo":code,"message":"SYNTHETIC_SECRET"}}}))
+            .unwrap();
+        assert_eq!(
+            events.iter().find_map(|event| match event {
+                Event::Quota { failure, .. } => *failure,
+                _ => None,
+            }),
+            Some(Failure::Policy)
+        );
+        let diagnostic = events
+            .iter()
+            .find_map(|event| match event {
+                Event::Diagnostic(value) => Some(serde_json::to_value(value).unwrap()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            diagnostic
+                .as_str()
+                .unwrap()
+                .contains("provider policy rejected")
+        );
+        assert!(!diagnostic.as_str().unwrap().contains("SYNTHETIC"));
+    }
+    for mut notification in [
+        json!({"method":"error","params":{"threadId":"thread1","turnId":"other","willRetry":false,"error":{"message":"x"}}}),
+        json!({"method":"error","params":{"threadId":"foreign","turnId":"turn9","willRetry":false,"error":{"message":"x"}}}),
+    ] {
+        let mut c = codec();
+        early(&mut c);
+        assert!(c.accept(notification.clone()).is_err());
+        notification["params"]["turnId"] = json!("turn9");
+        // Without an announced early turn the pending RPC alone is not scope.
+        assert!(codec().accept(notification).is_err());
+    }
+}
+
+#[test]
+fn unrecognized_id_less_notifications_are_drift_not_turn_failures() {
+    let (events, _) = started()
+        .accept(json!({"method":"telemetry/futureShape","params":{"threadId":"thread1","turnId":"turn1","data":{"x":1}}}))
+        .unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::Diagnostic(_)))
+    );
+    // Authority surfaces stay fail-closed: reroutes, native items, account or
+    // auth recovery, and unknown turn operations remain protocol errors.
+    for method in [
+        "model/reroute",
+        "account/chatgptAuthTokens/refresh",
+        "item/futureExecutable",
+        "turn/restarted",
+    ] {
+        assert!(
+            started()
+                .accept(json!({"method":method,"params":{"threadId":"thread1","turnId":"turn1"}}))
+                .is_err(),
+            "{method}"
+        );
+    }
+}
+
+#[test]
+fn init_phase_account_notices_are_bounded_and_informational() {
+    // Live 0.156.1 pushes these while an init-phase RPC awaits its response;
+    // the credential-free boundary fixtures never sign in, so the wire trace
+    // cannot pin them. `account/read` and `account/rateLimits/read` results
+    // remain authoritative.
+    let mut c = codec();
+    c.startup_notice(&json!({"method":"account/updated","params":{"authMode":"chatgpt","planType":"prolite"},"emittedAtMs":1}))
+        .unwrap();
+    c.startup_notice(
+        &json!({"method":"account/updated","params":{"authMode":null,"planType":null}}),
+    )
+    .unwrap();
+    // Codex 0.158.0 adds the `promax` plan; plan names stay display text.
+    c.startup_notice(
+        &json!({"method":"account/updated","params":{"authMode":"chatgpt","planType":"promax"}}),
+    )
+    .unwrap();
+    c.startup_notice(&json!({"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":100.0}}}}))
+        .unwrap();
+    c.startup_notice(&json!({"method":"account/rateLimits/updated","params":{"rateLimits":null}}))
+        .unwrap();
+    // Shape drift still fails closed.
+    for frame in [
+        json!({"method":"account/updated","params":{"authMode":"chatgpt","planType":"prolite","extra":1}}),
+        json!({"method":"account/updated","params":{"authMode":42,"planType":"prolite"}}),
+        json!({"method":"account/rateLimits/updated","params":{"rateLimits":"soon"}}),
+        json!({"method":"account/rateLimits/updated","params":{"other":{}}}),
+        json!({"method":"model/reroute","params":{}}),
+        json!({"method":"thread/status/changed","params":{"threadId":"thread1","status":{"type":"idle"}}}),
+    ] {
+        assert!(codec().startup_notice(&frame).is_err(), "{frame}");
+    }
+}
+
+#[test]
+fn account_updated_is_tolerated_mid_session_without_turn_effects() {
+    let (events, outgoing) = started()
+        .accept(json!({"method":"account/updated","params":{"authMode":"chatgpt","planType":"pro"},"emittedAtMs":2}))
+        .unwrap();
+    assert!(events.is_empty() && outgoing.is_empty());
+    assert!(started()
+        .accept(json!({"method":"account/updated","params":{"authMode":"chatgpt","planType":"pro","scopes":[]}}))
+        .is_err());
 }

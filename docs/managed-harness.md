@@ -1,9 +1,87 @@
 # Managed harness
 
-Native XCB separates a user's control conversations from provider worker
-sessions. Each terminal has its own transcript and draft. Conversations share
-durable tasks; each task retains its originating conversation, workspace,
-original goal, explicit follow-ups, worker history, and transition receipts.
+The historical examples in this document describe the removed terminal
+surface. Current integrations use the JSON/SDK task and projection contracts
+in [route.md](route.md) and [vision.md](vision.md); do not add new `xcb chat`
+or TUI dependencies.
+
+The managed harness runs the thread, its tasks, and the background supervisor.
+The self-tuning version of the harness, which would propose and keep its own
+routing rules, is in development; the current build does not run
+self-modifying routing policies.
+
+Native xcb separates your conversations from provider worker sessions. Plain
+`xcb` opens the thread: one conversation per machine whose tasks can run in any
+of your project directories. `xcb chat --new` opens a project view, a
+conversation whose tasks all run in one directory. Each terminal has its own
+transcript and draft. Conversations share saved tasks; each task keeps its
+originating conversation, workspace, original goal, follow-ups, worker history,
+and a local record that `xcb tasks verify` replays. A task's workspace never
+changes after it is created.
+
+[Source-inspection recipes](context-recipes.md) use resumable ALGAL programs to
+answer subquestions over saved excerpts and combine their reports. The children
+use the same project grants, provider checks and account controls as other tasks.
+
+## Choosing a task's directory
+
+In a project view every task runs in the view's directory. In the thread, xcb
+binds each prompt to a directory when the task is created and records why. The
+first rule that applies wins:
+
+1. A directory given explicitly: a remote dispatch path or name, or
+   `--workspace` on the CLI.
+2. A path in the prompt, such as `cd /repo`, `in ~/src/app`, `@/repo`, or a
+   file path whose directory is used. Paths inside a repository bind to the
+   repository root, or to a worktree or nested repository inside it.
+3. A project name in the prompt, matched as a whole word against registered
+   names and repository names (at least three characters; common words such as
+   `site`, `docs`, `app`, `api`, and `test` are ignored).
+4. The project you focused with `/workspace`.
+5. The project of your last thread task when it changed within six hours and
+   the prompt reads as a continuation: “continue”, “keep going”, a request to
+   resume, or a prompt of 12 words or fewer that names no project.
+6. The directory you launched xcb from (or `--cwd`), snapped to its repository
+   root, unless it holds other projects.
+7. The most recent thread task within six hours, else the most recently used
+   project within 30 days.
+
+The reply names the directory and the reason, for example
+“Started Fix the parser in `app` · named `app` · /workspace to move”, and the
+task row, `xcb workspaces why <task>`, and the task's local record keep the
+source, confidence, reason, and any alternatives.
+
+xcb asks instead of guessing, saves nothing, and keeps your draft when a prompt
+names a directory it has not registered (the picker offers it as “new”, and
+picking it registers it), when a name or several paths match more than one
+project, and when no rule applies. Schedules and backlog items created in the
+thread never use rules 2 to 7: they need a project you named, the focused
+project, or the selected task's directory, because they can run later without
+you. The same holds for `/project` and `/memory`.
+
+A low-confidence choice (rule 7, or a name whose repository has several
+checkouts when none is focused or the launch directory) and a prompt path or
+name that differs from the focused project wait 8 seconds before they start.
+The task shows `→ app · starts in 6s · /workspace go`; use
+`/workspace <name|path>` to move it or `/workspace go` to start it now. Moving
+cancels the unstarted task and creates it again in the new directory. A task
+that has started, and a task created by a grant, schedule, program, daemon, or
+worker, cannot move; cancel it instead. Remote and CLI tasks never wait.
+
+Only you register a directory: `xcb workspaces add`, `/workspace add`, picking a
+“new” picker entry, a remote dispatch or CLI `--workspace` path, a grant, or a
+memory binding. Launching the thread from a directory registers it (or its
+repository root) unless it looks like a directory of projects: it holds
+registered projects or repositories, or it sits directly in your home, such as
+`~/Documents`. `/workspace add <dir>` registers that exact directory. Text in a prompt or a
+worker's output never registers one. xcb refuses
+`/`, your home directory and its parents, every hidden directory in your home
+(`~/.ssh`, `~/.config`, …) and everything inside one, `~/Library`, xcb's own
+state directories, and system directories such as `/usr`, `/etc`, `/System`,
+`/tmp`, and `/var`. A directory that holds other registered projects and is not
+itself a repository, such as `~/Documents`, is never chosen automatically;
+register it with `xcb workspaces add` to focus it or name it explicitly. Before each launch xcb
+checks the directory again and fails the task if it moved or was replaced.
 
 ## Responsibilities
 
@@ -11,16 +89,21 @@ original goal, explicit follow-ups, worker history, and transition receipts.
 | --- | --- |
 | Managed store | Atomic intake, task revisions, replies, mailbox delivery, receipt history |
 | Supervisor | Dispatch, bounded continuation, cancellation, restart reconciliation |
-| Router | Rank already eligible account/model routes using explicit heuristics |
+| Router | Classify task capability demand and rank already eligible account/model routes |
 | Kernel and runner | Workspace/account custody, provider admission, effects, settlement |
 | ALGAL | Deterministic, replayable recording of bounded transition records |
-| Optional judge | Rank eligible routes or evaluate continuation after safety gates |
+| Optional judge | Classify task capability demand or evaluate continuation after safety gates |
+| Reflexes | Learned, replayable route tier and turn-settlement decisions ([reflexes.md](reflexes.md)) |
 
 The pinned ALGAL program records its input. Rust enforces the state machine,
 admission and custody contracts. Receipt replay proves consistency of these
 local records; it does not prove task correctness, provider attestation, or
 that an external effect occurred. This implementation does not execute
-self-modifying orchestration policies.
+self-modifying orchestration policies. [Reflexes](reflexes.md) learn
+parameters for two bounded decisions (model tier and whether a completed turn
+stopped short) from operator behavior; their programs are effect-free, never
+rewrite themselves, and a learned generation is promoted only after it wins
+a forward trial on labels it was not fitted on.
 
 ## Task lifecycle
 
@@ -31,8 +114,10 @@ the direct-session continuation loop beneath the supervisor.
 
 After settlement the supervisor records one of:
 
-- `completed`: a settled, completed provider turn. Checks remain worker-reported.
-- `needs_input`: a worker question or an exhausted automatic dispatch budget.
+- `completed`: a settled, completed provider turn that replied or changed
+  files. Checks remain worker-reported.
+- `needs_input`: a worker question, an exhausted automatic dispatch budget, or
+  a completed turn with no reply and no file changes.
 - `queued`: a permitted continuation or checkpointed quota failover.
 - `cancelled`: confirmed cancellation or cancellation before dispatch.
 - `failed`: a definite failure without completion.
@@ -44,21 +129,46 @@ and retained images accompany a new provider route. Exhausted history or
 context limits fail the individual task visibly; they do not authorize
 truncating the user's goal or retrying without bound.
 
+A dispatch on a session whose transcript provably carries the original task
+sends only the continuation delta — the checkpoint and inputs added since —
+rather than the full original prompt; a completed run records that carry
+(`context_carried`, `delivered_inputs`), and a fresh or replaced session
+always receives the complete contract.
+
 Worker outcomes are recorded atomically with native run settlement. Restart
 reconciliation matches the exact input sequence, session revision and
 transcript boundary. An idle session alone cannot distinguish completion from
 a turn limit. Legacy runs lacking terminal evidence remain uncertain.
 
+Host execution errors and recognized provider errors retain a bounded,
+host-selected diagnostic with their native outcome. Managed task details show
+it after settlement or restart. Raw provider errors, stderr, credentials and
+operating-system paths are excluded.
+Diagnostics explain failures; they do not authorize retries or release custody.
+
 ## Concurrency and effects
 
 One detached supervisor owns a state root. Native execution also enforces
 account custody and workspace exclusion, including direct sessions and other
-terminals. Independent workspaces can run concurrently. Tasks in the same
-workspace execute serially; a worker must not wait synchronously for a queued
-peer that cannot acquire that workspace.
+terminals. Independent workspaces can run concurrently, including tasks for
+different projects in one thread. Tasks in the same workspace execute serially,
+and so do a workspace and a directory inside it, such as `/repo` and
+`/repo/site`. A worker must not wait synchronously for a queued peer that cannot
+acquire that workspace. Each worker is confined to its task's workspace
+exactly as in a project view; the thread does not widen what a worker can read
+or write.
+
+A per-task dispatch or settlement fault is isolated to that task, recorded
+as a bounded detail, and retried with backoff; it does not stop the other
+workers. Lock, identity and store failures stay fatal, as does a sustained
+run of ticks that cannot even list tasks. The last supervisor-level fault
+is kept in a bounded file the next client surfaces. Task and session list
+readers skip a corrupt row rather than fail the page; single-row reads and
+transitions stay strict, and skipped task rows are counted for the view.
 
 Cancellation belongs to the originating conversation unless the user names a
-task. Closing a terminal detaches. Active managed worker sessions are protected
+task. In the thread, a bare cancel with several candidates asks which task,
+labelled with each task's project. Closing a terminal detaches. Active managed worker sessions are protected
 from session removal/pruning. A replacement supervisor binary drains settled
 workers before retiring; clients reject an incompatible or unidentified owner
 instead of silently reusing it or signalling an unverified PID.
@@ -70,6 +180,49 @@ body or recipient. Messages persist across provider handoff; their content
 does not widen task authority. The injected inbox is bounded and the complete
 mailbox remains available through paginated `xcb_message_list`.
 
+## Storage bounds and ephemeral state
+
+The managed database is bounded rather than open-ended. Retention runs at
+store open at most once every 24 hours (a `retention.stamp` file marks the
+last pass) and is rechecked hourly by a live supervisor; an oversized open
+always runs it first. Each pass deletes, in small immediate transactions:
+
+- conversation messages and mailbox rows older than 30 days;
+- tasks in a settled terminal state (`completed`, `failed`, `cancelled`)
+  older than 30 days, together with their receipts and mailbox rows;
+- receipts whose task no longer exists;
+- the oldest messages beyond 4,096 per conversation.
+
+Nonterminal tasks, unresolved uncertain tasks, the last task referenced by a
+schedule, and the receipt chains of retained tasks are never removed. Uncertain
+history must remain visible so retention cannot silently unblock recurrence. A pass ends with `wal_checkpoint(TRUNCATE)` plus a bounded
+incremental vacuum, and an oversized open attempts one full `VACUUM`
+rebuild so a recoverable database is not degraded permanently.
+
+The combined main database and WAL file is capped at 4 GiB live
+(`MAX_DB_BYTES`); the absolute open ceiling is 16 GiB so retention can run
+under custody. If the file is still over 4 GiB after retention and the
+rebuild attempt, the store opens read-only instead of panicking: reads keep
+working, every write path returns one bounded `Unavailable` error, and a
+supervisor fault notice explains that old history must be removed before
+writes resume.
+
+Worker progress is ephemeral, not durable task state. Each worker's
+observer records the latest host-selected beat (tool name, host notice, or
+subagent label — never raw provider text) behind a mutex; the supervisor
+flushes `managed/progress.json` at a bounded cadence of about two seconds
+and drops beats for tasks that left the active set. The view merges a beat
+into a task's detail only while it is newer than the task's last durable
+transition, so settlement detail always supersedes it. Beats never enter
+ALGAL receipt chains, are deleted at supervisor start and shutdown, and the
+view stamp follows the file's mtime so clients refresh when it changes.
+
+Managed-owned native sessions carry an atomic `managed_task` marker from
+creation. Startup reconciliation sweeps a marked session only when no task
+references it (current or worker history), no unsettled run holds custody,
+and it has no transcript — orphans left between session creation and
+`prepare` are reclaimed; unmanaged sessions (`None`) are never swept.
+
 ## Routing and offers
 
 Provider/runtime admission, credentials, account availability and route
@@ -77,6 +230,18 @@ exclusions are applied before shortlisting and ranking models. Explicit
 provider directives constrain both dispatch and route preview. A learned
 workspace preference is a soft ranking input. Relative quality, cost and
 latency values are heuristics, not measured quality or billing guarantees.
+When no admitted, enabled, credentialed account exists, a queued task says
+so and waits for the user to add or reconnect one; a temporary route
+shortage retries with backoff.
+
+The optional judge supplies six typed classifier answers in one call bounded
+to five seconds. The native port of ALGAL's fitted classifier selects capability
+demand; deterministic ordering remains available when the call is absent,
+stalled, failing or invalid. Substantial prompts independently require the
+highest known eligible quality tier. Judgment never qualifies a provider or
+widens a hard constraint. See [quota routing](quota-routing.md) for policy and
+provenance, and [persistent project agents](project-agents.md) for backlog,
+schedules, attention and recent working memory.
 
 Public promotions are bounded, expiring observations with source digests.
 They do not prove a user's entitlement and cannot qualify an unadmitted

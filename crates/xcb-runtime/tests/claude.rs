@@ -43,13 +43,123 @@ fn stream_deltas_and_terminal_failures_have_distinct_types() {
 }
 
 #[test]
+fn structured_permission_denials_are_policy_stops_even_on_success() {
+    use serde_json::json;
+    for reason in ["classifier", "mode", "rule", "other"] {
+        let frame = json!({"type":"system","subtype":"permission_denied",
+            "tool_name":"workspace_write","tool_use_id":"denied-1",
+            "decision_reason_type":reason,"message":"SYNTHETIC_PRIVATE_DETAIL"});
+        assert!(matches!(
+            parse_event(&serde_json::to_vec(&frame).unwrap()).unwrap(),
+            Event::PermissionDenied
+        ));
+    }
+    for subtype in ["success", "error_max_turns", "error_during_execution"] {
+        let frame = json!({"type":"result","subtype":subtype,"is_error":false,
+        "result":"Next, continue the changes.","permission_denials":[{
+            "tool_name":"workspace_write","tool_use_id":"denied-1",
+            "tool_input":{"text":"SYNTHETIC_PRIVATE_DETAIL"}
+        }]});
+        assert!(matches!(
+            parse_event(&serde_json::to_vec(&frame).unwrap()).unwrap(),
+            Event::Result {
+                terminal: Terminal::Failed,
+                failure: Some(Failure::Policy),
+                ..
+            }
+        ));
+    }
+    // A provider's prose is not authority to switch, retry, or classify a
+    // permission outcome. Only its structured decision changes the facts.
+    let prose = json!({"type":"result","subtype":"success","is_error":false,
+        "result":"The example says permission denied.","permission_denials":[]});
+    assert!(matches!(
+        parse_event(&serde_json::to_vec(&prose).unwrap()).unwrap(),
+        Event::Result {
+            terminal: Terminal::Completed,
+            failure: None,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn observed_auto_mode_denial_cannot_be_misreported_as_success() {
+    let trace: serde_json::Value =
+        serde_json::from_str(include_str!("../src/claude-permission-denial-frames.json")).unwrap();
+    let frames = trace["frames"].as_array().unwrap();
+    assert!(matches!(
+        parse_event(&serde_json::to_vec(&frames[0]).unwrap()).unwrap(),
+        Event::PermissionDenied
+    ));
+    assert!(matches!(
+        parse_event(&serde_json::to_vec(&frames[1]).unwrap()).unwrap(),
+        Event::Result {
+            terminal: Terminal::Failed,
+            failure: Some(Failure::Policy),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn malformed_denial_records_do_not_become_successful_results() {
+    use serde_json::json;
+    for denial in [
+        json!(null),
+        json!({}),
+        json!([{}]),
+        json!([{
+            "tool_name":"workspace_write","tool_use_id":"denied-1","tool_input":null
+        }]),
+    ] {
+        let frame = json!({"type":"result","subtype":"success","is_error":false,
+            "result":"done","permission_denials":denial});
+        assert!(parse_event(&serde_json::to_vec(&frame).unwrap()).is_err());
+    }
+}
+
+#[test]
+fn unqualified_children_cannot_claim_root_text_tools_or_completion() {
+    use serde_json::json;
+    for mut frame in [
+        json!({"type":"assistant","message":{"content":[{"type":"text","text":"child answer"}]}}),
+        json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"child-tool",
+            "name":"mcp__xcb__workspace_write","input":{"path":"target","text":"child"}}]}}),
+        json!({"type":"result","subtype":"success","is_error":false,"result":"child done"}),
+    ] {
+        frame["parent_tool_use_id"] = json!("parent-agent-call");
+        assert!(parse_event(&serde_json::to_vec(&frame).unwrap()).is_err());
+    }
+}
+
+#[test]
 fn malformed_recognized_events_refuse_and_unknown_events_are_inert() {
     assert!(parse_event(br#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":7}}}"#).is_err());
     assert!(matches!(
         parse_event(br#"{"type":"future_notification"}"#).unwrap(),
         Event::Notice
     ));
-    assert!(parse_event(br#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","utilization":2.0}}"#).is_err());
+    // Telemetry drift is not malformed: a rejection without a recognizable
+    // window still classifies its quota failure (nothing is recordable), and
+    // an out-of-range meter for a known window clamps to exhaustion.
+    assert!(matches!(
+        parse_event(br#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","utilization":2.0}}"#).unwrap(),
+        Event::Quota {
+            ref observations,
+            failure: Some(Failure::AccountQuota),
+            ..
+        } if observations.is_empty()
+    ));
+    assert!(matches!(
+        parse_event(br#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour","utilization":2.0}}"#).unwrap(),
+        Event::Quota {
+            ref observations,
+            failure: Some(Failure::AccountQuota),
+            ..
+        } if observations.len() == 1 && observations[0].window == "five_hour" && observations[0].utilization == 1.0
+    ));
+    assert!(parse_event(br#"{"type":"rate_limit_event"}"#).is_err());
 }
 
 #[test]

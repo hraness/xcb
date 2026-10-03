@@ -10,7 +10,7 @@ struct Fixture {
 
 async fn fixture() -> Fixture {
     let directory = tempfile::tempdir().unwrap();
-    let root = directory.path().canonicalize().unwrap();
+    let root = xcb_core::canonical(directory.path()).unwrap();
     let state = private::directory(&root.join("state")).unwrap();
     let workspace = private::directory(&root.join("workspace")).unwrap();
     let managed = ManagedStore::open(&state).unwrap();
@@ -37,6 +37,7 @@ async fn fixture() -> Fixture {
             "claude/test".into(),
             "fixture".into(),
             0,
+            String::new(),
         )
         .await
         .unwrap();
@@ -122,6 +123,7 @@ async fn stale_source_snapshot_cannot_send_after_the_next_turn_starts() {
             "claude/test".into(),
             "next turn".into(),
             2,
+            String::new(),
         )
         .await
         .unwrap();

@@ -36,7 +36,7 @@ for binding, the first run, installation, and removal.
   --source /absolute/xcb --state /absolute/private/xcb-state \
   --xcb /absolute/path/to/installed/xcb \
   --provider-executable /absolute/path/to/native/claude \
-  --scheduler /absolute/path/to/hra-host-run \
+  --scheduler /absolute/path/to/host-run \
   --cargo /absolute/path/to/physical/cargo \
   --node /absolute/path/to/physical/node --bun /absolute/path/to/physical/bun \
   --account a_selected --model claude/sonnet/low
@@ -46,7 +46,7 @@ Binding creates a new mode0700 directory and mode0600 files. It performs only
 read-only native inspection/capability commands and Git/toolchain identification;
 it does not refresh an account, run Cargo gates, contact a provider, or schedule
 anything. Existing output directories are refused. Python3.9+, the macOS Rust
-installation under `/opt/homebrew`, and the HRA host scheduler are required by
+installation under `/opt/homebrew`, and the host scheduler are required by
 this initial implementation.
 
 After review and coordination with the native account owner, install explicitly:
@@ -64,7 +64,7 @@ normal I/O priority. Background throttling can make repeated executable hash
 verification exceed an otherwise healthy discovery deadline. Capability reads
 have a bounded 90-second deadline; every executable, provider, account and evidence
 pin is still checked. Inspection, help and renewal phase deadlines are unchanged.
-Heavy collection and provider phases still acquire their existing HRA leases.
+Heavy collection and provider phases still acquire their existing host leases.
 Launchd checks hourly while the user is logged in; it does not
 wake a sleeping Mac, renew while logged out, or promise network availability.
 An explicit `run --directory ...` uses exactly the same runner when needed.
@@ -123,7 +123,7 @@ looping or guessing that retry is safe.
 ## Identity limitation and activation gate
 
 The native qualifier accepts `--expected-generation`; this helper passes the
-pinned value on every challenge. Native XCB reads the existing generation under
+pinned value on every challenge. Native xcb reads the existing generation under
 its exclusive account lease **before the live challenge**, refuses missing or
 mismatched generations without creating a new one, and checks the generation
 again before publishing evidence. This prevents a concurrent explicit sign-in
@@ -146,7 +146,7 @@ is no automatic adoption of upgrades or replacement sign-ins.
 
 A command deadline, failed command, interruption, missing successful receipt,
 or uncertain join leaves `pending.json` in place. Future runs stop before any
-provider operation. Inspect the exact attempt and use XCB's documented custody
+provider operation. Inspect the exact attempt and use xcb's documented custody
 diagnostics; never infer recovery from an expired lease, missing PID, or elapsed
 time. This helper deliberately provides no command to clear uncertainty. A new
 binding is not a native recovery mechanism and cannot bypass a held account.
@@ -192,10 +192,10 @@ The helper does not inherit provider keys, proxy settings, Rust compiler
 overrides, or shell startup commands. The scheduler's public absolute invocation
 and complete child argv are preserved in each private intent; no shell is used.
 
-Run synthetic tests under the host scheduler. They never call native XCB, Cargo,
+Run synthetic tests under the host scheduler. They never call native xcb, Cargo,
 launchctl, or a provider:
 
 ```sh
-/absolute/path/to/hra-host-run --mode=shared --lane=mac-native --label=xcb-renewal-synthetic-tests -- \
+/absolute/path/to/host-run --mode=shared --lane=mac-native --label=xcb-renewal-synthetic-tests -- \
   /usr/bin/python3 -I /absolute/xcb/scripts/application-renewal.test.py
 ```

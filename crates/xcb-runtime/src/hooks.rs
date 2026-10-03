@@ -59,8 +59,7 @@ pub struct Hook {
 impl Hook {
     fn validate(&self) -> Result<()> {
         if !self.executable.is_absolute()
-            || self.sha256.len() != 64
-            || !self.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || !xcb_core::hex64_any(&self.sha256)
             || !(100..=300_000).contains(&self.timeout_ms)
         {
             return Err(xcb_core::Error::Invalid("hook").into());
@@ -121,7 +120,7 @@ pub fn add(root: &Path, event: Event, executable: &Path, timeout_ms: u64) -> Res
     if !executable.is_absolute() {
         return Err(Error::Unavailable("hook executable path must be absolute"));
     }
-    let executable = executable.canonicalize()?;
+    let executable = xcb_core::canonical(executable)?;
     if executable.starts_with(root) {
         return Err(Error::Unavailable(
             "hook executable must be outside xcb state",

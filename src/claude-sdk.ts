@@ -10,10 +10,10 @@ import { type BrokerToolName, type ToolBroker } from "./broker.ts";
 import { assertQualified, AgentStoppedError, type AgentAdapter, type AgentRunRequest, type RuntimeQualification } from "./runtime.ts";
 import { assertAbsolutePrivatePath, assertPrivateDirectory, assertPrivateStat, openPrivateRead, readFdBounded, sameFileIdentity, writeFileOnce } from "./private-file.ts";
 
-export const CLAUDE_SDK_VERSION = "0.3.268";
+export const CLAUDE_SDK_VERSION = "0.3.278";
 /** The CLI release the bundled SDK package declares as its build pair — the
  * manifest check uses this; installed-binary admission uses the floor below. */
-export const CLAUDE_SDK_CODE_VERSION = "2.1.268";
+export const CLAUDE_SDK_CODE_VERSION = "2.1.278";
 /** Oldest admitted installed Claude Code release within major 2. Admission
  * still binds the exact inspected version and executable SHA-256 into the
  * qualification record, and the init assertion re-proves the effective

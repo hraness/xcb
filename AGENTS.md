@@ -1,8 +1,14 @@
+<!-- browser-automation:start -->
+- Ordinary owned automated browser runs use versioned Chrome for Testing or the browser provisioned for the pinned Playwright version. Reject the installed auto-updating Chrome application, including explicit executable overrides and symlinks; never fall back to it when provisioning is missing. Report the resolved executable and browser version, and close owned contexts and browsers gracefully in cleanup. Attaching to an explicitly authorized user-owned browser is a separate operation: preserve its profile and lifetime. Keep regression checks for browser selection in the existing required checks; see [browser automation](https://github.com/hraness/.github/blob/main/BROWSER_AUTOMATION.md).
+- Never start the system Chrome app directly from an agent shell; use the repository's browser tooling and respect its scheduler and browser custody controls. For owned launches, pass `--mute-audio` and merge `PaintHolding,MacAppCodeSignClone` into any existing `--disable-features` value instead of adding a second switch. Finish owned process, context, and profile cleanup before releasing the browser lane. Never signal another holder or manipulate its lease to obtain a slot.
+- The sole native-runtime exception is Slopcamera’s documented signature-verified, version-bound, immutable task-owned Chrome snapshot, never a direct launch of the installed application. Its current integrity-bound launch contract must disable `MacAppCodeSignClone`; retain vendor identity verification, browser custody, graceful cleanup, and regression checks. Qualify the native fix with live clone-growth and cleanup evidence before activating this exception. It is not an executable override or fallback for ordinary automation; see [the native-runtime exception](https://github.com/hraness/.github/blob/main/BROWSER_AUTOMATION.md#slopcamera-native-runtime-exception).
+<!-- browser-automation:end -->
+
 # Contents
 
 - `crates/` owns the native xcb (Excalibur) Rust kernel, local runtime, Ratatui
   frontend, and CLI. Panes are bounded userspace data; executable hooks require
-  separate trust. Keep local metering separate from opt-in aiCharts publishing.
+  separate trust. Keep local metering separate from opt-in aicharts publishing.
 - `src/` owns provider-neutral routing, account leases, model selection,
   scoped tool contracts, the `router.ts` subscription-router entry point
   (`createSubscriptionRouter`) that bundles the lease store and qualified task
@@ -27,24 +33,36 @@
   endpoint; custom endpoints require an explicit environment key, and future
   backends own separate credential custody.
   `src/index.ts` is the package's complete public surface.
-- `src/cli/` is the standalone `xcb` terminal surface (`cli.ts` entry,
-  chat/run/resume/sessions/doctor/auth/judge/migrate commands) built on the same
+- `src/cli/` is the standalone `xcb-compat` terminal surface (`cli.ts` entry,
+  chat/run/resume/sessions/doctor/auth/judge commands) built on the same
   task runtime; `claude-task-adapter.ts` and `cli/sandbox.ts` own the
   seatbelted subscription route it drives. `cli/state.ts` resolves `~/.xcb`
-  (env `XCB_STATE`) and owns the explicit `migrate` copy from legacy
-  `~/.agentmixer`; SQLite `agentmixer_*` tables rename lazily at open.
+  (env `XCB_STATE`).
+  `cli/update.ts` sets the compatibility update policy; the `cli.ts` executable
+  calls the shared updater before loading `cli-program.ts` or application state.
+  Bundle the exact released updater
+  development dependency into the CLI, keep SDK imports inert, and preserve the
+  external exact-version registry dependency and packed-package contracts.
 - `test/` contains synthetic boundary and concurrency tests.
 - `qualification/` holds the host qualification fixtures and native-tooling
   checks; its `contact-workspace.ts` is a vendored synthetic fixture, not a
-  Textbutler import. `linux-sandbox.ts` is the bwrap kernel-boundary probe,
+  TextButler import. `linux-sandbox.ts` is the bwrap kernel-boundary probe,
   `linux-egress.ts` is the CONNECT-bridge boundary probe, and
-  `linux-loopback.ts` is the stock-binary forwarder probe; all are evidence,
-  not activation. The `Qualification` workflow runs them on `ubuntu-24.04`
-  and uploads the JSON evidence.
+  `linux-loopback.ts` is the stock-binary forwarder probe; all are evidence
+  for the TypeScript SDK backend, not activation. The native receipt the
+  Linux launcher admits comes from `xcb doctor --qualify-sandbox`
+  (`crates/xcb-runtime/src/qualification/probe.rs`), which runs the same three
+  probes from the xcb binary. The `Check` workflow's `Linux kernel-boundary
+  probes` job runs both on `ubuntu-24.04` with the AppArmor restriction on and
+  the shipped `xcb-bwrap.apparmor` profile installed, when the probes or
+  sandbox sources change (or on `workflow_dispatch`), and uploads the JSON
+  evidence.
 - `scripts/` holds the dist build, packed-package smoke check, and the
   dependency-free release writers and admission checks.
 - `site/` is the informational xcb product page (Next.js, canonical origin
-  xcb.sh); it has no product-runtime connection. The `@hraness/xcb`
+  xcb.sh); it has no product-runtime connection. Its blog keeps post bodies
+  in `site/content/blog/` and titles, sources, and admission records in
+  `site/app/blog/posts.ts`. The `@hraness/xcb`
   TypeScript package and its verified publication datum remain a separate
   compatibility surface.
 - `.github/workflows/` holds the read-only CI matrix and the tag-gated
@@ -68,6 +86,16 @@
 - Admit a provider only after the host proves the exact runtime, effective tool
   inventory, configuration isolation and read/write confinement. Unqualified
   adapters remain disabled.
+- Exact-artifact admission has two sources: constants baked into a release and
+  `qualified-builds.json` at the repository root. The Codex catalog workflow
+  qualifies npm-published darwin-arm64 builds through
+  `qualification/codex-inventory.py` and reports each new build in a tracking
+  issue with its evidence; a maintainer opens the catalog pull request for a
+  passing build. To qualify a build by hand, run the inventory with
+  `--expect-version`/`--expect-sha256`, then append the reviewed pair with a
+  `qualifiedBy` naming the evidence source. Never append a pair whose
+  inventory failed, and never relax the schema-digest check: a wire-protocol
+  change ships through an xcb release instead.
 - Keep broker inputs closed and bounded; applications own filesystem custody
   and messaging authorization.
 - Preserve exclusive account custody after uncertain provider failures.
@@ -80,20 +108,108 @@
 - Keep the public repository independently buildable. Do not reference
   sibling checkouts, private packages, or monorepo paths.
 
-<!-- oompa-local-efficiency:start -->
+<!-- hraness-public-copy:start -->
+- Public copy (websites, READMEs, docs, package and GitHub descriptions, CLI help, `llms.txt`, generated pages) follows `STYLE.md`, synced from hraness/.github. Text a model writes for publication also follows `GENERATION_STYLE.md`.
+- The delivery vocabulary in this file (admission, qualification, custody, receipt, bounded, lane, gate, surface, projection) is internal. Translate it into what the reader gets.
+- Take one-line product and sibling descriptions from the portfolio registry and versions from the release record. Tests pin facts, not prose.
+- Run `bun run check:copy` before handoff when the repository has it.
+<!-- hraness-public-copy:end -->
+
+<!-- hraness-releases:start -->
+- GitHub Release pages follow `RELEASES.md` in hraness/.github: the title is the registry product name and the tag, and the body is a summary, `## Changes`, `## Install`, `## Verify`, then the repository's identity record as a trailing HTML comment.
+- The summary and changes come from the version's section of `CHANGELOG.md` in the tagged commit. Write that section in the version bump pull request. The release workflow copies it, generates Install and Verify from the release record, fails when the section is missing or empty, and never uses GitHub's generated notes.
+<!-- hraness-releases:end -->
+
+<!-- hraness-launch:start -->
+- Launch posts, their social posts, product mockups, and launch films follow the launch beats and social posts addendum in `GENERATION_STYLE.md` and the beats shape under “Introducing a product” in `ARTICLE_COPY.md` in `@hraness/design-kit`. Channel limits are in the launch posts section of `MESSAGING.md`.
+- Build them with the `product-launch` agent skill, the `./mockups` and `./launch` exports of `@hraness/design-kit`, and `slopcamera html init --template launch-film`.
+- Take every number in a beat, social post, film caption, or store listing from the product's launch facts module, and the status from the release record. Keep mockup accessible descriptions accurate; visible captions are optional and must add useful context.
+- The social kit emits posts for X, Bluesky, Threads, and LinkedIn, and a fact sheet for the Show HN post and the Product Hunt first comment. A person writes those two.
+<!-- hraness-launch:end -->
+
+<!-- hraness-delivery:start -->
 - Treat the user's request to change this repository as standing authorization for routine task-owned commits, pushes, pull requests, merges, releases, deployments, and production verification after the gates applicable to that action pass. Do not ask for duplicate confirmation. Build confidence through relevant automated checks, bounded diagnostics, and independent review, not another human approval. Passing checks does not expand task scope or authority.
 - Prefer agentic service provisioning for new infrastructure. Check Vercel Marketplace for a native product that can provision the required resource first; use Stripe Projects as a supported alternative when it better covers the service or the Marketplace route only connects an existing account. Verify the current catalog, account, region, plan, recurring cost and resource capabilities before selecting a route. Prefer supported provider CLIs or APIs over browser-only setup when neither catalog fits, and explain the concrete exception. Reuse existing owner-controlled resources where appropriate; this preference alone does not authorize migrations, duplicate accounts, paid upgrades or wider access. Continue setup already authorized by the task and budget without duplicate confirmation. Keep provider credentials and generated environment files private, complete required interactive authentication, and verify deployment, persistence and recovery separately from successful provisioning.
 - Separate artifact admission from live qualification and operational activation. Use applicable automated source, security, package/install, and provenance evidence for artifact admission; live provider qualification is not a universal publication prerequisite. Preserve explicit live acceptance criteria and require relevant live evidence for claims that depend on it. If publication or an artifact's install, upgrade, or default-use path activates risky unqualified behavior, keep that behavior guarded or disabled, or obtain bounded relevant evidence before shipping or activation.
 - Use the repository's documented delivery workflow and preserve the identity, target, capacity, migration, and recovery guards applicable to operational activation. Replace an obsolete gate through a reviewed source and policy change with corresponding tests, never an ad hoc skip. Preserve every runtime-enforced approval, access control, branch protection, environment rule, safety policy, and required final gate. Ask for user input only when delivery needs a material product decision, missing credentials or authority, unavoidable interactive authentication, an irreversibly destructive action outside task scope, or resolution of a failure that cannot be handled safely and autonomously.
 - Preserve production and user data throughout delivery. Inspect the exact account, environment, deployment, and data target before writes. For data changes, inspect a dry run or equivalent migration plan and validate the recovery path before any effect that could lose or corrupt data. Prefer additive, backward-compatible migrations and bounded batches. Record mutation intent, use idempotency or conditional writes, and reconcile uncertain results before retrying. Verify deployed identity, health, and relevant data invariants after delivery. Routine delivery never authorizes resetting, truncating, dropping, or overwriting user data; stop the unsafe operation if preservation or recovery cannot be established.
-- Prefer short-lived repository workload identities such as OIDC trusted publishing, GitHub Apps, and narrowly scoped machine identities. Use unattended stable publication and production promotion when supported by the provider and repository. Establish supported machine authority once and verify it with a non-publishing preflight where available; routine releases should not require recurring interactive authentication or conversational approval. Retain account two-factor authentication and provider controls, including required authentication for approval of an exact staged artifact; do not add long-lived personal tokens to eliminate an interactive prompt.
-- Keep delivery gates proportional to the failure they prevent. Prefer required checks on the current integration candidate, independent agent review, and atomic or conditional integration. Add a merge queue or another approval stage only for a demonstrated coordination or safety need. Replace redundant queues, serial waits, and duplicate checks through reviewed policy changes while retaining evidence for the integrated result.
+- Prefer short-lived repository workload identities such as OIDC trusted publishing, GitHub Apps, and narrowly scoped machine identities. Use unattended stable publication and production promotion when supported by the provider and repository. Establish supported machine authority once and verify it with a non-publishing preflight where available; routine releases should not require recurring interactive authentication or conversational approval. Releases and deployments run without a human in the loop: do not add required reviewers, manual approval environments, or wait timers to release or deployment paths, and remove any you find through a reviewed change. Keep account two-factor authentication, and do not add long-lived personal tokens.
+- Main delivery is unattended. Open the pull request and enable auto-merge in the same breath (`gh pr merge --auto --squash <number>`), then move on; the required `Required` check is the reviewer. Until a repository's ruleset requires a check, `--auto` merges immediately, so wait for green checks there before merging. Never request a human reviewer or add required approvals, code owners, required conversation resolution, merge queues, manual-approval environments, or wait timers, and remove any you find with `scripts/apply-delivery-policy.py` from hraness/.github rather than by hand. Required checks run on the pull request head and are not re-required after main moves, so auto-merge never stalls behind another merge; main reruns the same gate after integration, and a red main is fixed forward by the next change. Repositories without CI use direct pushes to main.
 - Preserve useful reasoning fan-out, but avoid unnecessary checkout fan-out. Prefer subagents in the current task for bounded research, review, diagnosis, and focused checks when they can safely share one working tree; create a separate task or worktree only for independently deliverable divergent edits, an isolated verification tree, or a different execution environment.
 - Give each expensive focused validation command and external wait one owner. The integration owner reviews that evidence and runs the repository-required aggregate or final gate once after convergence. Reuse evidence only for the exact Git tree, command, lockfiles, toolchain, relevant environment, and validity period, and never to skip a required final integration, merge, release, deployment, or production-verification gate.
-- On Hraness development machines, use `$oompa-local-efficiency` and the installed host scheduler for heavyweight top-level commands when available. Keep ordinary work in the compute lane; give authenticated browser/dev-server/Chromium work one `browser-auth` owner and Mac-only validation one `mac-native` owner.
+- On Hraness development machines, use the installed host scheduler for heavyweight top-level commands when available. Keep ordinary work in the compute lane; give authenticated browser/dev-server/Chromium work one `browser-auth` owner and Mac-only validation one `mac-native` owner.
 - When a CI or policy gate scans complete Git history, check out the exact governed SHA and fetch only the fully qualified governed refs before scanning. Preserve the complete-history gate and reject unexpected refs instead of importing unrelated concurrent heads.
 - At closeout, record applicable branch, PR, check, merge, release, deployment, and production evidence. Archive only conclusively finished tasks, never from silence alone, and reclaim only freshly revalidated clean merged worktrees through the guarded exact-path flow.
-<!-- oompa-local-efficiency:end -->
+<!-- hraness-delivery:end -->
+
+<!-- hraness-articles:start -->
+- Essays and blog posts follow the essay addendum in `GENERATION_STYLE.md` and `ARTICLE_COPY.md` in `@hraness/design-kit`. The byline is “Hraness”, every post shows the provenance note naming its recorded reviewer, and no AI-drafted post is credited to a person unless that person rewrites and adopts it.
+- Take product names, one-line descriptions, addresses, status labels, and relations from the portfolio facts in `@hraness/design-kit`. Render versions from the release record (`package.json`, a published-release file), never typed by hand.
+- Write a “How X uses Y” post only for a registered relation that has a description. Change the relation and its post in the same change. Link between products only along registered relations, and between a technique post and product posts about the same technique.
+- Every post has a review record: reader job, non-obvious answer, sources with the date checked, owner, reviewer identity, reviewer type (`ai` or `human`), a score out of 12, and a `reassessOn` date 28 to 56 days after review. The reviewer is independent of the run or person that drafted the post. An AI reviewer is recorded and shown as AI; `humanReview` stays null unless a person reviewed the post.
+- A new post starts out of search indexes, sitemaps, and feeds. It becomes indexable only when its review record is complete, scores at least 9 of 12 with no zero score, and the page shows the provenance note.
+- When a product is renamed or a relation changes, update the post bodies that mention it in the same change.
+<!-- hraness-articles:end -->
+
+# Public copy
+
+Public copy is the site, README, `docs/`, `llms.txt`, `package.json` and GitHub
+descriptions, CLI help, and TUI text. Follow `STYLE.md` and `WRITING.md`.
+
+- The canonical one-line description, used as the README and `llms.txt` lead, is
+  “Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin
+  subscriptions you already pay for.” The page descriptions, README lead,
+  `llms.txt` lead, `package.json` description, support value proposition, and
+  CLI `about` use this sentence or a shortening of it. The portfolio registry
+  line lives in hraness/jungle; propose changes there.
+- The product name is “Excalibur (xcb)”. Use it for the first mention on each
+  page and in titles, site names, share cards, and package descriptions. Later
+  mentions may use `xcb` (lowercase, also at the start of a sentence), which is
+  also the command, binary, crate, and package name. Never write XCB or Xcb in
+  prose; `Xcb` is only the TypeScript class name. Sibling names follow the
+  registry: PeopleBlade, TextButler, GhostGet, ALGAL, Wordcell, Gobstopper,
+  aicharts (lowercase, one word).
+- State the release status once per page, from `site/published-release.json`
+  through `site/app/release-state.tsx`. Put each other limit beside the feature
+  it limits.
+- Share images come only from the shared `@hraness/web-discovery`
+  social-image template through the site's single `defineSocialImageSite`
+  declaration in `site/app/social.ts`. Pages pass copy only (headline,
+  description, eyebrow); add no per-site drawing code.
+- `xcb --json route` picks the account and model. The TypeScript SDK's
+  `createSubscriptionRouter` does not: the host names the account and model,
+  and the router holds that account while the task runs. Do not describe the
+  SDK as the same router.
+- The self-tuning managed harness is in development. The current build does
+  not run self-modifying routing policies; say so wherever the harness appears.
+- Describe a sibling product with its registry line, and claim an integration
+  only when shipped code supports it.
+- Keep `↗` for links that leave xcb.sh. Internal links use `→` or no glyph.
+- Tests pin facts (no release yet, supported platforms, tested providers,
+  commands), not headings or sentences.
+
+Internal terms and what to write on public pages instead:
+
+| Internal term | Public wording |
+| --- | --- |
+| admitted runtime, provider admission | a supported provider build (xcb has checked its exact executable, tools, configuration isolation, and file access) |
+| qualified, qualification | tested and approved for the exact build, account, and model |
+| credentialed, connected | signed in |
+| eligible, eligible set | able to take the task now: supported build, signed in, idle, not at a known quota limit, with a recently seen model |
+| custody, lease, generation-fenced | xcb holds the account so no other task can use it |
+| settled, settlement | the provider process has exited and xcb has recorded how the run ended |
+| joined | the provider's processes have exited |
+| unproven custody, uncertain outcome | xcb could not confirm how the run ended, so it keeps the account held and does not retry |
+| receipt, transition receipt | the task's local record, which `xcb tasks verify` replays |
+| bounded | name the limit: one turn, a deadline, 256 KiB of returned text |
+| closed contract, route contract | the JSON request and result of `xcb --json route` |
+| fails closed | refuses and changes nothing |
+| routing manifest, promoted | routing rule, kept or adopted |
+| credential-free boundary proof | sandbox checks run without signing in |
+| authenticated coding acceptance | a coding session confirmed on a signed-in account |
+| reference host | xcb's own terminal workspace |
+| surface | the page, command, or API, by name |
+| Pareto tier | models ranked by relative quality, cost, and latency (define it on first use) |
 
 # Workspace write coordination
 
@@ -119,8 +235,22 @@
   sufficient. Legacy leases without such a witness remain held.
 
 <!-- algal-skills:start -->
+## ALGAL skills
+
 - Prefer the globally installed `algal-*` skills for bounded git state, diffs, repository survey/search, test and release gates, CI polling, and web fetches instead of repeated raw tool output.
 - At session start, if the `algal` skill is unavailable, install the current skill pack for Claude Code, Codex, and Devin for Terminal with `bunx skills add 0thernet/algal-skills --global --agent claude-code codex devin --skill '*' --copy --yes`.
 - Confirm installation with `bunx skills list --global`. If Bun or network access is unavailable, continue with repository-native tools instead of blocking delivery.
 - Treat ALGAL receipts as execution evidence, not provider attestation, and preserve the repository's normal verification and release gates.
 <!-- algal-skills:end -->
+
+## CI
+
+<!-- hraness-ci:start -->
+- CI exists to admit a change in minutes, not to perform a ceremony. Every workflow declares `concurrency: { group: <name>-${{ github.ref }}, cancel-in-progress: true }` (release and deploy workflows set `cancel-in-progress: false`), a `timeout-minutes` on every job, and `permissions: contents: read` at the top with job-level widening only where needed.
+- One job named `Required` closes every check workflow: `if: always()`, `needs:` every blocking job, and a single step that fails unless each `needs.<job>.result == 'success'`, or `skipped` because the change filter below reported its inputs unchanged. Branch policy requires only `Required` (plus a provider's own automated admission status when the product depends on it). Never make CodeQL, scheduled, or advisory jobs required.
+- Cache by lockfile hash and restore before install: `Swatinem/rust-cache@v2` (with `save-if: ${{ github.ref == 'refs/heads/main' }}`) for Cargo, `oven-sh/setup-bun@v2` plus `actions/cache` on `~/.bun/install/cache` for Bun, `actions/setup-node` cache or `actions/cache` for npm/pnpm, `actions/setup-python` with `cache: pip` or `astral-sh/setup-uv` with cache for Python. Playwright browsers are cached under `~/.cache/ms-playwright` keyed by the Playwright version.
+- Rust: install the pinned toolchain with `dtolnay/rust-toolchain` (`rustup toolchain install` at most once per job, `--profile minimal`), set `CARGO_INCREMENTAL: 0`, `CARGO_TERM_COLOR: always`, `CARGO_NET_RETRY: 10`, `RUSTFLAGS: -D warnings` and `RUST_BACKTRACE: short` at workflow level, use `cargo nextest` or one `cargo test --workspace --locked` after a shared `cargo build --all-targets --locked`, run `clippy` and `fmt` once on Linux only, install tools with `taiki-e/install-action` or `cargo-binstall` instead of `cargo install`, and build release binaries in one job whose artifact every later job reuses. Never build the same crate twice in one workflow.
+- Run the matrix Linux-first. A macOS or Windows job exists only when the product ships a native surface for that OS, runs the OS-specific tests only, and is never the only place a generic check runs. Split long serial script lists into parallel jobs that share one build artifact instead of one job that runs for twenty minutes.
+- Skip work that cannot change the result inside the workflow: a change-detection job runs `dorny/paths-filter@v4` (it needs job permission `pull-requests: read`, and `predicate-quantifier: some-with-excludes` needs v4), and jobs whose inputs did not change skip through job-level `if:`. Never put `paths`, `paths-ignore`, or `branches-ignore` on the `pull_request` trigger of the workflow that produces `Required`: a skipped workflow never reports `Required`, and the pull request can never merge. Every `uses:` pins a major tag or a SHA with a version comment, and Dependabot keeps `github-actions` current weekly with auto-merge.
+- Measure before and after: a CI change records the previous and new median wall time of the slowest workflow in its pull request body. Regressions that add more than a minute to `Required` are reverted forward the same day.
+<!-- hraness-ci:end -->

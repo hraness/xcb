@@ -1,6 +1,6 @@
 import { CliSessionStore } from "../src/cli/sessions.ts";
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, realpath } from "node:fs/promises";
+import { mkdtemp, realpath, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -21,6 +21,9 @@ async function cli(args: readonly string[], input?: string, state?: string): Pro
       ...process.env, XCB_STATE: root, NO_COLOR: "1",
       XCB_CLAUDE: join(root, "no-such-claude"), XCB_CODEX: join(root, "no-such-codex"), XCB_DEVIN: join(root, "no-such-devin"),
       PATH: join(root, "empty-path"), HOME: root,
+      // Bun's transpiler cache otherwise creates Library/Caches in the fake
+      // HOME, independently of CLI application or updater state.
+      BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
     },
     stdin: input === undefined ? "ignore" : "pipe",
     stdout: "pipe", stderr: "pipe",
@@ -40,7 +43,28 @@ describe("xcb CLI", () => {
   test("--help prints the command surface", async () => {
     const { code, stdout } = await cli(["--help"]);
     expect(code).toBe(0);
-    for (const command of ["auth claude", "auth devin", "auth status", "auth logout", "doctor", "sessions", "resume", "run [-p", "--cwd", "devin"]) expect(stdout).toContain(command);
+    for (const command of ["auth claude", "auth devin", "auth status", "auth logout", "doctor", "sessions", "resume", "run [-p", "--cwd", "devin", "update check", "update status", "update disable"]) expect(stdout).toContain(command);
+  });
+
+  test("update commands run before opening application state and refuse source updates", async () => {
+    const root = join(await stateDir(), "not-created");
+    for (const operation of ["status", "check", "disable"]) {
+      const result = await cli(["update", operation, "--json"], undefined, root);
+      expect(result.code).toBe(operation === "status" ? 0 : 1);
+      const report = JSON.parse(result.stdout) as Record<string, unknown>;
+      expect(report.package).toBe("@hraness/xcb");
+      expect(report.status).toBe("unsupported");
+      expect(report.supported).toBe(false);
+      expect(await stat(root).catch(() => null)).toBeNull();
+    }
+  });
+
+  test("help and version keep both application and updater state untouched", async () => {
+    const root = join(await stateDir(), "not-created");
+    for (const command of ["--help", "--version", "help", "-v"]) {
+      expect((await cli([command, "ignored"], undefined, root)).code).toBe(0);
+      expect(await stat(root).catch(() => null)).toBeNull();
+    }
   });
 
   test("doctor reports missing providers and exits nonzero", async () => {
@@ -130,7 +154,7 @@ describe("xcb CLI", () => {
     const session = await sessions.create({ provider: "devin", accountId: "local", workspace: ROOT, model: "adaptive", now: Date.now() });
     sessions.close();
     const resumed = await cli(["resume", session.id], "", root);
-    expect(resumed.code).toBe(2);
+    expect(resumed.code, resumed.stderr).toBe(2);
     expect(resumed.stderr).toContain("devin binary not found");
     expect(resumed.stderr).not.toContain("claude binary not found");
     const mismatched = await cli(["resume", session.id, "--provider", "claude"], "", root);

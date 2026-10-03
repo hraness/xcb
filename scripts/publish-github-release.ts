@@ -12,6 +12,7 @@ import {
   releasePackageForName,
 } from "./release-distribution-policy.ts";
 import { parseGitHubIncludedJsonResponse } from "./release-included-response.ts";
+import { releaseTitle, renderReleaseBody, renderReleaseNotes } from "./release-notes.ts";
 import { publicReleaseEnvironment } from "./release-process-environment.ts";
 import { assertReviewedMainComparison } from "./release-ref-authority.ts";
 
@@ -63,9 +64,19 @@ if (basename(tarball) !== distribution.releaseArchiveName(manifest.version) || b
 const tarballBytes = readFileSync(tarball);
 const checksumBytes = readFileSync(checksum);
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
-const expectedTitle = `${releasePackage.title} ${tagArgument}`;
-const expectedBody =
-  `Automated public release of ${releasePackage.name}@${manifest.version} from ${tagArgument}.`;
+const expectedTitle = releaseTitle(releasePackage, releaseVersion);
+// The staged writer carries CHANGELOG.md from the verified tag commit beside
+// its package.json; the release notes are that version's section plus the
+// generated install and verify sections. A missing, empty, or Unreleased
+// section fails here, before any release or draft is created.
+const releaseNotesInput = Object.freeze({
+  changelog: readFileSync(resolve(import.meta.dir, "..", "CHANGELOG.md"), "utf8"),
+  commit: verifiedSha,
+  releasePackage,
+  version: releaseVersion,
+});
+const expectedNotes = renderReleaseNotes(releaseNotesInput);
+const expectedBody = renderReleaseBody(releaseNotesInput);
 
 type NativeSource = Readonly<{
   archiveBytes: Buffer;
@@ -306,9 +317,12 @@ async function readDraftById(id: number): Promise<ExactDraft> {
   return draft;
 }
 
-async function verifyDraftAssets(draft: ExactDraft): Promise<readonly string[]> {
+async function verifyDraftAssets(
+  draft: ExactDraft,
+  only: readonly string[] = sources,
+): Promise<readonly string[]> {
   const missing: string[] = [];
-  for (const source of sources) {
+  for (const source of only) {
     const expectedName = basename(source);
     const asset = draft.assets.find((candidate) => candidate.name === expectedName);
     if (asset === undefined) {
@@ -336,9 +350,11 @@ async function verifyDraftAssets(draft: ExactDraft): Promise<readonly string[]> 
 
 async function completeDraftAssets(draft: ExactDraft): Promise<ExactDraft> {
   let current = await readDraftById(draft.id);
-  for (const source of sources) {
-    const missing = await verifyDraftAssets(current);
-    if (!missing.includes(source)) continue;
+  // Prove the assets already present once, then prove each upload by
+  // itself; re-downloading every asset after each upload made a transient
+  // API failure likely once releases carried eleven assets.
+  const missing = await verifyDraftAssets(current);
+  for (const source of missing) {
     await run([
       "gh", "api", "--method", "POST",
       "-H", "Accept: application/vnd.github+json",
@@ -347,7 +363,9 @@ async function completeDraftAssets(draft: ExactDraft): Promise<ExactDraft> {
       `https://uploads.github.com/repos/${publicRepository}/releases/${String(current.id)}/assets?name=${encodeURIComponent(basename(source))}`,
     ]);
     current = await readDraftById(draft.id);
-    await verifyDraftAssets(current);
+    if ((await verifyDraftAssets(current, [source])).length !== 0) {
+      throw new Error(`Uploaded draft asset ${basename(source)} is missing.`);
+    }
   }
   return current;
 }
@@ -357,7 +375,11 @@ async function verifyPublishedRelease(): Promise<void> {
   const deadline = Date.now() + 90_000;
   while (Date.now() < deadline) {
     try {
-      const coordinate = distribution.parseGitHubRelease(await readRelease(), releaseVersion);
+      const coordinate = distribution.parseGitHubRelease(
+        await readRelease(),
+        releaseVersion,
+        expectedNotes,
+      );
       assertReleaseAssetBytes(coordinate, tarballBytes, checksumBytes, sha256);
       if (coordinate.natives.length !== nativeSources.length) {
         throw new Error(`GitHub Release ${tagArgument} does not carry the exact native asset set.`);

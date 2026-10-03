@@ -70,22 +70,15 @@ pub async fn dispatch(root: &Path, capabilities: bool, as_json: bool) -> Result<
     let (cancel, receiver) = watch::channel(false);
     // Keep the inference future owned until physical join and credential/store
     // settlement. Neither SIGINT nor SIGTERM drops the cleanup future.
-    let mut interrupt =
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()) {
-            Ok(value) => value,
-            Err(_) => return failed(FailureCode::Unavailable),
-        };
-    let mut terminate =
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(value) => value,
-            Err(_) => return failed(FailureCode::Unavailable),
-        };
+    let mut stop = match crate::stop::Stop::install() {
+        Ok(value) => value,
+        Err(_) => return failed(FailureCode::Unavailable),
+    };
     let task = application::generate(store, request, receiver);
     tokio::pin!(task);
     let outcome = tokio::select! {
         result = &mut task => result,
-        _ = interrupt.recv() => { let _ = cancel.send(true); task.await },
-        _ = terminate.recv() => { let _ = cancel.send(true); task.await },
+        _ = stop.recv() => { let _ = cancel.send(true); task.await },
     };
     match outcome {
         Ok(value) => {
@@ -122,16 +115,10 @@ pub async fn qualify_dispatch(
         Err(_) => return failed(FailureCode::Unavailable),
     };
     let (cancel, receiver) = watch::channel(false);
-    let mut interrupt =
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()) {
-            Ok(value) => value,
-            Err(_) => return failed(FailureCode::Unavailable),
-        };
-    let mut terminate =
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(value) => value,
-            Err(_) => return failed(FailureCode::Unavailable),
-        };
+    let mut stop = match crate::stop::Stop::install() {
+        Ok(value) => value,
+        Err(_) => return failed(FailureCode::Unavailable),
+    };
     let task = application::qualify_with_expected_generation(
         store,
         account,
@@ -143,8 +130,7 @@ pub async fn qualify_dispatch(
     tokio::pin!(task);
     let outcome = tokio::select! {
         result = &mut task => result,
-        _ = interrupt.recv() => { let _ = cancel.send(true); task.await },
-        _ = terminate.recv() => { let _ = cancel.send(true); task.await },
+        _ = stop.recv() => { let _ = cancel.send(true); task.await },
     };
     match outcome {
         Ok(value) => {

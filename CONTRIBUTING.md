@@ -1,8 +1,11 @@
 # Contributing
 
-xcb is in development. Preserve checkable custody, qualification, and bounded
-tool contracts. Native xcb lives in `crates/`; the retained TypeScript library
-and compatibility CLI live in `src/`. The informational Next.js site is `site/`.
+Changes keep xcb's safety properties checkable: each task holds one account
+until the provider process exits, provider builds are checked before they run,
+and model-facing tools take fixed inputs with fixed limits. Native xcb lives in
+`crates/`; the TypeScript package and its `xcb-compat` CLI live in `src/`. The
+Next.js site, including the docs at xcb.sh/docs, is `site/`, and repository
+references live in `docs/`. Public copy follows [STYLE.md](STYLE.md).
 
 ## Setup
 
@@ -40,6 +43,8 @@ checks do not qualify live providers; keep unqualified adapters disabled.
   activation. Keep published release claims distinct from source version numbers.
 - Keep credentials, provider state, and qualification receipts out of workspaces
   and commits. Do not include transcript text or secrets in bug reports.
-- Open a pull request; do not force-push.
+- Open a pull request and enable auto-merge (`gh pr merge --auto --squash
+  <number>`); the `Required` check decides. Do not request a reviewer, and do
+  not force-push.
 
 Use GitHub issues for bugs and [SECURITY.md](SECURITY.md) for vulnerabilities.

@@ -9,7 +9,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
-        let base = temp.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(temp.path()).unwrap();
         let root = base.join("workspace");
         fs::create_dir(&root).unwrap();
         let workspace =
@@ -105,10 +105,7 @@ fn snapshot_round_trips_binary_and_excludes_controls_dependencies_and_secrets() 
     );
     assert_eq!(snapshot.excluded.len(), 7);
     let saved = private::directory(
-        &fixture
-            ._temp
-            .path()
-            .canonicalize()
+        &xcb_core::canonical(fixture._temp.path())
             .unwrap()
             .join("private-output"),
     )
@@ -127,23 +124,92 @@ fn snapshot_round_trips_binary_and_excludes_controls_dependencies_and_secrets() 
 }
 
 #[test]
-fn snapshot_rejects_symlinks_hardlinks_and_oversized_files() {
-    for kind in ["symlink", "hardlink", "oversized"] {
-        let fixture = Fixture::new();
-        fixture.write("input", b"unchanged", 0o600);
-        match kind {
-            "symlink" => symlink("input", fixture.root.join("alias")).unwrap(),
-            "hardlink" => {
-                fs::hard_link(fixture.root.join("input"), fixture.root.join("alias")).unwrap()
-            }
-            _ => File::create(fixture.root.join("large"))
-                .unwrap()
-                .set_len(SNAPSHOT_FILE_LIMIT as u64 + 1)
-                .unwrap(),
-        }
-        assert!(fixture.workspace.command_snapshot().is_err(), "{kind}");
-        assert_eq!(fs::read(fixture.root.join("input")).unwrap(), b"unchanged");
+fn snapshot_excludes_hardlinks_and_oversized_files_without_aborting() {
+    let fixture = Fixture::new();
+    fixture.write("input", b"unchanged", 0o600);
+    fixture.write("regular", b"included", 0o600);
+    fs::hard_link(fixture.root.join("input"), fixture.root.join("alias")).unwrap();
+    File::create(fixture.root.join("large"))
+        .unwrap()
+        .set_len(SNAPSHOT_FILE_LIMIT as u64 + 1)
+        .unwrap();
+    let snapshot = fixture.workspace.command_snapshot().unwrap();
+    // Every name of a multiply-linked inode is excluded, like symlinks and
+    // special files; only bounded single-link regular files are inputs.
+    assert_eq!(
+        snapshot
+            .document
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["regular"]
+    );
+    for excluded in ["input [linked]", "alias [linked]", "large [oversized]"] {
+        assert!(
+            snapshot.excluded.iter().any(|path| path == excluded),
+            "{excluded} in {:?}",
+            snapshot.excluded
+        );
     }
+    // Publication through an excluded path is refused and the real file is
+    // untouched: it is not an original, so a write reads as a workspace
+    // conflict rather than a new file.
+    for target in ["large", "alias"] {
+        let (result, effects) = fixture.workspace.publish_command_changes(
+            &snapshot,
+            fixture.changes(&snapshot, vec![write(target, b"must not publish", false)]),
+        );
+        assert!(result.is_err(), "{target}");
+        assert_eq!(effects, EffectState::None, "{target}");
+    }
+    assert_eq!(fs::read(fixture.root.join("input")).unwrap(), b"unchanged");
+    assert_eq!(
+        fs::metadata(fixture.root.join("large")).unwrap().len(),
+        SNAPSHOT_FILE_LIMIT as u64 + 1
+    );
+}
+
+#[test]
+fn snapshot_excludes_symlinks_and_special_files_without_aborting() {
+    let fixture = Fixture::new();
+    fixture.write("input", b"unchanged", 0o600);
+    symlink("input", fixture.root.join("alias")).unwrap();
+    symlink("/outside/absolute", fixture.root.join("escape")).unwrap();
+    let _socket = std::os::unix::net::UnixListener::bind(fixture.root.join("sock")).unwrap();
+    let snapshot = fixture.workspace.command_snapshot().unwrap();
+    // Only the regular file is an input; the others are labeled exclusions.
+    assert_eq!(snapshot.document.files.len(), 1);
+    assert_eq!(snapshot.document.files[0].path, "input");
+    assert!(
+        snapshot
+            .excluded
+            .iter()
+            .any(|path| path == "alias [symlink]" || path == "escape [symlink]")
+    );
+    assert_eq!(
+        snapshot
+            .excluded
+            .iter()
+            .filter(|p| p.ends_with("[symlink]"))
+            .count(),
+        2
+    );
+    assert!(
+        snapshot
+            .excluded
+            .iter()
+            .any(|path| path == "sock [special file]")
+    );
+    // The excluded entries are not staged and publication through them stays
+    // refused: a change naming a symlink path is rejected.
+    let (result, effects) = fixture.workspace.publish_command_changes(
+        &snapshot,
+        fixture.changes(&snapshot, vec![write("alias", b"must not publish", false)]),
+    );
+    assert!(result.is_err());
+    assert_eq!(effects, EffectState::None);
+    assert_eq!(fs::read(fixture.root.join("input")).unwrap(), b"unchanged");
 }
 
 #[test]
@@ -187,19 +253,25 @@ fn command_publication_updates_creates_removes_and_preserves_permission_bits() {
         fs::metadata(fixture.root.join("script")).unwrap().mode() & 0o777,
         0o640
     );
+    // New entries take the ordinary create bits for their kind under the
+    // process umask; a plain create_dir probes the same kernel derivation.
+    let probe = fixture.root.join("umask-probe");
+    fs::create_dir(&probe).unwrap();
+    let dir_mode = fs::metadata(&probe).unwrap().mode() & 0o777;
+    fs::remove_dir(&probe).unwrap();
     assert_eq!(
         fs::metadata(fixture.root.join("new/nested/program"))
             .unwrap()
             .mode()
             & 0o777,
-        0o700
+        dir_mode
     );
     assert_eq!(
         fs::metadata(fixture.root.join("new/nested"))
             .unwrap()
             .mode()
             & 0o777,
-        0o700
+        dir_mode
     );
     assert!(!fixture.root.join("remove").exists());
     assert_eq!(
@@ -414,7 +486,9 @@ fn snapshot_and_publication_share_the_same_path_depth_bound() {
 fn command_publication_rejects_post_snapshot_symlink_targets_without_writing_outside() {
     for parent_alias in [false, true] {
         let fixture = Fixture::new();
-        let outside = fixture._temp.path().canonicalize().unwrap().join("outside");
+        let outside = xcb_core::canonical(fixture._temp.path())
+            .unwrap()
+            .join("outside");
         fs::create_dir(&outside).unwrap();
         fs::write(outside.join("input"), b"outside canary").unwrap();
         let snapshot = fixture.workspace.command_snapshot().unwrap();

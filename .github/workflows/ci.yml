@@ -5,17 +5,127 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+# Pull requests cancel their own superseded runs. Pushes to main group by
+# commit, so a later merge never cancels an earlier main run (each main commit
+# is validated against its own parent).
 concurrency:
-  group: check-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: check-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: "10"
+  RUST_BACKTRACE: short
+  RUSTFLAGS: -D warnings
+  BUN_VERSION: "1.3.14"
+  NODE_VERSION: "24.19.0"
 
 jobs:
+  changes:
+    # Pull requests and pushes to main skip the jobs whose inputs did not
+    # change (a push is compared with the commit it replaced on main). Manual
+    # dispatches run everything. The Rust caches key on Cargo.lock, the
+    # toolchain, and the profile, so a docs-only main push has nothing to warm.
+    name: Detect changed paths
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.code.outputs.code }}
+      site: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.surfaces.outputs.site }}
+      qualification: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.surfaces.outputs.qualification }}
+      # Every push to main still builds ARM64 and Windows, so ordinary Rust
+      # changes are compiled for those targets before a release tag.
+      native_arm: ${{ github.event_name != 'pull_request' && 'true' || steps.surfaces.outputs.native_arm }}
+      rust: ${{ github.event_name != 'pull_request' && 'true' || steps.surfaces.outputs.rust }}
+    steps:
+      # Pull requests read the changed files from the API; a push diffs the
+      # pushed commit against github.event.before with git, so it needs the
+      # repository (trees only; the filter fetches the base if it is missing).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'push'
+        with:
+          fetch-depth: 2
+          filter: blob:none
+          persist-credentials: false
+      - name: Code changes (everything except the site, docs, and markdown)
+        id: code
+        if: github.event_name != 'workflow_dispatch'
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          base: ${{ github.event_name == 'push' && github.event.before || '' }}
+          predicate-quantifier: every
+          filters: |
+            code:
+              - '**'
+              - '!site/**'
+              - '!docs/**'
+              - '!**/*.md'
+      - name: Site and qualification changes
+        id: surfaces
+        if: github.event_name != 'workflow_dispatch'
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          base: ${{ github.event_name == 'push' && github.event.before || '' }}
+          # The site checks (and the Vercel build, site/vercel.json) also read
+          # these repository files; keep both lists in step.
+          filters: |
+            site:
+              - 'site/**'
+              - 'src/**'
+              - 'README.md'
+              - 'package.json'
+              - 'qualified-builds.json'
+              - 'scripts/install.sh'
+              - 'scripts/install.ps1'
+              - 'docs/sdk.md'
+              - 'crates/xcb-runtime/src/claude.rs'
+              - 'crates/xcb-runtime/src/codex/config.rs'
+              - 'crates/xcb-runtime/src/devin/config.rs'
+              - '.github/workflows/ci.yml'
+            qualification:
+              - 'qualification/**'
+              - 'crates/xcb-runtime/src/qualification.rs'
+              - 'crates/xcb-runtime/src/qualification/**'
+              - 'crates/xcb-runtime/src/sandbox.rs'
+              - 'crates/xcb-runtime/src/egress.rs'
+              - 'crates/xcb-cli/src/doctor.rs'
+              - 'src/os-sandbox.ts'
+              - 'src/egress-bridge.ts'
+              - 'src/egress-client.ts'
+              - 'sandbox/**'
+              - '.github/workflows/ci.yml'
+            native_arm:
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'scripts/build-native.sh'
+              - 'scripts/check-native-archive.sh'
+              - 'scripts/check-glibc-floor.py'
+              - 'qualification/inbox-acceptance.py'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/release.yml'
+            rust:
+              - 'crates/**'
+              - 'scripts/*.ps1'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.github/workflows/ci.yml'
+
   check:
+    # Native Rust checks. Linux runs the generic gates (fmt, clippy, Python
+    # helper regressions); macOS runs only the OS-specific test suite.
     name: Check (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -24,70 +134,552 @@ jobs:
         os: [ubuntu-24.04, macos-15]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable 2026-09-03
         with:
           toolchain: 1.97.1
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      # rust-cache's key ignores Cargo.toml [profile] tables, so name the dev
+      # dependency debuginfo setting (Cargo.toml) here: otherwise main would
+      # keep restoring, and never re-save, objects built with the old one.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: deps-line-tables
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        with:
+          tool: cargo-nextest@0.9.146
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: "1.3.14"
+          bun-version: ${{ env.BUN_VERSION }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "24.19.0"
+          node-version: ${{ env.NODE_VERSION }}
+      # Pull requests only restore caches; main saves them (after install).
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: bun-cache
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
       - run: cargo fmt --all -- --check
+        if: runner.os == 'Linux'
+      # Native broker tests drive actual Bun and Node lock owners on PATH.
       - run: bun install --frozen-lockfile --ignore-scripts
-      - run: bun run check
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ steps.bun-cache.outputs.cache-primary-key }}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: runner.os == 'Linux'
         with:
           python-version: "3.12"
       - name: Native helper regressions
+        if: runner.os == 'Linux'
         run: |
           python3 -I qualification/application-prerequisites.py --self-test
           python3 -I scripts/application-renewal.test.py
+          python3 -I scripts/unattended-maintenance.test.py
           python3 -I crates/xcb-runtime/src/command/test_guest.py
           python3 -I crates/xcb-runtime/src/command/test_git_projection.py
           python3 -I crates/xcb-runtime/src/command/test_public_cache.py
           python3 -I scripts/prepare-command-dependencies.test.py
-      - run: cargo test --workspace --locked
+          python3 -I .github/scripts/codex-catalog.test.py
+          python3 -I scripts/check-glibc-floor.test.py
+      - name: Linux sandbox admission fixture
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends bubblewrap
+      # nextest runs the test binaries in parallel (cargo test ran them one
+      # after another). The workspace has no doctests, which nextest skips.
+      - run: cargo nextest run --workspace --locked --profile ci
+      # The runner has no login session; lingering starts its systemd user
+      # manager. Reuses the xcb binary the nextest build above produced
+      # (integration tests build the bin into target/debug).
+      - name: systemd user service round trip
+        if: runner.os == 'Linux'
+        run: |
+          sudo loginctl enable-linger "$USER"
+          ./scripts/check-systemd-service.sh target/debug/xcb
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        if: runner.os == 'Linux'
 
-  native-build:
-    name: Native build (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, macos-15]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
-        with:
-          toolchain: 1.97.1
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
-      - run: ./scripts/build-native.sh
-      - run: cp target/release/xcb "xcb-${{ matrix.os }}"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: xcb-${{ matrix.os }}
-          path: xcb-${{ matrix.os }}
-          if-no-files-found: error
-          retention-days: 30
-
-  site:
-    name: Site
+  compat:
+    # The complete compatibility-package gate: version contract, typecheck,
+    # tests, dist build, and packed-package install smoke check.
+    name: Compatibility package
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: "1.3.14"
+          bun-version: ${{ env.BUN_VERSION }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "24.19.0"
+          node-version: ${{ env.NODE_VERSION }}
+      # Pull requests only restore caches; main saves them (after install).
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: bun-cache
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ steps.bun-cache.outputs.cache-primary-key }}
+      - run: bun run check
+
+  compat-macos:
+    # Only the test suite, which branches on the macOS seatbelt and provider
+    # process paths; the generic typecheck, dist, and package gates run on Linux.
+    name: Compatibility tests (macos-15)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      # Pull requests only restore caches; main saves them (after install).
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: bun-cache
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ steps.bun-cache.outputs.cache-primary-key }}
+      - run: bun run test
+
+  native-build:
+    # The same runners as the release build, so every change proves the
+    # native binary builds, runs, and the Linux one stays within the glibc
+    # floor. It builds the `ci` profile (release without LTO) on pull requests
+    # and main alike, so main saves the cache pull requests restore; the LTO
+    # `release` build runs cold on every tag in release.yml.
+    name: Native build (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # rust-cache keys by OS family, not image: without its own key the
+          # 22.04 leg would restore objects compiled against glibc 2.39.
+          # The -ci suffix keeps the ci-profile objects apart from the older
+          # release-profile caches.
+          - os: ubuntu-22.04
+            cache-key: glibc-2.35-ci
+          - os: macos-15
+            cache-key: ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable 2026-09-03
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ matrix.cache-key }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: ./scripts/build-native.sh
+        env:
+          XCB_CARGO_PROFILE: ci
+      - name: Enforce the Linux glibc floor
+        if: runner.os == 'Linux'
+        run: python3 -I scripts/check-glibc-floor.py artifacts/*.tar.gz
+      - name: Isolated inbox operator acceptance
+        run: python3 -I qualification/inbox-acceptance.py target/ci/xcb --evidence-dir "$RUNNER_TEMP"
+      - name: Preserve inbox acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: inbox-acceptance-${{ matrix.os }}
+          path: ${{ runner.temp }}/xcb-inbox-acceptance-*/
+          if-no-files-found: ignore
+          retention-days: 14
+      - run: cp target/ci/xcb "xcb-${{ matrix.os }}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: xcb-${{ matrix.os }}
+          path: xcb-${{ matrix.os }}
+          if-no-files-found: error
+          retention-days: 30
+
+  native-build-arm:
+    # The linux-aarch64 release build on the release runner. Pull requests
+    # run it only when the build, toolchain, or dependency inputs change;
+    # every push to main runs it, so ordinary Rust changes are still built
+    # for ARM64 before a release tag.
+    name: Native build (ubuntu-22.04-arm)
+    needs: changes
+    if: needs.changes.outputs.native_arm == 'true'
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable 2026-09-03
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: glibc-2.35-aarch64
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # build-native.sh re-admits the archive with the installer's rules.
+      - run: ./scripts/build-native.sh
+      - name: Enforce the Linux glibc floor
+        run: python3 -I scripts/check-glibc-floor.py artifacts/*.tar.gz
+      - name: Isolated inbox operator acceptance
+        run: python3 -I qualification/inbox-acceptance.py target/release/xcb --evidence-dir "$RUNNER_TEMP"
+      - name: Preserve inbox acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: inbox-acceptance-ubuntu-22.04-arm
+          path: ${{ runner.temp }}/xcb-inbox-acceptance-*/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  site:
+    name: Site
+    needs: changes
+    if: needs.changes.outputs.site == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      # Pull requests only restore caches; main saves them.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: bun-cache
+        with:
+          path: ~/.bun/install/cache
+          key: bun-site-${{ runner.os }}-${{ hashFiles('site/bun.lock') }}
+          restore-keys: bun-site-${{ runner.os }}-
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: next-cache
+        with:
+          path: site/.next/cache
+          key: nextjs-${{ runner.os }}-${{ hashFiles('site/bun.lock') }}-${{ hashFiles('site/**/*.ts', 'site/**/*.tsx', 'site/**/*.css') }}
+          restore-keys: nextjs-${{ runner.os }}-${{ hashFiles('site/bun.lock') }}-
       - run: bun install --frozen-lockfile --ignore-scripts
         working-directory: site
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ steps.bun-cache.outputs.cache-primary-key }}
       - run: bun run check
         working-directory: site
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.ref == 'refs/heads/main' && steps.next-cache.outputs.cache-hit != 'true'
+        with:
+          path: site/.next/cache
+          key: ${{ steps.next-cache.outputs.cache-primary-key }}
+      - name: Restore Chromium headless shell
+        id: chromium-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: site-chromium-full-${{ runner.os }}-${{ hashFiles('site/bun.lock') }}
+      # The verifier checks the full package-pinned Chromium executable and
+      # its launch arguments. Provision that browser and its system libraries.
+      - name: Install pinned Chromium
+        working-directory: site
+        run: node node_modules/playwright-core/cli.js install --with-deps --no-shell chromium
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.ref == 'refs/heads/main' && steps.chromium-cache.outputs.cache-hit != 'true'
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ steps.chromium-cache.outputs.cache-primary-key }}
+      - name: Check public pages in a browser
+        working-directory: site
+        env:
+          SITE_BROWSER_ARTIFACTS: ${{ runner.temp }}/site-browser
+        run: node scripts/verify-site-browser.mjs
+      - name: Save public page screenshots
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: site-browser
+          path: ${{ runner.temp }}/site-browser
+          retention-days: 7
+
+  qualification:
+    # Credential-free kernel-boundary evidence for the Linux bwrap backend,
+    # on a stock ubuntu-24.04 with the AppArmor user-namespace restriction
+    # left on and xcb's exact-path bwrap profile installed. The native test
+    # (`xcb doctor --qualify-sandbox`) runs from the Native build's Linux
+    # binary; the TypeScript probes cross-check the TS SDK backend on the
+    # same host. Runs when the probes, sandbox sources, or this workflow
+    # change.
+    name: Linux kernel-boundary probes
+    needs: [changes, native-build]
+    if: needs.changes.outputs.qualification == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install boundary tooling
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends bubblewrap apparmor iproute2 util-linux curl openssl
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: xcb-ubuntu-22.04
+          path: ${{ runner.temp }}/xcb-bin
+      - name: Install the Linux release binary
+        run: |
+          XCB_BIN="$RUNNER_TEMP/xcb-bin/xcb"
+          echo "XCB_BIN=$XCB_BIN" >> "$GITHUB_ENV"
+          echo "XCB_STATE_ROOT=$RUNNER_TEMP/xcb-state" >> "$GITHUB_ENV"
+          mv "$RUNNER_TEMP/xcb-bin/xcb-ubuntu-22.04" "$XCB_BIN"
+          chmod 0755 "$XCB_BIN"
+          "$XCB_BIN" --version
+      - name: Namespace capability facts
+        run: |
+          mkdir -p evidence
+          {
+            echo "apparmor_restrict=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo absent)"
+            echo "unprivileged_userns_clone=$(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo absent)"
+            echo "max_user_namespaces=$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo absent)"
+            echo "bwrap=$(command -v bwrap) $(bwrap --version 2>&1 | head -1)"
+            echo "bwrap_minimal=$(bwrap --unshare-all --ro-bind /bin/true /bin/true -- /bin/true 2>&1 && echo ok || echo denied)"
+          } | tee evidence/env-facts.txt
+      - name: Without the profile, the native test refuses to qualify
+        run: |
+          code=0
+          "$XCB_BIN" --state "$XCB_STATE_ROOT" --json doctor --provider claude --qualify-sandbox > evidence/restricted-native.json || code=$?
+          echo "restricted_native_exit=$code" | tee -a evidence/env-facts.txt
+          if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = "1" ]; then
+            test "$code" -ne 0
+            python3 -I -c 'import json,sys; r=json.load(open("evidence/restricted-native.json")); sys.exit(0 if r["qualified"] is False and r["apparmorProfile"] else 1)'
+          fi
+      - name: Install xcb's exact-path AppArmor profile for bwrap
+        run: |
+          sudo install -m 0644 crates/xcb-runtime/src/qualification/xcb-bwrap.apparmor /etc/apparmor.d/xcb-bwrap
+          sudo apparmor_parser -r /etc/apparmor.d/xcb-bwrap
+          {
+            echo "apparmor_restrict_with_profile=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo absent)"
+            echo "bwrap_minimal_with_profile=$(bwrap --unshare-all --ro-bind /bin/true /bin/true -- /bin/true 2>&1 && echo ok || echo denied)"
+          } | tee -a evidence/env-facts.txt
+      - name: TypeScript probes (SDK backend cross-check)
+        id: probes
+        run: |
+          BWRAP="$(command -v bwrap)"
+          SHA="$(sha256sum "$BWRAP" | cut -d' ' -f1)"
+          status=0
+          for probe in linux-sandbox linux-egress linux-loopback; do
+            code=0
+            timeout 300 bun "qualification/$probe.ts" --bwrap "$BWRAP" --bwrap-sha256 "$SHA" > "evidence/$probe.json" 2> "evidence/$probe.stderr" || code=$?
+            echo "$code" > "evidence/$probe.exitcode"
+            if [ "$code" -ne 0 ]; then status=1; fi
+          done
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+      - name: Native sandbox test writes the receipt
+        id: native
+        run: |
+          code=0
+          "$XCB_BIN" --state "$XCB_STATE_ROOT" --json doctor --provider claude --qualify-sandbox > evidence/native-qualification.json || code=$?
+          cp "$XCB_STATE_ROOT/qualification/linux.json" evidence/linux-qualification.json || true
+          "$XCB_BIN" --state "$XCB_STATE_ROOT" doctor --provider claude --qualify-sandbox > evidence/native-qualification.txt 2>&1 || true
+          echo "status=$code" >> "$GITHUB_OUTPUT"
+      - name: Doctor admits the receipt, and refuses it once the AppArmor setting drifts
+        id: admission
+        run: |
+          doctor() { "$XCB_BIN" --state "$XCB_STATE_ROOT" --json doctor > "evidence/$1.json" || true; }
+          check() {
+            python3 -I - "evidence/$1.json" "$2" "$3" <<'EOF'
+          import json, sys
+          sandbox = json.load(open(sys.argv[1]))["sandbox"]
+          want_qualified, want_receipt = sys.argv[2] == "true", sys.argv[3]
+          print(sys.argv[1], sandbox)
+          sys.exit(0 if sandbox["qualified"] is want_qualified and sandbox["receipt"] == want_receipt else 1)
+          EOF
+          }
+          doctor doctor-qualified && check doctor-qualified true current
+          # A receipt must bind the live AppArmor setting: flip it, and the
+          # same receipt stops admitting the host until it is flipped back.
+          before="$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)"
+          after=$((1 - before))
+          sudo sysctl -w "kernel.apparmor_restrict_unprivileged_userns=$after"
+          doctor doctor-drifted
+          sudo sysctl -w "kernel.apparmor_restrict_unprivileged_userns=$before"
+          check doctor-drifted false apparmor-changed
+          doctor doctor-restored && check doctor-restored true current
+      - name: Native and TypeScript probes agree
+        run: |
+          python3 -I - <<'EOF'
+          import json, pathlib
+          native = {p["name"]: p["passed"] for p in json.load(open("evidence/native-qualification.json"))["probes"]}
+          ts = {name: pathlib.Path(f"evidence/{name}.exitcode").read_text().strip() == "0" for name in native}
+          print("native", native, "typescript", ts)
+          assert native == ts, "native and TypeScript probes disagree"
+          EOF
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: linux-kernel-boundary-evidence
+          path: evidence/
+          if-no-files-found: warn
+      - name: Require probe evidence
+        if: steps.probes.outputs.status != '0' || steps.native.outputs.status != '0'
+        run: exit 1
+
+  windows:
+    # Native Windows x86_64: the workspace compiles and its tests pass. Runs
+    # only when Rust sources, the lockfile, the toolchain pin, or this
+    # workflow change, and Required admits the skip only then.
+    name: Check (windows-2025)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: windows-2025
+    timeout-minutes: 40
+    steps:
+      # Keep LF line endings so embedded fixtures hash the same as on Unix.
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable 2026-09-03
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # Same reason as the Check job: the key must change with the
+          # dependency debuginfo setting in Cargo.toml.
+          key: deps-line-tables
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo check --workspace --all-targets --locked --keep-going
+      # The default temp folder is under the home folder (AppData), where
+      # xcb refuses workspaces; tests make their workspaces in temp.
+      - run: cargo test --workspace --locked --no-fail-fast
+        env:
+          TMP: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
+      # Package the debug binary the tests just built exactly like a release
+      # zip, then install it twice through scripts/install.ps1 from a
+      # loopback server: a fresh install and an in-place replacement.
+      - name: Package and install the Windows zip
+        shell: pwsh
+        env:
+          XCB_CARGO_PROFILE: dev
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./scripts/build-native-windows.ps1
+          $version = (Select-String -LiteralPath Cargo.toml -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          $server = Start-Process python -ArgumentList '-m', 'http.server', '8765', '--bind', '127.0.0.1', '--directory', 'artifacts' -PassThru -WindowStyle Hidden
+          try {
+            # Wait until the loopback server serves the zip; a fixed sleep
+            # raced its startup on a busy runner.
+            $zipUrl = "http://127.0.0.1:8765/xcb-$version-windows-x86_64.zip"
+            $ready = $false
+            foreach ($try in 1..60) {
+              try { Invoke-WebRequest -UseBasicParsing -Method Head -Uri $zipUrl | Out-Null; $ready = $true; break } catch { Start-Sleep -Milliseconds 500 }
+            }
+            if (-not $ready) { throw "loopback server did not serve $zipUrl within 30 s" }
+            $env:XCB_VERSION = $version
+            $env:XCB_INSTALL_PREFIX = Join-Path $env:RUNNER_TEMP 'xcb-install'
+            $env:XCB_RELEASE_BASE_URL = 'http://127.0.0.1:8765'
+            $env:XCB_ADD_PATH = 'no'
+            $env:XCB_STATE = Join-Path $env:RUNNER_TEMP 'xcb-state'
+            foreach ($attempt in 1, 2) {
+              ./scripts/install.ps1
+              $installed = Join-Path $env:XCB_INSTALL_PREFIX 'bin\xcb.exe'
+              $reported = ((& $installed --version) | Out-String).Trim()
+              if ($reported -cne "xcb $version") { throw "installed xcb reports '$reported'" }
+            }
+            Get-Content (Join-Path $env:XCB_INSTALL_PREFIX 'share\xcb\install.json')
+            # Doctor reports missing providers with a non-zero exit; it must
+            # run to completion, not pass.
+            & $installed doctor
+            Write-Host "xcb doctor exited $LASTEXITCODE"
+          } finally {
+            Stop-Process -Id $server.Id -Force
+          }
+          exit 0
+
+  required:
+    # The one check branch policy requires. A job may be skipped only because
+    # the paths filter proved its inputs did not change; any other non-success
+    # result fails the gate.
+    name: Required
+    if: always()
+    needs:
+      - changes
+      - check
+      - compat
+      - compat-macos
+      - native-build
+      - native-build-arm
+      - site
+      - qualification
+      - windows
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Admit only success or a deliberate paths-filter skip
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          CODE_CHANGED: ${{ needs.changes.outputs.code }}
+          SITE_CHANGED: ${{ needs.changes.outputs.site }}
+          QUALIFICATION_CHANGED: ${{ needs.changes.outputs.qualification }}
+          NATIVE_ARM_CHANGED: ${{ needs.changes.outputs.native_arm }}
+          RUST_CHANGED: ${{ needs.changes.outputs.rust }}
+        run: |
+          python3 - <<'EOF'
+          import json, os, sys
+          needs = json.loads(os.environ["NEEDS"])
+          changed = {
+              "code": os.environ["CODE_CHANGED"],
+              "site": os.environ["SITE_CHANGED"],
+              "qualification": os.environ["QUALIFICATION_CHANGED"],
+              "native_arm": os.environ["NATIVE_ARM_CHANGED"],
+              "rust": os.environ["RUST_CHANGED"],
+          }
+          filtered = {
+              "check": "code",
+              "compat": "code",
+              "compat-macos": "code",
+              "native-build": "code",
+              "native-build-arm": "native_arm",
+              "site": "site",
+              "qualification": "qualification",
+              "windows": "rust",
+          }
+          failed = []
+          for job, info in sorted(needs.items()):
+              result = info.get("result")
+              if result == "success":
+                  continue
+              gate = filtered.get(job)
+              if result == "skipped" and gate and changed[gate] == "false":
+                  print(f"{job}: skipped because {gate} inputs did not change")
+                  continue
+              failed.append(f"{job}: {result}")
+          for line in failed:
+              print(f"::error::{line}")
+          sys.exit(1 if failed else 0)
+          EOF

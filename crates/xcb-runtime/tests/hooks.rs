@@ -1,3 +1,6 @@
+// These tests drive Unix permission bits, symlinks, or /bin/sh fixtures;
+// the Windows custody rules are covered by the platform tests.
+#![cfg(unix)]
 use std::{fs, os::unix::fs::PermissionsExt, path::Path};
 use xcb_core::{
     Provider,
@@ -19,6 +22,8 @@ fn script(root: &Path, name: &str, body: &str) -> std::path::PathBuf {
 
 fn input(workspace: &Path, event: Event) -> HookInput {
     let session = Session {
+        route_pins: Default::default(),
+        requirements: Default::default(),
         id: "s_test".parse().unwrap(),
         account: "a_test".parse().unwrap(),
         model: ModelChoice {
@@ -34,6 +39,7 @@ fn input(workspace: &Path, event: Event) -> HookInput {
         title: "Test".into(),
         pane: "focus".parse().unwrap(),
         state: State::Idle,
+        managed_task: None,
         revision: 0,
         created_at_ms: 1,
         last_active_at_ms: 1,
@@ -44,7 +50,7 @@ fn input(workspace: &Path, event: Event) -> HookInput {
 #[tokio::test]
 async fn hooks_are_disabled_until_enabled_and_receive_no_inherited_secret() {
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
+    let root = xcb_core::canonical(temp.path()).unwrap();
     let state = private::directory(&root.join("state")).unwrap();
     Store::open(&state).unwrap();
     let executable = script(
@@ -72,7 +78,7 @@ async fn hooks_are_disabled_until_enabled_and_receive_no_inherited_secret() {
 #[tokio::test]
 async fn changed_and_stalled_hooks_fail_closed_without_escaping_the_deadline() {
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
+    let root = xcb_core::canonical(temp.path()).unwrap();
     let state = private::directory(&root.join("state")).unwrap();
     Store::open(&state).unwrap();
     let executable = script(&root, "hook.sh", "#!/bin/sh\nsleep 10\n");

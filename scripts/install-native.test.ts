@@ -1,18 +1,64 @@
-import { afterEach, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
+import { afterEach, expect, setDefaultTimeout, test } from "bun:test";
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync,
-  readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync,
+  readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
+import { fixtureRequirement, withMacosVerifierFixture } from "./macos-signature-fixture";
+
+// Shell/hash/archive fixtures can exceed Bun's 5s default on a busy host.
+// These harness budgets do not change the installer's guards or deadlines.
+setDefaultTimeout(30_000);
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 const hash = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
-const binary = (version: string, label = "candidate") => `#!/bin/sh\n[ "$#" = 1 ] && [ "$1" = --version ] || exit 17\nprintf 'xcb ${version}\\n'\n# ${label}\n`;
+const binary = (version: string, label = "candidate") => `#!/bin/sh\n[ -z "\${FIXTURE_EXECUTION_LOG:-}" ] || printf 'executed\\n' >> "$FIXTURE_EXECUTION_LOG"\n[ "$#" = 1 ] && [ "$1" = --version ] || exit 17\nprintf 'xcb ${version}\\n'\n# ${label}\n`;
+
+function completed(result: SpawnSyncReturns<string>): SpawnSyncReturns<string> {
+  const detail = JSON.stringify({
+    error: result.error?.message, status: result.status, signal: result.signal, stderr: result.stderr,
+  });
+  // The installer's TERM trap exits 1, so status alone can hide ETIMEDOUT
+  // or let a timed-out process satisfy an expected refusal.
+  expect(result.error, detail).toBeUndefined();
+  expect(result.signal, detail).toBeNull();
+  return result;
+}
+
+/** `uname` reporting FIXTURE_UNAME_S / FIXTURE_UNAME_M when set, so one host
+ * can exercise every platform's archive selection. */
+const unameStub = `#!/bin/sh
+case "$1" in
+  -s) if [ -n "\${FIXTURE_UNAME_S:-}" ]; then printf '%s\\n' "$FIXTURE_UNAME_S"; exit 0; fi ;;
+  -m) if [ -n "\${FIXTURE_UNAME_M:-}" ]; then printf '%s\\n' "$FIXTURE_UNAME_M"; exit 0; fi ;;
+esac
+exec /usr/bin/uname "$@"
+`;
+
+/** Hosts with release archives, as `uname -s`/`uname -m` report them, and the
+ * archive platform each installs. install.sh and install-native.sh must agree
+ * on this table. */
+const releaseHosts = [
+  ["Darwin", "arm64", "darwin-aarch64"],
+  ["Darwin", "aarch64", "darwin-aarch64"],
+  ["Linux", "x86_64", "linux-x86_64"],
+  ["Linux", "amd64", "linux-x86_64"],
+  ["Linux", "aarch64", "linux-aarch64"],
+  ["Linux", "arm64", "linux-aarch64"],
+] as const;
+
+/** Hosts without release archives, and the refusal each gets. */
+const refusedHosts = [
+  ["Darwin", "x86_64", "no release build for Intel Macs"],
+  ["Linux", "riscv64", "no release build for Linux/riscv64"],
+  ["Linux", "armv7l", "no release build for Linux/armv7l"],
+  ["FreeBSD", "amd64", "no release build for FreeBSD/amd64"],
+] as const;
 
 type Entry = { name: string; type?: string; contents?: string; link?: string };
 function archive(entries: readonly Entry[]): Buffer {
@@ -72,7 +118,8 @@ if [ -n "$install_root" ] && [ "\${FIXTURE_CARGO_SKIP_INSTALL:-}" != yes ]; then
   cp "$artifact_dir/xcb" "$install_root/bin/xcb"
 fi
 `, { mode: 0o755 });
-  writeFileSync(join(stubs, "curl"), `#!/bin/sh\n[ "$#" = 4 ] && [ "$1" = -fsSL ] && [ "$2" = -o ] || exit 19\ncase "$4" in\n *.tar.gz.sha256) cp "$FIXTURE_CHECKSUM" "$3" ;;\n *.tar.gz) cp "$FIXTURE_ARCHIVE" "$3" ;;\n *) exit 20 ;;\nesac\n`, { mode: 0o755 });
+  writeFileSync(join(stubs, "curl"), `#!/bin/sh\n[ "$1" = -fsSL ] || exit 19\nout=\nurl=\nwhile [ "$#" -gt 0 ]; do\n  case "$1" in\n    -o) out=$2; shift 2 ;;\n    *) url=$1; shift ;;\n  esac\ndone\n[ -n "$out" ] || exit 19\nprintf '%s\\n' "$url" >> "$FIXTURE_CURL_LOG"\ncase "$url" in\n *.tar.gz.sha256) cp "$FIXTURE_CHECKSUM" "$out" ;;\n *.tar.gz) cp "$FIXTURE_ARCHIVE" "$out" ;;\n *) exit 20 ;;\nesac\n`, { mode: 0o755 });
+  writeFileSync(join(stubs, "uname"), unameStub, { mode: 0o755 });
   writeFileSync(join(stubs, "tar"), `#!/bin/sh\nif [ "$1" = -xzOf ]; then printf 'extract\\n' > "$FIXTURE_EXTRACT_LOG"; fi\nexec /usr/bin/tar "$@"\n`, { mode: 0o755 });
   const archivePath = join(root, "archive.tar.gz"), checksum = join(root, "checksum");
   function release(entries: readonly Entry[] = [{ name: "xcb", contents: binary(version) }], corruptChecksum = false) {
@@ -81,21 +128,31 @@ fi
     writeFileSync(checksum, (corruptChecksum ? "0".repeat(64) : hash(bytes)) + "\n");
   }
   function run(fromRelease = false, extra: Record<string, string> = {}) {
-    return spawnSync("/bin/sh", [join(repository, "scripts/install-native.sh")], {
-      cwd: repository, encoding: "utf8", timeout: 10_000, maxBuffer: 64 * 1024,
+    return completed(spawnSync("/bin/sh", [join(repository, "scripts/install-native.sh")], {
+      cwd: repository, encoding: "utf8", timeout: 20_000, maxBuffer: 64 * 1024,
       env: {
         PATH: `${stubs}:/usr/bin:/bin`, HOME: join(root, "home"), LC_ALL: "C",
         CARGO: join(stubs, "cargo"), XCB_INSTALL_PREFIX: prefix, XCB_VERSION: fromRelease ? "v0.4.0" : "", XCB_ADD_PATH: "ask",
         FIXTURE_BINARY: candidate, FIXTURE_CARGO_LOG: join(root, "cargo.log"),
-        FIXTURE_ARCHIVE: archivePath, FIXTURE_CHECKSUM: checksum, FIXTURE_EXTRACT_LOG: join(root, "extract.log"), ...extra,
+        FIXTURE_ARCHIVE: archivePath, FIXTURE_CHECKSUM: checksum, FIXTURE_EXTRACT_LOG: join(root, "extract.log"),
+        FIXTURE_CURL_LOG: join(root, "curl.log"), ...extra,
       },
-    });
+    }));
   }
   function unchanged() {
     expect(readFileSync(destination, "utf8")).toBe(previous);
     expect(readdirSync(join(prefix, "bin"))).toEqual(["xcb"]);
   }
-  return { root, repository, prefix, candidate, destination, previous, release, run, unchanged };
+  function mockMacosVerifier() {
+    const installer = join(repository, "scripts/install-native.sh");
+    writeFileSync(installer, withMacosVerifierFixture(readFileSync(installer, "utf8"), stubs));
+    return {
+      FIXTURE_UNAME_S: "Darwin", FIXTURE_UNAME_M: "arm64", XCB_VERSION: "0.15.2",
+      FIXTURE_CODESIGN_RESULT: "valid", FIXTURE_CODESIGN_LOG: join(root, "codesign.log"),
+      FIXTURE_EXECUTION_LOG: join(root, "executed.log"),
+    };
+  }
+  return { root, repository, prefix, candidate, destination, previous, release, run, unchanged, mockMacosVerifier };
 }
 
 test("native source upgrade validates staged bytes, atomically replaces, and backs up the old digest", () => {
@@ -126,6 +183,34 @@ test("native source upgrade validates staged bytes, atomically replaces, and bac
     expect(existsSync(manifest.helperPath)).toBe(true);
     expect(statSync(join(f.prefix, "share/xcb")).mode & 0o777).toBe(0o700);
   } finally { closeSync(old); }
+});
+
+test("PATH instructions preserve literal custom prefixes without shell expansion", () => {
+  const f = fixture();
+  const prefix = join(f.root, "prefix ' \" $USER `touch backtick-ran` $(touch dollar-ran) \\");
+  const initialPath = "/usr/bin:/bin";
+  const extra = { XCB_INSTALL_PREFIX: prefix, SHELL: "/bin/sh" };
+  const printed = f.run(false, extra);
+  expect(printed.status, printed.stderr).toBe(0);
+  const command = printed.stdout.split("\n").find(line => line.startsWith("  export PATH="));
+  expect(command).toBeDefined();
+  const execute = (script: string) => spawnSync("/bin/sh", ["-c", script], {
+    cwd: f.root, encoding: "utf8", env: { PATH: initialPath, USER: "expanded-user" },
+  });
+  const copied = execute(`${command}\nprintf '%s' "$PATH"`);
+  expect(copied.status).toBe(0);
+  expect(copied.stdout).toBe(`${join(prefix, "bin")}:${initialPath}`);
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    expect(f.run(false, { ...extra, XCB_ADD_PATH: "yes" }).status).toBe(0);
+  }
+  const profile = readFileSync(join(f.root, "home/.profile"), "utf8");
+  expect(profile.trim()).toBe(command!.trim());
+  const sourced = execute(`${profile}\nprintf '%s' "$PATH"`);
+  expect(sourced.status).toBe(0);
+  expect(sourced.stdout).toBe(`${join(prefix, "bin")}:${initialPath}`);
+  expect(existsSync(join(f.root, "backtick-ran"))).toBe(false);
+  expect(existsSync(join(f.root, "dollar-ran"))).toBe(false);
 });
 
 for (const configured of ["environment", "cargo-config"] as const) {
@@ -190,6 +275,39 @@ test("native release installs only the verified regular binary without invoking 
   expect(readdirSync(join(f.prefix, "bin"))).toEqual(["xcb"]);
 });
 
+for (const [system, machine, platform] of releaseHosts) {
+  test(`native release on ${system}/${machine} installs the ${platform} archive`, () => {
+    const f = fixture();
+    f.release();
+    const result = f.run(true, { FIXTURE_UNAME_S: system, FIXTURE_UNAME_M: machine });
+    expect(result.status).toBe(0);
+    expect(readFileSync(join(f.root, "curl.log"), "utf8").trim().split("\n")).toEqual([
+      `https://github.com/hraness/xcb/releases/download/v0.4.0/xcb-0.4.0-${platform}.tar.gz`,
+      `https://github.com/hraness/xcb/releases/download/v0.4.0/xcb-0.4.0-${platform}.tar.gz.sha256`,
+    ]);
+  });
+}
+
+for (const [system, machine, refusal] of refusedHosts) {
+  test(`native release on ${system}/${machine} refuses before downloading anything`, () => {
+    const f = fixture();
+    f.release();
+    const result = f.run(true, { FIXTURE_UNAME_S: system, FIXTURE_UNAME_M: machine });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain(refusal);
+    expect(existsSync(join(f.root, "curl.log"))).toBe(false);
+    expect(existsSync(join(f.root, "cargo.log"))).toBe(false);
+    f.unchanged();
+  });
+}
+
+test("native source install still builds on a host without release archives", () => {
+  const f = fixture();
+  const result = f.run(false, { FIXTURE_UNAME_S: "Darwin", FIXTURE_UNAME_M: "x86_64" });
+  expect(result.status).toBe(0);
+  expect(existsSync(join(f.root, "cargo.log"))).toBe(true);
+});
+
 test("native invalid release coordinate never falls back to a source build", () => {
   const f = fixture();
   expect(f.run(true, { XCB_VERSION: "v" }).status).not.toBe(0);
@@ -213,6 +331,86 @@ test("native release binary version mismatch preserves the installed binary", ()
   f.unchanged();
 });
 
+test("macOS release verifies the pinned Developer ID before executing and installing the candidate", () => {
+  const f = fixture("0.15.2");
+  f.release();
+  const extra = f.mockMacosVerifier();
+  const result = f.run(true, extra);
+  expect(result.status, result.stderr).toBe(0);
+  const args = readFileSync(extra.FIXTURE_CODESIGN_LOG, "utf8").trim().split("\n");
+  expect(args.slice(0, 5)).toEqual(["--verify", "--strict", "--all-architectures", "--test-requirement", fixtureRequirement]);
+  expect(args[5]).toEndWith("/candidate");
+  expect(readFileSync(extra.FIXTURE_EXECUTION_LOG, "utf8")).toBe("executed\n");
+  expect(readFileSync(f.destination, "utf8")).toBe(binary("0.15.2"));
+});
+
+for (const verdict of ["unsigned", "adhoc", "wrong-team", "wrong-identifier", "tampered", "untrusted-anchor", "wrong-certificate"]) {
+  test(`macOS release rejects verifier verdict ${verdict} without executing or replacing anything`, () => {
+    const f = fixture("0.15.2");
+    f.release();
+    const extra = f.mockMacosVerifier();
+    const metadata = join(f.prefix, "share/xcb");
+    mkdirSync(metadata, { recursive: true });
+    writeFileSync(join(metadata, "install-native.sh"), "preserve installer");
+    writeFileSync(join(metadata, "install.json"), "preserve manifest");
+    const result = f.run(true, { ...extra, FIXTURE_CODESIGN_RESULT: verdict });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("required Apple Developer ID signature");
+    expect(existsSync(extra.FIXTURE_EXECUTION_LOG)).toBe(false);
+    expect(readFileSync(join(metadata, "install-native.sh"), "utf8")).toBe("preserve installer");
+    expect(readFileSync(join(metadata, "install.json"), "utf8")).toBe("preserve manifest");
+    f.unchanged();
+  });
+}
+
+test("an unconfigured macOS release Team fails closed before candidate execution", () => {
+  const f = fixture("0.15.2");
+  f.release();
+  const extra = f.mockMacosVerifier();
+  const installer = join(f.repository, "scripts/install-native.sh");
+  writeFileSync(installer, readFileSync(installer, "utf8").replace(/apple_team_id='[^']*'/, "apple_team_id='__XCB_APPLE_TEAM_ID__'"));
+  const result = f.run(true, extra);
+  expect(result.status).not.toBe(0);
+  expect(result.stderr).toContain("Apple Developer Team ID is not configured");
+  expect(existsSync(extra.FIXTURE_EXECUTION_LOG)).toBe(false);
+  expect(existsSync(extra.FIXTURE_CODESIGN_LOG)).toBe(false);
+  f.unchanged();
+});
+
+for (const version of ["0.15.2", "0.15.10", "0.16.0", "1.0.0"]) {
+  test(`macOS version ${version} never falls back to historical unsigned admission`, () => {
+    const f = fixture(version);
+    f.release();
+    const extra = f.mockMacosVerifier();
+    const result = f.run(true, { ...extra, XCB_VERSION: version, FIXTURE_CODESIGN_RESULT: "unsigned" });
+    expect(result.status).not.toBe(0);
+    expect(existsSync(extra.FIXTURE_CODESIGN_LOG)).toBe(true);
+    expect(existsSync(extra.FIXTURE_EXECUTION_LOG)).toBe(false);
+    f.unchanged();
+  });
+}
+
+test("explicit historical macOS release 0.15.1 retains its pre-signing installation contract", () => {
+  const f = fixture("0.15.1");
+  f.release();
+  const extra = f.mockMacosVerifier();
+  const result = f.run(true, { ...extra, XCB_VERSION: "0.15.1", FIXTURE_CODESIGN_RESULT: "unsigned" });
+  expect(result.status, result.stderr).toBe(0);
+  expect(existsSync(extra.FIXTURE_CODESIGN_LOG)).toBe(false);
+});
+
+test("source macOS builds and Linux releases do not require a Developer ID signature", () => {
+  for (const fromRelease of [false, true]) {
+    const f = fixture("0.15.2");
+    f.release();
+    writeFileSync(join(f.repository, "Cargo.toml"), '[workspace.package]\nversion = "0.15.2"\n');
+    const extra = f.mockMacosVerifier();
+    const result = f.run(fromRelease, { ...extra, XCB_VERSION: fromRelease ? "0.15.2" : "", FIXTURE_UNAME_S: fromRelease ? "Linux" : "Darwin", FIXTURE_CODESIGN_RESULT: "unsigned" });
+    expect(result.status, result.stderr).toBe(0);
+    expect(existsSync(extra.FIXTURE_CODESIGN_LOG)).toBe(false);
+  }
+});
+
 for (const [label, entries] of Object.entries({
   traversal: [{ name: "../escaped", contents: binary("0.4.0") }],
   absolute: [{ name: "/xcb", contents: binary("0.4.0") }],
@@ -220,6 +418,7 @@ for (const [label, entries] of Object.entries({
   hardlink: [{ name: "xcb", type: "1", link: "../escaped" }],
   directory: [{ name: "xcb", type: "5" }],
   extra: [{ name: "xcb", contents: binary("0.4.0") }, { name: "extra", contents: "forbidden" }],
+  appledouble: [{ name: "._xcb", contents: "metadata" }, { name: "xcb", contents: binary("0.4.0") }],
   duplicate: [{ name: "xcb", contents: binary("0.4.0") }, { name: "xcb", contents: binary("0.4.0") }],
 } satisfies Record<string, Entry[]>)) {
   test(`native release refuses ${label} archive entries before extraction`, () => {
@@ -252,6 +451,30 @@ test("native upgrade reuses only an unchanged digest backup", () => {
   expect(readFileSync(backup, "utf8")).toBe(f.previous);
 });
 
+test("native upgrade keeps only the three most recent digest backups", () => {
+  const f = fixture();
+  const bin = join(f.prefix, "bin");
+  const [oldest, older, newer, newest] = ["a", "b", "c", "d"].map((label, index) => {
+    const path = join(bin, `xcb.previous.${hash(label)}`);
+    writeFileSync(path, label, { mode: 0o500 });
+    const seconds = 1_700_000_000 + index * 60;
+    utimesSync(path, seconds, seconds);
+    return path;
+  });
+  const unrelated = join(bin, "xcb.previous.notes");
+  writeFileSync(unrelated, "keep");
+  utimesSync(unrelated, 1_600_000_000, 1_600_000_000);
+  expect(f.run().status).toBe(0);
+  const backup = join(bin, `xcb.previous.${hash(f.previous)}`);
+  expect(readFileSync(backup, "utf8")).toBe(f.previous);
+  // The two newest older backups stay; the two oldest go.
+  expect(existsSync(newest!)).toBe(true);
+  expect(existsSync(newer!)).toBe(true);
+  expect(existsSync(older!)).toBe(false);
+  expect(existsSync(oldest!)).toBe(false);
+  expect(readFileSync(unrelated, "utf8")).toBe("keep");
+});
+
 test("native upgrade refuses a symlink destination and leaves its target untouched", () => {
   const f = fixture();
   const target = join(f.root, "unrelated");
@@ -262,11 +485,161 @@ test("native upgrade refuses a symlink destination and leaves its target untouch
   expect(readFileSync(target, "utf8")).toBe("preserve unrelated data");
 });
 
-test("native install does not bypass an existing installation owner", () => {
+test("native install does not bypass a live installation owner", () => {
   const f = fixture();
-  mkdirSync(join(f.prefix, "bin/.xcb-install-lock"));
+  const lock = join(f.prefix, "bin/.xcb-install-lock");
+  mkdirSync(lock);
+  // This test process is alive for the install attempt, so its pid is a real
+  // live owner the installer must not reclaim or bypass.
+  writeFileSync(join(lock, "pid"), `${process.pid}\n`);
   expect(f.run().status).not.toBe(0);
   expect(readFileSync(f.destination, "utf8")).toBe(f.previous);
   expect(existsSync(join(f.root, "cargo.log"))).toBe(false);
-  expect(existsSync(join(f.prefix, "bin/.xcb-install-lock"))).toBe(true);
+  expect(readFileSync(join(lock, "pid"), "utf8")).toBe(`${process.pid}\n`);
+});
+
+test("native install reclaims a stale lock from a dead installer", () => {
+  const f = fixture();
+  const lock = join(f.prefix, "bin/.xcb-install-lock");
+  mkdirSync(lock);
+  // A pid that cannot be a live process: well above every platform's pid
+  // ceiling, so kill -0 always reports it dead.
+  writeFileSync(join(lock, "pid"), "99999999\n");
+  expect(f.run().status).toBe(0);
+  expect(readFileSync(f.destination, "utf8")).toBe(binary("0.4.0"));
+  expect(existsSync(lock)).toBe(false);
+});
+
+test("native install reclaims a lock whose owner died before recording its pid", () => {
+  const f = fixture();
+  mkdirSync(join(f.prefix, "bin/.xcb-install-lock"));
+  const result = f.run();
+  expect(result.status).toBe(0);
+  expect(readFileSync(f.destination, "utf8")).toBe(binary("0.4.0"));
+});
+
+// scripts/install.sh, the xcb.sh bootstrap, must accept exactly the hosts the
+// tag-pinned installer can install, and stop early when the requested release
+// has no archive for this host.
+function bootstrap(system: string, machine: string, assetStatus = "200") {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "xcb-bootstrap-")));
+  roots.push(root);
+  const stubs = join(root, "stubs");
+  mkdirSync(stubs);
+  writeFileSync(join(stubs, "uname"), unameStub, { mode: 0o755 });
+  // HEAD probes (-I) answer FIXTURE_ASSET_STATUS; the installer download
+  // serves a stand-in that records the environment it ran with.
+  writeFileSync(join(stubs, "curl"), `#!/bin/sh
+out=
+url=
+head=no
+for argument do
+  case "$argument" in -sIL) head=yes ;; esac
+done
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o|-w|--proto|--connect-timeout|--max-time) [ "$1" = -o ] && out=$2; shift 2 ;;
+    -*) shift ;;
+    *) url=$1; shift ;;
+  esac
+done
+printf '%s %s\\n' "$head" "$url" >> "$FIXTURE_CURL_LOG"
+if [ "$head" = yes ]; then printf '%s' "$FIXTURE_ASSET_STATUS"; exit 0; fi
+printf '#!/bin/sh\\n# Install native xcb stand-in\\nprintf "%%s\\\\n" "$XCB_VERSION" > "$FIXTURE_INSTALLER_LOG"\\n' > "$out"
+`, { mode: 0o755 });
+  const result = completed(spawnSync("/bin/sh", [new URL("./install.sh", import.meta.url).pathname], {
+    encoding: "utf8", timeout: 20_000, maxBuffer: 64 * 1024,
+    env: {
+      PATH: `${stubs}:/usr/bin:/bin`, HOME: join(root, "home"), LC_ALL: "C", TMPDIR: root,
+      XCB_VERSION: "0.4.0", XCB_INSTALL_PREFIX: join(root, "prefix"),
+      FIXTURE_UNAME_S: system, FIXTURE_UNAME_M: machine, FIXTURE_ASSET_STATUS: assetStatus,
+      FIXTURE_CURL_LOG: join(root, "curl.log"), FIXTURE_INSTALLER_LOG: join(root, "installer.log"),
+    },
+  }));
+  const read = (name: string) => existsSync(join(root, name)) ? readFileSync(join(root, name), "utf8") : null;
+  return { result, curl: read("curl.log"), installer: read("installer.log") };
+}
+
+for (const [system, machine, platform] of releaseHosts) {
+  test(`bootstrap on ${system}/${machine} checks the ${platform} archive, then runs the tag's installer`, () => {
+    const { result, curl, installer } = bootstrap(system, machine);
+    expect(result.status).toBe(0);
+    expect(curl?.trim().split("\n")).toEqual([
+      `yes https://github.com/hraness/xcb/releases/download/v0.4.0/xcb-0.4.0-${platform}.tar.gz`,
+      "no https://raw.githubusercontent.com/hraness/xcb/v0.4.0/scripts/install-native.sh",
+    ]);
+    expect(installer).toBe("0.4.0\n");
+  });
+}
+
+for (const [system, machine] of refusedHosts) {
+  test(`bootstrap on ${system}/${machine} refuses before any download`, () => {
+    const { result, curl } = bootstrap(system, machine);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("no release build for");
+    expect(result.stderr).toContain("https://xcb.sh/install#source");
+    expect(curl).toBeNull();
+  });
+}
+
+test("bootstrap stops when the release has no archive for this host", () => {
+  const { result, curl, installer } = bootstrap("Linux", "aarch64", "404");
+  expect(result.status).not.toBe(0);
+  expect(result.stderr).toContain("xcb 0.4.0 has no release build for Linux aarch64");
+  expect(curl?.trim().split("\n")).toHaveLength(1);
+  expect(installer).toBeNull();
+});
+
+test("bootstrap leaves an inconclusive archive probe to the installer", () => {
+  for (const status of ["000", "403", "500"]) {
+    const { result, installer } = bootstrap("Linux", "aarch64", status);
+    expect(result.status).toBe(0);
+    expect(installer).toBe("0.4.0\n");
+  }
+});
+
+
+test("release install records bind the binary, helper and explicit version pin", () => {
+  const f = fixture();
+  f.release();
+  for (const pinned of ["true", "false"]) {
+    const result = f.run(true, { XCB_INSTALL_PINNED: pinned });
+    expect(result.status, result.stderr).toBe(0);
+    const record = JSON.parse(readFileSync(join(f.prefix, "share/xcb/install.json"), "utf8"));
+    expect(record.version).toBe(2);
+    expect(record.installMethod).toBe("release");
+    expect(record.sourceRoot).toBe("");
+    expect(record.versionPinned).toBe(pinned === "true");
+    expect(record.binarySha256).toBe(hash(readFileSync(f.destination)));
+    expect(record.helperSha256).toBe(hash(readFileSync(record.helperPath)));
+    expect(statSync(join(f.prefix, "share/xcb/update-use.lock")).mode & 0o777).toBe(0o600);
+  }
+});
+
+test("a foreign release repository is rejected before replacing anything", () => {
+  const f = fixture();
+  f.release();
+  const result = f.run(true, { XCB_GITHUB: "foreign/xcb" });
+  expect(result.status).not.toBe(0);
+  expect(result.stderr).toContain("release repository must be hraness/xcb");
+  f.unchanged();
+});
+
+
+test("installer keeps the parent-death guard until a complete verified install", () => {
+  const f = fixture();
+  const share = join(f.prefix, "share/xcb");
+  mkdirSync(share, { recursive: true, mode: 0o700 });
+  const guard = join(share, "update-in-progress");
+  const token = "xcb-update-v1:0123456789abcdef0123456789abcdef";
+  writeFileSync(guard, `${token}\n`, { mode: 0o600 });
+  f.release(undefined, true);
+  const failed = f.run(true, { XCB_UPDATE_GUARD: token });
+  expect(failed.status).not.toBe(0);
+  expect(readFileSync(guard, "utf8")).toBe(`${token}\n`);
+  expect(readFileSync(f.destination, "utf8")).toBe(f.previous);
+  f.release();
+  const installed = f.run(true, { XCB_UPDATE_GUARD: token });
+  expect(installed.status, installed.stderr).toBe(0);
+  expect(existsSync(guard)).toBe(false);
 });

@@ -7,11 +7,7 @@ use std::{
 
 fn canonical(path: &Path) -> Result<String> {
     let text = path.to_str().ok_or(Error::PrivateState)?;
-    if !path.is_absolute()
-        || text.len() > 4096
-        || text.chars().any(char::is_control)
-        || path.canonicalize()? != path
-    {
+    if !path.is_absolute() || !xcb_core::bounded_path(text) || xcb_core::canonical(path)? != path {
         return Err(Error::PrivateState);
     }
     Ok(text.to_owned())
@@ -19,7 +15,7 @@ fn canonical(path: &Path) -> Result<String> {
 
 fn canonical_child(path: &Path) -> Result<String> {
     let name = path.file_name().ok_or(Error::PrivateState)?;
-    let parent = path.parent().ok_or(Error::PrivateState)?.canonicalize()?;
+    let parent = xcb_core::canonical(path.parent().ok_or(Error::PrivateState)?)?;
     if parent.join(name) != path {
         return Err(Error::PrivateState);
     }
@@ -28,7 +24,7 @@ fn canonical_child(path: &Path) -> Result<String> {
 
 fn canonical_len(path: &Path) -> Result<String> {
     let text = path.to_str().ok_or(Error::PrivateState)?;
-    if !path.is_absolute() || text.len() > 4096 || text.chars().any(char::is_control) {
+    if !path.is_absolute() || !xcb_core::bounded_path(text) {
         return Err(Error::PrivateState);
     }
     Ok(text.to_owned())
@@ -38,15 +34,8 @@ fn canonical_len(path: &Path) -> Result<String> {
 /// `canonical` the declared target may cross symlinks — bwrap mounts the
 /// resolved source at this literal location inside the namespace.
 fn mount_target(path: &Path) -> Result<String> {
-    use std::path::Component;
     let text = path.to_str().ok_or(Error::PrivateState)?;
-    if !path.is_absolute()
-        || text.len() > 4096
-        || text.chars().any(char::is_control)
-        || path
-            .components()
-            .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
-    {
+    if !xcb_core::absolute_clean(path) || !xcb_core::bounded_path(text) {
         return Err(Error::PrivateState);
     }
     Ok(text.to_owned())
@@ -95,6 +84,23 @@ pub fn codex_seatbelt(
     catalog: &Path,
     ca_bundle: &Path,
 ) -> Result<String> {
+    codex_seatbelt_with_native(
+        executable, scratch, profile, config, catalog, ca_bundle, None,
+    )
+}
+
+/// The only additional executable is xcb's byte relay, confined to one private
+/// authenticated socket. Browser processes remain owned by the host connector.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn codex_seatbelt_with_native(
+    executable: &Path,
+    scratch: &Path,
+    profile: &Path,
+    config: &Path,
+    catalog: &Path,
+    ca_bundle: &Path,
+    native: Option<(&Path, &Path)>,
+) -> Result<String> {
     if executable.starts_with(scratch)
         || !profile.starts_with(scratch)
         || config.parent() != Some(profile)
@@ -109,10 +115,21 @@ pub fn codex_seatbelt(
     let config = quoted(config)?;
     let catalog = quoted(catalog)?;
     let ca_bundle = quoted(ca_bundle)?;
+    let native_rules = match native {
+        Some((helper, socket)) => {
+            let helper = quoted(helper)?;
+            let socket = quoted(socket)?;
+            format!(
+                "(allow process-fork)\n(allow process-exec (literal {helper}))\n(allow file-read* file-map-executable (literal {helper}))\n(allow file-read-metadata (path-ancestors {helper}) (path-ancestors {socket}) (literal {socket}))\n(allow network-outbound (literal {socket}))\n"
+            )
+        }
+        None => String::new(),
+    };
     Ok(format!(
         r#"(version 1)
 (deny default)
 (allow process-exec (literal {exe}))
+{native_rules}
 (allow process-info* (target self))
 (allow signal (target self))
 (allow sysctl-read)
@@ -240,7 +257,7 @@ pub struct BwrapPin {
 }
 impl BwrapPin {
     pub fn admit(path: &Path) -> Result<Self> {
-        if path.canonicalize()? != path {
+        if xcb_core::canonical(path)? != path {
             return Err(Error::Unavailable("sandbox wrapper is not canonical"));
         }
         let sha256 = process::wrapper_digest(path)?;
@@ -250,7 +267,7 @@ impl BwrapPin {
         })
     }
     pub fn verify(&self) -> Result<()> {
-        if self.executable.canonicalize()? != self.executable
+        if xcb_core::canonical(&self.executable)? != self.executable
             || process::wrapper_digest(&self.executable)? != self.sha256
         {
             return Err(Error::Unavailable("sandbox wrapper changed"));
@@ -261,6 +278,12 @@ impl BwrapPin {
 
 pub const BWRAP_CANDIDATES: &[&str] = &["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"];
 
+#[cfg(windows)]
+pub fn bwrap_candidate() -> Option<PathBuf> {
+    None
+}
+
+#[cfg(unix)]
 pub fn bwrap_candidate() -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     BWRAP_CANDIDATES
@@ -271,7 +294,7 @@ pub fn bwrap_candidate() -> Option<PathBuf> {
                 .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
                 .unwrap_or(false)
         })
-        .find_map(|path| path.canonicalize().ok())
+        .find_map(|path| xcb_core::canonical(path).ok())
 }
 
 pub struct LinuxSandbox {
@@ -279,49 +302,80 @@ pub struct LinuxSandbox {
     pub admitted: bool,
     pub unprivileged_userns_clone: Option<bool>,
     pub max_user_namespaces: Option<u64>,
+    /// Live `kernel.apparmor_restrict_unprivileged_userns`: `Some(true)` on
+    /// Ubuntu 23.10+ unless lifted; `None` when the kernel has no such knob.
+    pub apparmor_restricted: Option<bool>,
+    /// What the recorded sandbox test says about this host now.
+    pub receipt: ReceiptStatus,
     pub qualified: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReceiptStatus {
+    /// No bwrap to judge a receipt against.
+    NotChecked,
+    /// The sandbox test has never run here (or its result was removed).
+    Missing,
+    /// A receipt exists but can't be read, including one from an older xcb.
+    Unreadable,
+    Checked(crate::qualification::Verdict),
+}
+
 pub fn linux_sandbox(root: &std::path::Path) -> LinuxSandbox {
-    let sysctl = |path: &str| {
-        std::fs::read_to_string(path)
-            .ok()
-            .map(|text| text.trim().to_owned())
-    };
+    use crate::qualification::{LinuxQualification, Namespaces};
     let candidate = bwrap_candidate();
     let pin = candidate
         .as_deref()
         .and_then(|path| BwrapPin::admit(path).ok());
     let admitted = pin.is_some();
-    let userns_clone = sysctl("/proc/sys/kernel/unprivileged_userns_clone");
-    let max_userns = sysctl("/proc/sys/user/max_user_namespaces");
-    let qualified = match (&pin, &candidate) {
-        (Some(pin), Some(candidate)) => crate::qualification::LinuxQualification::load(root)
-            .is_ok_and(|receipt| {
-                receipt.qualified(
-                    candidate,
-                    &pin.sha256,
-                    // The receipt's facts are compared against the live host —
-                    // with the emitter's normalization: an unreadable knob
-                    // records "absent"/"0", never a missing field.
-                    &crate::qualification::Namespaces {
-                        unprivileged_userns_clone: userns_clone
-                            .clone()
-                            .unwrap_or_else(|| "absent".into()),
-                        max_user_namespaces: max_userns.clone().unwrap_or_else(|| "0".into()),
-                    },
-                    crate::now_ms(),
-                )
-            }),
-        _ => false,
+    let live = Namespaces::live();
+    let receipt = match (&pin, &candidate) {
+        (Some(pin), Some(candidate)) => match LinuxQualification::load(root) {
+            // The receipt's facts are compared against the live host.
+            Ok(receipt) => ReceiptStatus::Checked(receipt.verdict(
+                candidate,
+                &pin.sha256,
+                &live,
+                crate::now_ms(),
+            )),
+            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                ReceiptStatus::Missing
+            }
+            Err(_) => ReceiptStatus::Unreadable,
+        },
+        _ => ReceiptStatus::NotChecked,
     };
+    let qualified = receipt == ReceiptStatus::Checked(crate::qualification::Verdict::Qualified);
     LinuxSandbox {
         admitted,
         candidate,
-        unprivileged_userns_clone: userns_clone.map(|value| value == "1"),
-        max_user_namespaces: max_userns.and_then(|value| value.parse().ok()),
+        unprivileged_userns_clone: (live.unprivileged_userns_clone != "absent")
+            .then(|| live.unprivileged_userns_clone == "1"),
+        max_user_namespaces: live.max_user_namespaces.parse().ok(),
+        apparmor_restricted: (live.apparmor_restrict_unprivileged_userns != "absent")
+            .then(|| live.apparmor_restricted()),
+        receipt,
         qualified,
     }
+}
+
+/// Shared-library closure of one dynamic executable via `ldd`: every
+/// absolute path in the output (ELF interpreter and DT_NEEDED resolutions
+/// alike). Paths stay unresolved here; the planner mounts each resolved file
+/// at this declared location. A static executable yields an empty closure.
+pub fn shared_library_closure(executable: &Path) -> Result<Vec<PathBuf>> {
+    let output = std::process::Command::new("ldd").arg(executable).output()?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let paths: std::collections::BTreeSet<PathBuf> = text
+        .split_whitespace()
+        .map(Path::new)
+        .filter(|path| path.is_absolute())
+        .map(Path::to_owned)
+        .collect();
+    Ok(paths.into_iter().collect())
 }
 
 fn inside(inner: &str, outer: &str) -> bool {
@@ -365,7 +419,7 @@ pub fn bwrap_launch(
         .read_only
         .iter()
         .map(|path| {
-            let source = path.canonicalize()?;
+            let source = xcb_core::canonical(path)?;
             Ok((canonical_len(&source)?, mount_target(path)?))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -596,7 +650,7 @@ pub fn available() -> bool {
     cfg!(target_os = "macos") && Path::new("/usr/bin/sandbox-exec").is_file()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::{fs, io::Write, os::unix::fs::PermissionsExt};
@@ -616,7 +670,7 @@ mod tests {
 
     fn make_layout(egress: Egress, socket: bool, forwarder: bool) -> Layout {
         let root = tempfile::tempdir().unwrap();
-        let base = root.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(root.path()).unwrap();
         let executable = base.join("provider");
         file(&executable, 0o500);
         let scratch = base.join("scratch");
@@ -980,7 +1034,7 @@ mod tests {
         let many = vec!["a".to_owned(); 257];
         assert!(bwrap_launch(&layout.pin, &layout.spec, &many, &env(), &cwd(&layout)).is_err());
         let outside = tempfile::tempdir().unwrap();
-        let cwd = outside.path().canonicalize().unwrap();
+        let cwd = xcb_core::canonical(outside.path()).unwrap();
         assert!(bwrap_launch(&layout.pin, &layout.spec, &[], &env(), &cwd).is_err());
     }
 

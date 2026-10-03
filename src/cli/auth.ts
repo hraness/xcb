@@ -6,6 +6,7 @@ import { StringDecoder } from "node:string_decoder";
 import { privateDirectory } from "./state.ts";
 import type { CliBinaryInspection } from "./binaries.ts";
 import { writeFileOnce } from "../private-file.ts";
+import { waitForAuthChild, withAuthTerminal, type AuthChildExit } from "./auth-terminal.ts";
 
 const fail = (code: string): never => { throw new Error(code); };
 
@@ -65,7 +66,7 @@ function loginOutput(write: (text: string) => void, hidden: () => boolean, hide:
   };
 }
 
-/** Host-owned subscription token custody: `xcb auth claude` runs
+/** Host-owned subscription token custody: `xcb-compat auth claude` runs
  * `claude setup-token`, which mints a one-year OAuth token using an existing
  * Claude Code login or a fresh browser flow. The token is stored mode-0600 in
  * the private state root — not the shared login keychain — and reaches the
@@ -101,11 +102,12 @@ export async function claudeLogin(stateRoot: string, inspection: CliBinaryInspec
   const { config, home } = await providerAuthDirs(stateRoot, "claude");
   await mkdir(join(home, "tmp"), { mode: 0o700, recursive: true });
   const env = managedLoginEnv(home, config);
-  const setupToken = (args = ["setup-token"]): Promise<{ code: number; captured: string }> => new Promise((resolve) => {
+  const setupToken = (args = ["setup-token"]): Promise<AuthChildExit & { captured: string; oversized: boolean }> => withAuthTerminal(async () => {
     let captured = "", hidden = false, bytes = 0, oversized = false;
     const child = spawn(inspection.executablePath, args, {
-      stdio: ["inherit", "pipe", "pipe"], env, detached: false, timeout: 600_000, killSignal: "SIGKILL",
+      stdio: ["inherit", "pipe", "pipe"], env, detached: false,
     });
+    const exit = waitForAuthChild(child, 600_000);
     const hide = () => { hidden = true; };
     const stdout = loginOutput(text => { process.stdout.write(text); }, () => hidden, hide);
     const stderr = loginOutput(text => { process.stderr.write(text); }, () => hidden, hide);
@@ -121,19 +123,20 @@ export async function claudeLogin(stateRoot: string, inspection: CliBinaryInspec
       captured += stdout.push(chunk);
     });
     child.stderr.on("data", (chunk: Buffer) => { if (bounded(chunk)) stderr.push(chunk); });
-    child.on("error", () => resolve({ code: 1, captured: "" }));
-    child.on("close", (status) => {
-      captured += stdout.end(); stderr.end();
-      resolve({ code: oversized ? 1 : status ?? 1, captured });
-    });
+    const result = await exit;
+    captured += stdout.end(); stderr.end();
+    return { ...result, code: oversized ? 1 : result.code, captured, oversized };
   });
   // A fresh machine may have no Claude session for setup-token to mint from;
   // fall back to an interactive `auth login` (browser OAuth) and retry.
   let result = await setupToken();
-  if (result.code !== 0) {
+  if (result.cancelled) fail("CLAUDE_LOGIN_CANCELLED");
+  if (result.code !== 0 && !result.timedOut && !result.oversized) {
     const login = await setupToken(["auth", "login"]);
+    if (login.cancelled) fail("CLAUDE_LOGIN_CANCELLED");
     if (login.code === 0) result = await setupToken();
   }
+  if (result.cancelled) fail("CLAUDE_LOGIN_CANCELLED");
   const { code, captured } = result;
   // setup-token may wrap the token across lines inside its cosmetic output;
   // only continuation lines consisting solely of token characters join it.

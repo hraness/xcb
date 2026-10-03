@@ -26,3 +26,4 @@ site/public/theme-bootstrap.js
 # Reproducible Python helper bytecode.
 __pycache__/
 *.py[cod]
+convex/_generated/

@@ -8,6 +8,18 @@ use xcb_core::{
     usage::Counters,
 };
 
+/// Per-request deadline for provider initialization RPCs and handshakes. A
+/// stalled provider fails fast here instead of holding the account lease
+/// until the whole turn deadline.
+pub(crate) const INIT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Frames one turn may deliver before the host ends it as a turn limit.
+/// Streaming providers emit one frame per content delta, so this is sized for
+/// hours of output; the 64 MiB byte budget and the turn deadline bound
+/// resource use, and codec backstops sit above it so overflow is always the
+/// host's graceful `Terminal::TurnLimit`, never a protocol failure.
+pub(crate) const MAX_TURN_FRAMES: usize = 1 << 20;
+
 pub(crate) struct ImageInput {
     pub media_type: String,
     pub base64: String,
@@ -35,6 +47,8 @@ pub(crate) enum Event {
     },
     /// A request was denied; only a human can supply new permission.
     Attention,
+    /// Only host-selected, bounded diagnostic categories cross this boundary.
+    Diagnostic(crate::runner::Diagnostic),
     Quota {
         window: Option<String>,
         used_percent: Option<f64>,
@@ -45,12 +59,6 @@ pub(crate) enum Event {
         terminal: Terminal,
         text: String,
         models: Vec<(String, Counters)>,
-    },
-    Subagent {
-        id: String,
-        status: String,
-        label: String,
-        model: Option<String>,
     },
 }
 
@@ -86,6 +94,26 @@ pub(crate) trait Protocol: Send {
     /// turn future. Return true only after all adapter-owned work has joined.
     fn shutdown(&mut self) -> impl Future<Output = bool> + Send {
         async { true }
+    }
+
+    /// Effects owned by a native tool relay, including unfinished calls after
+    /// cancellation. Read after shutdown before settling the account lease.
+    fn host_effects(&self) -> xcb_core::policy::EffectState {
+        xcb_core::policy::EffectState::None
+    }
+
+    /// A trusted host tool asked for approval or reported a denied action.
+    /// Once observed the runner stops dispatching tools across every bridge.
+    fn host_pending_attention(&self) -> bool {
+        false
+    }
+
+    /// A cooperative cancellation frame this provider understands, if any.
+    /// The runner sends it once on host cancellation before stdin closes;
+    /// codecs without a wire interrupt return `None` and the provider still
+    /// gets the same bounded stdin-close grace and kill.
+    fn interruption(&mut self) -> Option<Value> {
+        None
     }
 
     fn initialize(

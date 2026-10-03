@@ -9,17 +9,19 @@ use xcb_core::{
 
 pub fn snapshot(store: &Store, current: Option<&Id>, config: &Config, now: u64) -> Result<View> {
     let mut view = View {
+        agents: store.agent_overview(current, now)?,
         sessions: store.sessions(64)?,
         reduced_motion: config.reduced_motion,
         ..View::default()
     };
-    let busy: BTreeSet<_> = store
-        .unsettled_runs()?
-        .into_iter()
-        .map(|run| run.account)
-        .collect();
+    let mut active_runs: BTreeMap<Id, u32> = BTreeMap::new();
+    for run in store.unsettled_runs()? {
+        *active_runs.entry(run.account).or_default() += 1;
+    }
+    let busy: BTreeSet<_> = active_runs.keys().cloned().collect();
     let mut independent_pools = BTreeMap::new();
     for account in store.accounts()? {
+        let authentication_required = store.authentication_required(&account.id)?;
         let mut by_window: BTreeMap<Id, Vec<QuotaPoint>> = BTreeMap::new();
         for point in store.quotas(&account.quota_pool)? {
             by_window
@@ -53,7 +55,7 @@ pub fn snapshot(store: &Store, current: Option<&Id>, config: &Config, now: u64) 
         } else {
             Estimate::unknown("quota_or_burn_unmeasured")
         };
-        if account.enabled {
+        if account.enabled && !authentication_required {
             independent_pools
                 .entry(account.quota_pool.clone())
                 .or_insert_with(|| estimate.clone());
@@ -69,7 +71,9 @@ pub fn snapshot(store: &Store, current: Option<&Id>, config: &Config, now: u64) 
             quota_blocked_until_ms: store.quota_blocked_until(&account.id, now)?,
             runway: estimate,
             busy: busy.contains(&account.id),
+            active_runs: *active_runs.get(&account.id).unwrap_or(&0),
             enabled: account.enabled,
+            authentication_required,
         });
     }
     let known: Vec<_> = independent_pools
@@ -82,7 +86,9 @@ pub fn snapshot(store: &Store, current: Option<&Id>, config: &Config, now: u64) 
     sort_choices(&mut view.models, &config.favorites);
     if let Some(id) = current {
         view.session = store.session(id)?;
-        view.messages = store.messages(id, 128)?;
+        let page = store.transcript_page(id, None, 128)?;
+        view.messages = page.messages.clone();
+        view.transcript = Some(page);
         if let Some(session) = &view.session {
             view.state = session.state;
         }
@@ -163,7 +169,7 @@ pub fn snapshot(store: &Store, current: Option<&Id>, config: &Config, now: u64) 
             .into(),
         ),
         (
-            "aiCharts export".into(),
+            "aicharts export".into(),
             if config.extensions.aicharts_export && config.extensions.usage {
                 "on · local idle"
             } else if config.extensions.aicharts_export {
@@ -174,7 +180,7 @@ pub fn snapshot(store: &Store, current: Option<&Id>, config: &Config, now: u64) 
             .into(),
         ),
         (
-            "aiCharts upload".into(),
+            "aicharts upload".into(),
             if config.extensions.aicharts_upload {
                 "waiting for supported enrolled ingress"
             } else {

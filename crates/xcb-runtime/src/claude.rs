@@ -43,6 +43,62 @@ pub fn version_admitted(version: &str) -> bool {
     got[1] > min[1] || (got[1] == min[1] && got[2] >= min[2])
 }
 
+/// Claude releases within the admitted major-version floor can be adopted
+/// without an xcb release. A reviewed catalog denial still revokes a saved
+/// pin before launch, so provider self-updates do not create a bypass.
+pub fn runtime_admitted_with_catalog(
+    root: &std::path::Path,
+    pin: &crate::process::Pin,
+) -> Result<()> {
+    if pin.provider != xcb_core::Provider::Claude || !version_admitted(&pin.version) {
+        return Err(Error::Unavailable(
+            "Claude build has no runtime qualification",
+        ));
+    }
+    if crate::catalog::denied(root, &pin.sha256) {
+        return Err(Error::Unavailable(
+            "Claude build is denied by the reviewed-builds catalog",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuotaObservation {
+    pub window: String,
+    pub utilization: f64,
+    pub resets_at_ms: Option<u64>,
+}
+
+const QUOTA_WINDOWS: [&str; 6] = [
+    "five_hour",
+    "seven_day",
+    "seven_day_opus",
+    "seven_day_sonnet",
+    "seven_day_overage_included",
+    "overage",
+];
+
+fn quota_window(value: Option<&str>) -> Option<String> {
+    value
+        .filter(|value| QUOTA_WINDOWS.contains(value))
+        .map(str::to_owned)
+}
+
+fn quota_utilization(value: Option<&Value>) -> Option<f64> {
+    value
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .map(|value| value.clamp(0.0, 1.0))
+}
+
+fn quota_reset(value: Option<&Value>) -> Option<u64> {
+    value
+        .and_then(Value::as_u64)
+        .filter(|value| *value < 100_000_000_000)
+        .and_then(|value| value.checked_mul(1000))
+}
+
 #[derive(Debug)]
 pub enum Event {
     Initialize(Value),
@@ -54,18 +110,21 @@ pub enum Event {
     },
     Assistant {
         text: String,
-        thinking: String,
     },
     Quota {
-        window: Option<String>,
-        utilization: Option<f64>,
-        resets_at_ms: Option<u64>,
+        /// One meter per reported window. Claude Code 2.1.282 reports every
+        /// window in `unifiedWindows`; older builds report one at the top.
+        observations: Vec<QuotaObservation>,
         failure: Option<Failure>,
+        /// Telemetry drift the host reports without failing the turn.
+        notice: Option<&'static str>,
     },
     Result {
         terminal: Terminal,
         text: String,
         models: Vec<(String, Counters)>,
+        /// Account-level classification of a provider-marked error result.
+        failure: Option<Failure>,
     },
     Subagent {
         id: String,
@@ -73,17 +132,13 @@ pub enum Event {
         label: String,
         model: Option<String>,
     },
+    /// A structured provider permission decision, never inferred from prose.
+    /// The tool input and classifier explanation stay out of host diagnostics.
+    PermissionDenied,
     Notice,
 }
 fn string<'a>(value: &'a Value, key: &str, max: usize) -> Result<&'a str> {
-    let text = value
-        .get(key)
-        .and_then(Value::as_str)
-        .ok_or(Error::Protocol("missing string"))?;
-    if text.len() > max {
-        return Err(Error::Protocol("oversized string"));
-    }
-    Ok(text)
+    crate::wire_helpers::field_text(value, key, max, "missing string", "oversized string")
 }
 fn optional_string(value: &Value, key: &str, max: usize) -> Result<Option<String>> {
     value
@@ -93,16 +148,10 @@ fn optional_string(value: &Value, key: &str, max: usize) -> Result<Option<String
         .transpose()
 }
 fn number(value: &Value, key: &str) -> Result<u64> {
-    value
-        .get(key)
-        .and_then(Value::as_u64)
-        .ok_or(Error::Protocol("missing counter"))
+    crate::wire_helpers::field_counter(value, key, "missing counter")
 }
 fn maybe_count(value: &Value, key: &str) -> Result<u64> {
-    match value.get(key) {
-        None | Some(Value::Null) => Ok(0),
-        Some(value) => value.as_u64().ok_or(Error::Protocol("invalid counter")),
-    }
+    crate::wire_helpers::optional_field_counter(value, key, "invalid counter")
 }
 fn counters(value: &Value) -> Result<Counters> {
     let value = Counters {
@@ -124,16 +173,57 @@ fn counters(value: &Value) -> Result<Counters> {
     Ok(value)
 }
 
+/// Conservative match on the pinned CLI's authentication error text. It is
+/// consulted only for frames the provider itself marked as errors, so it can
+/// classify a failure but never fail a turn on its own.
+pub(crate) fn authentication_cue(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    [
+        "not logged in",
+        "/login",
+        "invalid api key",
+        "authentication_error",
+        "authentication failed",
+        "invalid authentication",
+        "unauthorized",
+        "oauth token",
+        "expired token",
+        "token has expired",
+        "token expired",
+        "invalid token",
+    ]
+    .iter()
+    .any(|cue| lower.contains(cue))
+}
+
 pub fn parse_event(bytes: &[u8]) -> Result<Event> {
     if bytes.len() > MAX_JSON_BYTES {
         return Err(Error::Protocol("frame limit"));
     }
-    let value: Value = serde_json::from_slice(bytes)?;
+    parse_value(serde_json::from_slice(bytes)?)
+}
+
+/// Classify one already-parsed frame whose byte length was bounded by the
+/// reader; callers that need other fields of the same frame parse it once.
+pub fn parse_value(value: Value) -> Result<Event> {
+    // Native children have not qualified for xcb's broker. Their messages
+    // must never acquire root-turn authority through this root-only parser.
+    if value
+        .get("parent_tool_use_id")
+        .is_some_and(|parent| !parent.is_null())
+    {
+        return Err(Error::Protocol("Claude delegated turn is unqualified"));
+    }
     match string(&value, "type", 80)? {
         "control_request" => Ok(Event::Control(value)),
         "control_response" => Ok(Event::ControlResponse(value)),
         "system" => match value.get("subtype").and_then(Value::as_str) {
             Some("init") => Ok(Event::Initialize(value)),
+            Some("permission_denied") => {
+                string(&value, "tool_name", 256)?;
+                string(&value, "tool_use_id", 160)?;
+                Ok(Event::PermissionDenied)
+            }
             Some("task_started") => Ok(Event::Subagent {
                 id: string(&value, "task_id", 160)?.to_owned(),
                 status: "working".into(),
@@ -204,59 +294,74 @@ pub fn parse_event(bytes: &[u8]) -> Result<Event> {
                     return Err(Error::Protocol("assistant text limit"));
                 }
             }
+            // Thinking blocks are bounded above but never retained here: the
+            // host renders streamed thinking deltas, not the final message copy.
             Ok(Event::Assistant {
                 text: display_text(&text, MAX_TEXT_BYTES),
-                thinking: display_text(&thinking, MAX_TEXT_BYTES),
             })
         }
         "rate_limit_event" => {
+            // Telemetry only. Unknown windows, statuses and out-of-range
+            // meters are reported and tolerated; only an explicit rejection
+            // can fail the turn, and it does so even with an unknown window.
             let info = value
                 .get("rate_limit_info")
                 .ok_or(Error::Protocol("rate limit info"))?;
-            let status = string(info, "status", 80)?;
-            if !matches!(status, "allowed" | "allowed_warning" | "rejected") {
-                return Err(Error::Protocol("unknown quota status"));
+            let (rejected, notice) = match info.get("status").and_then(Value::as_str) {
+                Some("rejected") => (true, None),
+                Some("allowed" | "allowed_warning") => (false, None),
+                _ => (
+                    false,
+                    Some("Claude reported an unrecognized rate limit status; treated as allowed"),
+                ),
+            };
+            let utilization = quota_utilization(info.get("utilization"));
+            let resets_at_ms = quota_reset(info.get("resetsAt"));
+            let window = quota_window(info.get("rateLimitType").and_then(Value::as_str));
+            // Claude Code 2.1.282 reports every window's meter under
+            // `unifiedWindows` and no longer sets the top-level utilization;
+            // older builds report the current window at the top. Read both,
+            // bounded, and keep one observation per recognized window.
+            let mut observations: Vec<QuotaObservation> = Vec::new();
+            if let Some(unified) = info.get("unifiedWindows").and_then(Value::as_object) {
+                if unified.len() > 16 {
+                    return Err(Error::Protocol("rate limit window limit"));
+                }
+                for (name, meter) in unified {
+                    if let (Some(window), Some(utilization)) = (
+                        quota_window(Some(name.as_str())),
+                        quota_utilization(meter.get("utilization")),
+                    ) {
+                        observations.push(QuotaObservation {
+                            window,
+                            utilization,
+                            resets_at_ms: quota_reset(meter.get("resetsAt")),
+                        });
+                    }
+                }
             }
-            let utilization = info
-                .get("utilization")
-                .map(|value| {
-                    value
-                        .as_f64()
-                        .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
-                        .ok_or(Error::Protocol("quota utilization"))
-                })
-                .transpose()?;
-            let resets_at_ms = info
-                .get("resetsAt")
-                .map(|value| {
-                    value
-                        .as_u64()
-                        .filter(|value| *value < 100_000_000_000)
-                        .and_then(|value| value.checked_mul(1000))
-                        .ok_or(Error::Protocol("quota reset"))
-                })
-                .transpose()?;
-            let window = info
-                .get("rateLimitType")
-                .map(|value| {
-                    value
-                        .as_str()
-                        .filter(|value| {
-                            [
-                                "five_hour",
-                                "seven_day",
-                                "seven_day_opus",
-                                "seven_day_sonnet",
-                                "seven_day_overage_included",
-                                "overage",
-                            ]
-                            .contains(value)
-                        })
-                        .map(str::to_owned)
-                        .ok_or(Error::Protocol("quota window"))
-                })
-                .transpose()?;
-            let failure = (status == "rejected").then_some(
+            if let (Some(window), Some(utilization)) = (window.clone(), utilization)
+                && !observations.iter().any(|seen| seen.window == window)
+            {
+                observations.push(QuotaObservation {
+                    window,
+                    utilization,
+                    resets_at_ms,
+                });
+            }
+            // A rejection is exhaustion of its window even when no meter is
+            // reported for it; the reset, when known, bounds the block.
+            if rejected
+                && let Some(window) = window.clone()
+                && !observations.iter().any(|seen| seen.window == window)
+            {
+                observations.push(QuotaObservation {
+                    window,
+                    utilization: 1.0,
+                    resets_at_ms,
+                });
+            }
+            let failure = rejected.then_some(
                 if matches!(
                     window.as_deref(),
                     Some("seven_day_opus" | "seven_day_sonnet")
@@ -267,10 +372,9 @@ pub fn parse_event(bytes: &[u8]) -> Result<Event> {
                 },
             );
             Ok(Event::Quota {
-                window,
-                utilization,
-                resets_at_ms,
+                observations,
                 failure,
+                notice,
             })
         }
         "result" => {
@@ -279,7 +383,7 @@ pub fn parse_event(bytes: &[u8]) -> Result<Event> {
                 .get("is_error")
                 .and_then(Value::as_bool)
                 .ok_or(Error::Protocol("result status"))?;
-            let terminal = match (
+            let mut terminal = match (
                 subtype,
                 is_error,
                 value.get("stop_reason").and_then(Value::as_str),
@@ -321,12 +425,262 @@ pub fn parse_event(bytes: &[u8]) -> Result<Event> {
                     models.push((id.to_owned(), counters(value)?));
                 }
             }
+            // The final denial list is authoritative even when the CLI calls
+            // the query a success. Older producers may omit the field. A
+            // malformed list fails closed rather than hiding a denial.
+            let denied = if let Some(denials) = value.get("permission_denials") {
+                let denials = denials
+                    .as_array()
+                    .ok_or(Error::Protocol("permission denial list"))?;
+                if denials.len() > 1024 {
+                    return Err(Error::Protocol("permission denial limit"));
+                }
+                for denial in denials {
+                    string(denial, "tool_name", 256)?;
+                    string(denial, "tool_use_id", 160)?;
+                    if !denial.get("tool_input").is_some_and(Value::is_object) {
+                        return Err(Error::Protocol("permission denial input"));
+                    }
+                }
+                !denials.is_empty()
+            } else {
+                false
+            };
+            let failure = if denied {
+                terminal = Terminal::Failed;
+                Some(Failure::Policy)
+            } else {
+                (is_error && terminal == Terminal::Failed && authentication_cue(&text))
+                    .then_some(Failure::Authentication)
+            };
             Ok(Event::Result {
                 terminal,
                 text: display_text(&text, MAX_TEXT_BYTES),
                 models,
+                failure,
             })
         }
         _ => Ok(Event::Notice),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn quota(value: Value) -> (Vec<QuotaObservation>, Option<Failure>, Option<&'static str>) {
+        match parse_event(&serde_json::to_vec(&value).unwrap()).unwrap() {
+            Event::Quota {
+                observations,
+                failure,
+                notice,
+            } => (observations, failure, notice),
+            _ => panic!("rate_limit_event must stay a quota observation"),
+        }
+    }
+
+    #[test]
+    fn runtime_admission_keeps_the_version_floor_and_honors_catalog_denials() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        crate::private::directory(&root.join("providers")).unwrap();
+        let digest = "a".repeat(64);
+        let pin = crate::process::Pin {
+            provider: xcb_core::Provider::Claude,
+            executable: "/synthetic/claude".into(),
+            sha256: digest.clone(),
+            version: "2.1.300".into(),
+            host_sha256: "0".repeat(64),
+            observed_at_ms: 0,
+        };
+        super::runtime_admitted_with_catalog(&root, &pin).unwrap();
+        let mut future = pin.clone();
+        future.version = "3.0.0".into();
+        assert!(super::runtime_admitted_with_catalog(&root, &future).is_err());
+        crate::private::create(
+            &root.join("providers/catalog.json"),
+            serde_json::json!({"version":1,"deny":{"claude":[digest]}})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap();
+        assert!(super::runtime_admitted_with_catalog(&root, &pin).is_err());
+    }
+
+    fn meters(observations: &[QuotaObservation]) -> Vec<(&str, f64, Option<u64>)> {
+        observations
+            .iter()
+            .map(|o| (o.window.as_str(), o.utilization, o.resets_at_ms))
+            .collect()
+    }
+
+    #[test]
+    fn rate_limit_telemetry_tolerates_drift_but_rejection_still_classifies() {
+        let frame = |info: Value| json!({"type":"rate_limit_event","rate_limit_info":info});
+        // Unknown windows, statuses and out-of-range meters are drift the host
+        // reports without failing a turn that may already have run tools.
+        let (observations, failure, notice) = quota(frame(json!({
+            "status":"throttled","rateLimitType":"five_hour","utilization":0.5
+        })));
+        assert_eq!(meters(&observations), [("five_hour", 0.5, None)]);
+        assert_eq!(failure, None);
+        assert!(notice.is_some());
+        let (observations, failure, _) = quota(frame(json!({
+            "status":"allowed","rateLimitType":"monthly_enterprise","utilization":1.7
+        })));
+        assert!(observations.is_empty());
+        assert_eq!(failure, None);
+        let (observations, _, _) = quota(frame(json!({
+            "status":"allowed_warning","rateLimitType":"seven_day","utilization":-0.25
+        })));
+        assert_eq!(meters(&observations), [("seven_day", 0.0, None)]);
+        let (observations, _, _) = quota(frame(json!({
+            "status":"allowed","rateLimitType":"seven_day","utilization":"high"
+        })));
+        assert!(observations.is_empty());
+        // An explicit rejection classifies even when its window is unknown,
+        // and a recognized rejected window records its exhaustion.
+        for (window, expected, recorded) in [
+            (json!("quarterly"), Failure::AccountQuota, None),
+            (Value::Null, Failure::AccountQuota, None),
+            (
+                json!("seven_day_opus"),
+                Failure::ModelQuota,
+                Some("seven_day_opus"),
+            ),
+            (json!("five_hour"), Failure::AccountQuota, Some("five_hour")),
+        ] {
+            let (observations, failure, _) = quota(frame(json!({
+                "status":"rejected","rateLimitType":window,"utilization":1.0
+            })));
+            assert_eq!(failure, Some(expected));
+            assert_eq!(
+                meters(&observations),
+                recorded.map(|w| vec![(w, 1.0, None)]).unwrap_or_default()
+            );
+        }
+        // A missing rate_limit_info object is still malformed, not drift.
+        assert!(parse_event(br#"{"type":"rate_limit_event"}"#).is_err());
+    }
+
+    /// Claude Code 2.1.282 reports every window under `unifiedWindows` and no
+    /// top-level meter. Every recognized window is observed, unknown ones are
+    /// ignored, and a rejection without a meter for its window is recorded as
+    /// exhaustion with the frame's reset.
+    #[test]
+    fn unified_windows_report_every_meter_and_a_rejection_records_exhaustion() {
+        let frame = |info: Value| json!({"type":"rate_limit_event","rate_limit_info":info});
+        let (observations, failure, notice) = quota(frame(json!({
+            "status":"allowed","resetsAt":1790308800,"rateLimitType":"five_hour",
+            "overageStatus":"rejected","overageDisabledReason":"org_level_disabled","isUsingOverage":false,
+            "unifiedWindows":{
+                "five_hour":{"utilization":0.13,"resetsAt":1790308800},
+                "seven_day":{"utilization":0.03,"resetsAt":1790722800},
+                "quarterly":{"utilization":0.9,"resetsAt":1790722800},
+                "seven_day_opus":{"utilization":"n/a"}
+            }
+        })));
+        assert_eq!(
+            meters(&observations),
+            [
+                ("five_hour", 0.13, Some(1_790_308_800_000)),
+                ("seven_day", 0.03, Some(1_790_722_800_000)),
+            ]
+        );
+        assert_eq!((failure, notice), (None, None));
+        // The top-level meter is used only when the window is not unified.
+        let (observations, _, _) = quota(frame(json!({
+            "status":"allowed","rateLimitType":"five_hour","utilization":0.4,"resetsAt":1790308800,
+            "unifiedWindows":{"seven_day":{"utilization":0.5,"resetsAt":1790722800}}
+        })));
+        assert_eq!(
+            meters(&observations),
+            [
+                ("seven_day", 0.5, Some(1_790_722_800_000)),
+                ("five_hour", 0.4, Some(1_790_308_800_000)),
+            ]
+        );
+        // Rejection: the window's meter is missing, so it is recorded as exhausted.
+        let (observations, failure, _) = quota(frame(json!({
+            "status":"rejected","rateLimitType":"five_hour","resetsAt":1790308800,
+            "unifiedWindows":{"seven_day":{"utilization":0.03,"resetsAt":1790722800}}
+        })));
+        assert_eq!(failure, Some(Failure::AccountQuota));
+        assert_eq!(
+            meters(&observations),
+            [
+                ("seven_day", 0.03, Some(1_790_722_800_000)),
+                ("five_hour", 1.0, Some(1_790_308_800_000)),
+            ]
+        );
+        // Too many windows is malformed, not drift.
+        let many: serde_json::Map<String, Value> = (0..17)
+            .map(|i| (format!("w{i}"), json!({"utilization":0.1})))
+            .collect();
+        assert!(
+            parse_event(
+                &serde_json::to_vec(&frame(json!({"status":"allowed","unifiedWindows":many})))
+                    .unwrap()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn provider_error_results_classify_authentication_conservatively() {
+        let failure =
+            |value: Value| match parse_event(&serde_json::to_vec(&value).unwrap()).unwrap() {
+                Event::Result {
+                    terminal, failure, ..
+                } => (terminal, failure),
+                _ => panic!("result frame must stay a result"),
+            };
+        for text in [
+            "Not logged in · Please run /login",
+            "OAuth token has expired",
+            "401 Unauthorized: invalid authentication",
+        ] {
+            let (terminal, classified) = failure(json!({
+                "type":"result","subtype":"error_during_execution","is_error":true,
+                "result":format!("Synthetic provider text: {text}"),
+            }));
+            assert_eq!(
+                (terminal, classified),
+                (Terminal::Failed, Some(Failure::Authentication)),
+                "{text}"
+            );
+        }
+        let (terminal, classified) = failure(json!({
+            "type":"result","subtype":"error_during_execution","is_error":true,
+            "errors":["invalid api key provided"],
+        }));
+        assert_eq!(
+            (terminal, classified),
+            (Terminal::Failed, Some(Failure::Authentication))
+        );
+        // Non-auth provider text stays unknown, and a turn limit or a
+        // successful answer is never reclassified as authentication.
+        assert_eq!(
+            failure(json!({
+                "type":"result","subtype":"error_during_execution","is_error":true,
+                "result":"synthetic renderer crash",
+            })),
+            (Terminal::Failed, None)
+        );
+        assert_eq!(
+            failure(json!({
+                "type":"result","subtype":"error_max_turns","is_error":true,
+                "result":"please log in to continue",
+            })),
+            (Terminal::TurnLimit, None)
+        );
+        assert_eq!(
+            failure(json!({
+                "type":"result","subtype":"success","is_error":false,
+                "result":"I could not log in to the deployment target",
+            })),
+            (Terminal::Completed, None)
+        );
     }
 }

@@ -1,0 +1,102 @@
+name: Codex catalog
+
+# Once a day, and on demand, checks whether the npm-published Codex build is
+# listed in qualified-builds.json. Exact builds already supported by the
+# release adapter are excluded, since older clients also read that catalog.
+# For other candidates, the scripted native
+# inventory runs against the exact darwin-arm64 binary, its evidence is
+# uploaded to the run, and the outcome goes to one tracking issue per Codex
+# version (.github/scripts/codex-catalog.py):
+#   passed        the issue carries the reviewed entry for a pull request
+#   incompatible  the build changes the app-server wire schema or its bundled
+#                 model catalog; only an xcb release can adopt it
+#   failed        the inventory ran and a case failed
+# Each is an expected outcome and the run stays green. The run fails only
+# when the workflow itself breaks: npm is unreachable, a download does not
+# match its registry integrity, or the harness stops without a verdict.
+# The workflow never edits qualified-builds.json: GitHub Actions cannot open
+# pull requests in this repository, and a pull request opened with
+# GITHUB_TOKEN would not run the Required check.
+on:
+  schedule:
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Codex version to check (default: npm latest)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codex-catalog-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  qualify:
+    name: Qualify the latest Codex build
+    runs-on: macos-15
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      # No persisted token: the candidate binary runs in this workspace.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Resolve the candidate binary
+        id: candidate
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: python3 -I .github/scripts/codex-catalog.py resolve
+      - name: Run the scripted inventory against the candidate
+        id: inventory
+        if: steps.candidate.outputs.needed == 'true'
+        env:
+          VERSION: ${{ steps.candidate.outputs.version }}
+          SHA256: ${{ steps.candidate.outputs.sha256 }}
+        # The exit status is recorded, not propagated: the report step reads
+        # the verdict the harness writes beside its evidence.
+        run: |
+          status=0
+          python3 qualification/codex-inventory.py \
+            --executable "$PWD/candidate/codex" \
+            --output "$RUNNER_TEMP/inventory-out" \
+            --expect-version "$VERSION" \
+            --expect-sha256 "$SHA256" || status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+      - name: Upload inventory evidence
+        if: always() && steps.candidate.outputs.needed == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codex-inventory-${{ steps.candidate.outputs.version }}-${{ github.run_attempt }}
+          # Each case copies the provider binary and the system CA bundle;
+          # neither is evidence.
+          path: |
+            ${{ runner.temp }}/inventory-out/
+            !${{ runner.temp }}/inventory-out/case-*/provider
+            !${{ runner.temp }}/inventory-out/case-*/public-ca.pem
+            !${{ runner.temp }}/inventory-out/case-*/scratch/
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Report the outcome in the tracking issue
+        if: steps.candidate.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEEDED: ${{ steps.candidate.outputs.needed }}
+          SOURCE: ${{ steps.candidate.outputs.source }}
+          VERSION: ${{ steps.candidate.outputs.version }}
+          SHA256: ${{ steps.candidate.outputs.sha256 }}
+          PACKAGE: ${{ steps.candidate.outputs.package }}
+          INVENTORY_STATUS: ${{ steps.inventory.outputs.status }}
+          INVENTORY_DIR: ${{ runner.temp }}/inventory-out
+          ARTIFACT: codex-inventory-${{ steps.candidate.outputs.version }}-${{ github.run_attempt }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 -I .github/scripts/codex-catalog.py report

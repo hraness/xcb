@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Credential-free adversarial proof for one explicitly selected XCB backend.
-Run through hra-host-run --lane=mac-native. Does not publish guest changes.
+Run through host-run --lane=mac-native. Does not publish guest changes.
 """
 import importlib.util,sys
 import argparse,base64,hashlib,json,os,pathlib,subprocess,time,uuid

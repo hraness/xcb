@@ -1,21 +1,23 @@
 use crate::{Error, Result, digest, private};
+#[cfg(unix)]
 use rustix::process::{Pid, Signal, kill_process_group, test_kill_process_group};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::os::unix::{
+    fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    process::CommandExt,
+};
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
-    os::unix::{
-        fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
-        process::CommandExt,
-    },
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
     task::JoinHandle,
 };
@@ -49,6 +51,33 @@ pub fn environment(home: &Path) -> BTreeMap<String, String> {
     ])
 }
 
+/// Windows has no executable bit or setuid: an admitted executable is a
+/// regular file (never a reparse point) of plausible size. Provider
+/// executables are never launched there; this admits xcb's own image.
+#[cfg(windows)]
+fn executable_file(path: &Path) -> Result<File> {
+    let file = crate::os::no_follow(OpenOptions::new().read(true), true).open(path)?;
+    let meta = crate::os::fstat(&file)?;
+    if !meta.file {
+        return Err(Error::Unavailable("executable is not a regular file"));
+    }
+    if meta.len == 0 || meta.len > 512 * 1024 * 1024 {
+        return Err(Error::Unavailable("executable size is invalid"));
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn repair_executable_mode(_path: &Path) -> Result<bool> {
+    Ok(false)
+}
+
+#[cfg(windows)]
+fn wrapper_file(_path: &Path) -> Result<File> {
+    Err(Error::providers_unsupported())
+}
+
+#[cfg(unix)]
 fn executable_file(path: &Path) -> Result<File> {
     let file = OpenOptions::new()
         .read(true)
@@ -60,21 +89,35 @@ fn executable_file(path: &Path) -> Result<File> {
         )
         .open(path)?;
     let meta = file.metadata()?;
-    if !meta.is_file()
-        || ![0, rustix::process::getuid().as_raw()].contains(&meta.uid())
-        || meta.mode() & 0o7000 != 0
-        || meta.mode() & 0o022 != 0
-        || meta.mode() & 0o111 == 0
-        || meta.len() == 0
-        || meta.len() > 512 * 1024 * 1024
-    {
+    // Each rule fails on its own so the operator learns what to fix.
+    if !meta.is_file() {
+        return Err(Error::Unavailable("executable is not a regular file"));
+    }
+    if ![0, rustix::process::getuid().as_raw()].contains(&meta.uid()) {
         return Err(Error::Unavailable(
-            "executable ownership, permissions, or size is invalid",
+            "executable is not owned by this user or root",
         ));
+    }
+    if meta.mode() & 0o7000 != 0 {
+        return Err(Error::Unavailable(
+            "executable has setuid, setgid, or sticky bits",
+        ));
+    }
+    if meta.mode() & 0o022 != 0 {
+        return Err(Error::Unavailable(
+            "executable is group- or world-writable; run xcb doctor to repair its mode",
+        ));
+    }
+    if meta.mode() & 0o111 == 0 {
+        return Err(Error::Unavailable("executable is not executable"));
+    }
+    if meta.len() == 0 || meta.len() > 512 * 1024 * 1024 {
+        return Err(Error::Unavailable("executable size is invalid"));
     }
     Ok(file)
 }
 
+#[cfg(unix)]
 fn repair_executable_mode(path: &Path) -> Result<bool> {
     let file = OpenOptions::new()
         .read(true)
@@ -102,6 +145,7 @@ fn repair_executable_mode(path: &Path) -> Result<bool> {
     Ok(true)
 }
 
+#[cfg(unix)]
 fn wrapper_file(path: &Path) -> Result<File> {
     let file = OpenOptions::new()
         .read(true)
@@ -146,8 +190,202 @@ fn digest_file(mut file: File, limit: u64) -> Result<String> {
     Ok(hex::encode(hash.finalize()))
 }
 
+/// The exact file identity a verified digest is bound to, read from the same
+/// descriptor the digest is computed on — any difference re-digests. The
+/// identity is a cache key, never a substitute for the checks
+/// `executable_file` runs on every call.
+type FileIdentity = xcb_core::FileIdentity;
+
+/// Process-wide verified digests keyed by canonical executable path. A route
+/// decision loads every provider's pin and each turn re-verifies the host and
+/// provider binaries, which re-read and re-hashed up to 512 MiB per call; the
+/// identity-bound cache makes a repeated verification a metadata read while
+/// remaining provably equivalent to re-hashing the exact installed bytes.
+const VERIFIED_DIGEST_LIMIT: usize = 16;
+
+fn verified_digests() -> &'static std::sync::Mutex<BTreeMap<PathBuf, (FileIdentity, String)>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<BTreeMap<PathBuf, (FileIdentity, String)>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// Full executable digests actually performed per canonical path, so
+/// launch-path tests can observe cache hits while running in parallel.
+#[cfg(test)]
+static EXECUTABLE_DIGESTS: std::sync::Mutex<BTreeMap<PathBuf, usize>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+#[cfg(all(test, unix))]
+fn digested_executables(path: &Path) -> usize {
+    EXECUTABLE_DIGESTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(path)
+        .copied()
+        .unwrap_or(0)
+}
+
 pub fn executable_digest(path: &Path) -> Result<String> {
-    digest_file(executable_file(path)?, 512 * 1024 * 1024)
+    let file = executable_file(path)?;
+    // fstat of the open descriptor: the identity below names the inode the
+    // digest is computed from, never a re-resolved path.
+    let identity = FileIdentity::of_file(&file)?;
+    let key = xcb_core::canonical(path).unwrap_or_else(|_| path.to_owned());
+    {
+        let cache = verified_digests()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some((known, sha256)) = cache.get(&key)
+            && *known == identity
+        {
+            return Ok(sha256.clone());
+        }
+    }
+    let sha256 = digest_file(file, 512 * 1024 * 1024)?;
+    #[cfg(test)]
+    EXECUTABLE_DIGESTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .entry(key.clone())
+        .and_modify(|count| *count += 1)
+        .or_insert(1);
+    {
+        let mut cache = verified_digests()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        while cache.len() >= VERIFIED_DIGEST_LIMIT {
+            cache.pop_first();
+        }
+        cache.insert(key, (identity, sha256.clone()));
+    }
+    Ok(sha256)
+}
+
+/// `clonefile(2)` is atomic: the name either holds the complete copy-on-write
+/// clone or is absent, so a failure never leaves a partial snapshot and the
+/// stream copy below can still create the name itself. `CLONE_NOFOLLOW`
+/// matches the `O_NOFOLLOW` custody of the source descriptor.
+#[cfg(target_os = "macos")]
+fn clone_file(source: &File, path: &Path) -> bool {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return false;
+    };
+    let Ok(directory) = rustix::fs::openat(
+        rustix::fs::CWD,
+        parent,
+        rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    ) else {
+        return false;
+    };
+    rustix::fs::fclonefileat(
+        source,
+        &directory,
+        std::path::Path::new(name),
+        rustix::fs::CloneFlags::NOFOLLOW,
+    )
+    .is_ok()
+}
+
+/// `FICLONE` clones extents atomically on copy-on-write filesystems;
+/// `copy_file_range` keeps the copy inside the kernel everywhere else. Any
+/// error or short progress falls back to the stream copy on the same
+/// descriptors.
+#[cfg(all(
+    target_os = "linux",
+    not(any(target_arch = "sparc", target_arch = "sparc64"))
+))]
+fn clone_into(source: &File, target: &File) -> bool {
+    if rustix::fs::ioctl_ficlone(target, source).is_ok() {
+        return true;
+    }
+    let Ok(size) = source.metadata().map(|meta| meta.len()) else {
+        return false;
+    };
+    let mut off_in = 0u64;
+    let mut off_out = 0u64;
+    while off_in < size {
+        let remaining = (size - off_in).min(i32::MAX as u64) as usize;
+        match rustix::fs::copy_file_range(
+            source,
+            Some(&mut off_in),
+            target,
+            Some(&mut off_out),
+            remaining,
+        ) {
+            // The kernel advances both offsets; zero progress is EOF or a
+            // stall, so the caller falls back to the stream copy.
+            Ok(0) => return false,
+            Ok(_) => (),
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
+/// Write the opened executable to `path` with the least work the filesystem
+/// allows, falling back to the bounded stream copy. The caller still digests
+/// the result: a clone carries a new inode, so the pinned-byte proof must be
+/// repeated against the snapshot itself.
+#[cfg(windows)]
+fn snapshot_executable(source: &File, path: &Path) -> Result<()> {
+    let mut target = OpenOptions::new().write(true).create_new(true).open(path)?;
+    std::io::copy(&mut source.take(512 * 1024 * 1024 + 1), &mut target)?;
+    target.flush()?;
+    target.sync_all()?;
+    Ok(())
+}
+
+/// Snapshot an owner-configured host tool server without giving it a provider
+/// identity. The opened source and launch copy must both match the explicit
+/// executable pin; later package-manager updates cannot replace active bytes.
+pub(crate) fn snapshot_pinned_executable(
+    source: &Path,
+    expected: &str,
+    directory: &Path,
+) -> Result<PathBuf> {
+    if xcb_core::canonical(source)? != source || executable_digest(source)? != expected {
+        return Err(Error::Unavailable("tool server changed; register it again"));
+    }
+    let path = directory.join(if cfg!(windows) {
+        "tool-server.exe"
+    } else {
+        "tool-server"
+    });
+    snapshot_executable(&executable_file(source)?, &path)?;
+    if executable_digest(&path)? != expected {
+        return Err(Error::Unavailable("tool server snapshot changed"));
+    }
+    Ok(path)
+}
+
+#[cfg(unix)]
+fn snapshot_executable(source: &File, path: &Path) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    if clone_file(source, path) {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o500))?;
+        return Ok(());
+    }
+    let mut target = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o500)
+        .custom_flags((rustix::fs::OFlags::CLOEXEC).bits() as i32)
+        .open(path)?;
+    #[cfg(all(
+        target_os = "linux",
+        not(any(target_arch = "sparc", target_arch = "sparc64"))
+    ))]
+    if clone_into(source, &target) {
+        target.sync_all()?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o500))?;
+        return Ok(());
+    }
+    std::io::copy(&mut source.take(512 * 1024 * 1024 + 1), &mut target)?;
+    target.flush()?;
+    target.sync_all()?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o500))?;
+    Ok(())
 }
 
 /// Captured before a long-lived terminal can observe an in-place xcb update.
@@ -159,7 +397,7 @@ struct HostExecutable {
 }
 impl HostExecutable {
     fn capture(path: PathBuf) -> Result<Self> {
-        let path = path.canonicalize()?;
+        let path = xcb_core::canonical(path)?;
         let sha256 = executable_digest(&path)?;
         Ok(Self { path, sha256 })
     }
@@ -212,6 +450,19 @@ pub fn wrapper_digest(path: &Path) -> Result<String> {
 }
 
 pub fn discover(provider: Provider, explicit: Option<&Path>) -> Result<PathBuf> {
+    #[cfg(windows)]
+    {
+        let _ = (provider, explicit);
+        Err(Error::providers_unsupported())
+    }
+    #[cfg(unix)]
+    {
+        discover_executable(provider, explicit)
+    }
+}
+
+#[cfg(unix)]
+fn discover_executable(provider: Provider, explicit: Option<&Path>) -> Result<PathBuf> {
     let override_name = format!("XCB_{}", provider.as_str().to_uppercase());
     if let Some(path) = explicit
         .map(Path::to_owned)
@@ -220,7 +471,7 @@ pub fn discover(provider: Provider, explicit: Option<&Path>) -> Result<PathBuf> 
         if !path.is_absolute() {
             return Err(Error::Unavailable("provider path must be absolute"));
         }
-        let path = path.canonicalize()?;
+        let path = xcb_core::canonical(path)?;
         if executable_file(&path).is_err() && !repair_executable_mode(&path)? {
             return Err(Error::Unavailable(
                 "executable ownership, permissions, or size is invalid",
@@ -232,7 +483,7 @@ pub fn discover(provider: Provider, explicit: Option<&Path>) -> Result<PathBuf> 
     for directory in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).take(128)
     {
         let candidate = directory.join(provider.as_str());
-        if let Ok(path) = candidate.canonicalize()
+        if let Ok(path) = xcb_core::canonical(&candidate)
             && (executable_file(&path).is_ok()
                 || (repair_executable_mode(&path).unwrap_or(false)
                     && executable_file(&path).is_ok()))
@@ -240,8 +491,13 @@ pub fn discover(provider: Provider, explicit: Option<&Path>) -> Result<PathBuf> 
             return Ok(path);
         }
     }
-    Err(Error::Unavailable(
-        "provider binary not found; specify its XCB provider path",
+    let command = provider.as_str();
+    Err(Error::guided(
+        format!(
+            "xcb can't find `{command}` on your PATH. Install it, or set XCB_{} to its absolute path.",
+            command.to_uppercase()
+        ),
+        format!("xcb doctor --provider {command}"),
     ))
 }
 
@@ -258,25 +514,66 @@ pub struct Pin {
 impl Pin {
     pub fn verify(&self) -> Result<()> {
         host_executable()?.verify_pin(&self.host_sha256)?;
-        if self.executable.canonicalize()? != self.executable
+        self.verify_bytes()
+    }
+    /// Digest check only: the bytes at the pinned path still match the pin.
+    fn verify_bytes(&self) -> Result<()> {
+        // Package managers reinstall the same bytes with group- and
+        // world-writable modes (bun's global install does). Tighten the mode
+        // of an executable we own before judging it, exactly as discovery
+        // does; the digest below still binds the bytes to the pin.
+        if executable_file(&self.executable).is_err() {
+            repair_executable_mode(&self.executable)?;
+        }
+        if xcb_core::canonical(&self.executable)? != self.executable
             || executable_digest(&self.executable)? != self.sha256
         {
             return Err(Error::Unavailable("runtime changed; run xcb doctor again"));
         }
         Ok(())
     }
+    /// Whether this state root has pinned `provider` yet (`xcb doctor` or a
+    /// first sign-in does). A missing pin is a first-run state, not an error.
+    pub fn recorded(root: &Path, provider: Provider) -> bool {
+        root.join("providers")
+            .join(format!("{provider}.json"))
+            .is_file()
+    }
     pub fn load(root: &Path, provider: Provider) -> Result<Self> {
-        let pin: Self = serde_json::from_slice(&private::read(
+        let mut pin: Self = serde_json::from_slice(&private::read(
             &root.join("providers").join(format!("{provider}.json")),
             16 * 1024,
         )?)?;
         if pin.provider != provider {
             return Err(Error::Unavailable("provider pin mismatch"));
         }
-        pin.verify()?;
+        match pin.verify() {
+            Ok(()) => {}
+            // Identical provider bytes under a replaced xcb binary drift only
+            // the host binding — a metadata rebind, so heal it instead of
+            // forcing `xcb doctor` after every upgrade.
+            Err(error) if pin.verify_bytes().is_ok() => {
+                let host = host_executable()?;
+                host.verify()?;
+                pin.host_sha256 = host.sha256.clone();
+                pin.observed_at_ms = crate::now_ms();
+                pin.save(root).map_err(|_| error)?;
+            }
+            Err(error) => return Err(error),
+        }
+        // Migrate pins written before executables were custodied: adopt the
+        // pinned bytes into private state so a provider upgrade can no
+        // longer move them out from under the pin.
+        if custody_dir(root).is_ok_and(|dir| !pin.executable.starts_with(&dir)) {
+            let _ = pin.save(root);
+        }
         Ok(pin)
     }
-    pub fn save(&self, root: &Path) -> Result<()> {
+    /// Custody the pinned executable bytes into private state, then record
+    /// the pin pointing at the custodied copy. A provider auto-update at the
+    /// original path can no longer break the pin.
+    pub fn save(&mut self, root: &Path) -> Result<()> {
+        self.executable = custody_executable(root, self.provider, &self.executable, &self.sha256)?;
         let directory = private::directory(&root.join("providers"))?;
         let path = directory.join(format!("{}.json", self.provider));
         let bytes = serde_json::to_vec_pretty(self)?;
@@ -293,19 +590,9 @@ impl Pin {
     #[cfg(target_os = "macos")]
     pub(crate) fn host_snapshot(&self, directory: &Path) -> Result<PathBuf> {
         self.verify()?;
-        let source_path = std::env::current_exe()?.canonicalize()?;
+        let source_path = xcb_core::canonical(std::env::current_exe()?)?;
         let path = directory.join("xcb-helper");
-        let source = executable_file(&source_path)?;
-        let mut target = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o500)
-            .custom_flags((rustix::fs::OFlags::CLOEXEC).bits() as i32)
-            .open(&path)?;
-        std::io::copy(&mut source.take(512 * 1024 * 1024 + 1), &mut target)?;
-        target.flush()?;
-        target.sync_all()?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o500))?;
+        snapshot_executable(&executable_file(&source_path)?, &path)?;
         if executable_digest(&path)? != self.host_sha256 {
             return Err(Error::Unavailable("host relay snapshot changed"));
         }
@@ -314,17 +601,7 @@ impl Pin {
     pub fn snapshot(&self, directory: &Path) -> Result<PathBuf> {
         self.verify()?;
         let path = directory.join("provider");
-        let source = executable_file(&self.executable)?;
-        let mut target = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o500)
-            .custom_flags((rustix::fs::OFlags::CLOEXEC).bits() as i32)
-            .open(&path)?;
-        std::io::copy(&mut source.take(512 * 1024 * 1024 + 1), &mut target)?;
-        target.flush()?;
-        target.sync_all()?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o500))?;
+        snapshot_executable(&executable_file(&self.executable)?, &path)?;
         if executable_digest(&path)? != self.sha256 {
             return Err(Error::Unavailable("executable snapshot changed"));
         }
@@ -392,12 +669,457 @@ pub async fn inspect(provider: Provider, explicit: Option<&Path>, home: &Path) -
     })
 }
 
+/// Pinned executables live under `providers/bin`, named `<provider>-<sha256>`,
+/// so the pin binds private bytes an auto-update cannot replace.
+fn custody_dir(root: &Path) -> Result<PathBuf> {
+    private::directory(&root.join("providers").join("bin"))
+}
+
+/// Copy the admitted executable into private custody (idempotent for the same
+/// digest) and retire stale copies of the same provider. Returns the
+/// custodied path; the caller rewrites its pin to point at it.
+fn custody_executable(
+    root: &Path,
+    provider: Provider,
+    source: &Path,
+    sha256: &str,
+) -> Result<PathBuf> {
+    let dir = custody_dir(root)?;
+    if source.starts_with(&dir) {
+        return Ok(source.to_owned());
+    }
+    let name = format!("{provider}-{sha256}");
+    let target = dir.join(&name);
+    match executable_digest(&target) {
+        Ok(known) if known == sha256 => {}
+        _ => {
+            if target.is_file() {
+                fs::remove_file(&target)?;
+            }
+            let input = executable_file(source)?;
+            let mut bytes = Vec::new();
+            input.take(512 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
+            if hex::encode(Sha256::digest(&bytes)) != sha256 {
+                return Err(Error::Unavailable(
+                    "provider executable changed while pinning",
+                ));
+            }
+            match private::create(&target, &bytes) {
+                Ok(()) => {}
+                Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+            #[cfg(unix)]
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o700))?;
+            if executable_digest(&target)? != sha256 {
+                let _ = fs::remove_file(&target);
+                return Err(Error::Unavailable("custodied executable digest mismatch"));
+            }
+        }
+    }
+    if let Ok(entries) = fs::read_dir(&dir) {
+        let prefix = format!("{provider}-");
+        for entry in entries.flatten() {
+            let stale = entry.file_name();
+            if stale
+                .to_str()
+                .is_some_and(|file| file.starts_with(&prefix) && file != name)
+            {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+    Ok(target)
+}
+
+/// Outcome of one refresh pass over a pinned provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefreshOutcome {
+    /// The pinned build is still the discovered one.
+    Kept,
+    /// A newly discovered build passed admission and became the pin.
+    Adopted,
+    /// The discovered build is inspectable but not yet catalog-admitted —
+    /// the pinned build keeps routing while the catalog catches up.
+    PendingCatalog,
+    /// A newly discovered build failed inspection or was denied; the
+    /// previous pin stands and this build is not re-inspected every pass.
+    Rejected,
+    /// No pin exists — `xcb doctor` owns first admission.
+    Unpinned,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderRefresh {
+    pub provider: Provider,
+    pub outcome: RefreshOutcome,
+    pub detail: Option<String>,
+}
+
+/// Re-inspect the discovered provider binary and adopt it only when it is an
+/// admitted build. Runs at daemon boot, hourly in the supervisor, and before
+/// interactive launches: floor-admitted providers (Claude) track upstream
+/// updates without breaking routes, while exact-artifact providers (Codex,
+/// Devin) can only ever re-adopt the qualified build.
+pub async fn refresh_provider(
+    root: &Path,
+    provider: Provider,
+    explicit: Option<&Path>,
+    home: &Path,
+) -> ProviderRefresh {
+    let outcome = private::directory(home)
+        .and_then(|_| private::directory(&home.join("tmp")))
+        .map(|_| ());
+    let outcome = match outcome {
+        Ok(()) => refresh_provider_inner(root, provider, explicit, home).await,
+        Err(error) => Err(error),
+    };
+    let (outcome, detail) = match outcome {
+        Ok((outcome, detail)) => (outcome, detail),
+        Err(error) => (RefreshOutcome::Rejected, Some(error.to_string())),
+    };
+    ProviderRefresh {
+        provider,
+        outcome,
+        detail,
+    }
+}
+
+async fn refresh_provider_inner(
+    root: &Path,
+    provider: Provider,
+    explicit: Option<&Path>,
+    home: &Path,
+) -> Result<(RefreshOutcome, Option<String>)> {
+    let record = root.join("providers").join(format!("{provider}.json"));
+    if !record.is_file() {
+        return Ok((RefreshOutcome::Unpinned, None));
+    }
+    let pin = Pin::load(root, provider).ok();
+    let default_search = explicit.is_none()
+        && std::env::var_os(format!("XCB_{}", provider.as_str().to_uppercase())).is_none();
+    refresh_discovered_provider(
+        root,
+        provider,
+        home,
+        pin,
+        discover(provider, explicit),
+        default_search,
+    )
+    .await
+}
+
+fn retained_pin_status(root: &Path, pin: &Pin) -> Result<(RefreshOutcome, Option<String>)> {
+    if crate::catalog::denied(root, &pin.sha256) {
+        return Err(Error::Unavailable(
+            "saved provider build is denied by the reviewed-builds catalog",
+        ));
+    }
+    if crate::runner::provider_admitted(root, pin) {
+        return Ok((RefreshOutcome::Kept, None));
+    }
+    Ok((
+        RefreshOutcome::PendingCatalog,
+        Some(format!(
+            "saved {} {} is not supported on this host; run xcb doctor --provider {}",
+            pin.provider, pin.version, pin.provider
+        )),
+    ))
+}
+
+/// Discovery and the saved pin are independently verified. A launchd PATH
+/// without package-manager directories cannot invalidate an admitted private
+/// executable. An explicit path override still reports its own failure.
+async fn refresh_discovered_provider(
+    root: &Path,
+    provider: Provider,
+    home: &Path,
+    pin: Option<Pin>,
+    discovered: Result<PathBuf>,
+    default_search: bool,
+) -> Result<(RefreshOutcome, Option<String>)> {
+    let executable = match discovered {
+        Ok(executable) => executable,
+        Err(_) if default_search && pin.is_some() => {
+            return retained_pin_status(root, pin.as_ref().expect("verified saved pin"));
+        }
+        Err(error) => return Err(error),
+    };
+    let discovered_sha = executable_digest(&executable)?;
+    if let Some(pin) = &pin
+        && pin.sha256 == discovered_sha
+    {
+        return retained_pin_status(root, pin);
+    }
+    let marker = root.join("providers").join(format!("{provider}.rejected"));
+    if let Some(rejected) = read_rejected(&marker)
+        && rejected.sha256 == discovered_sha
+        && !crate::catalog::listed(root, &discovered_sha)
+        && (crate::catalog::denied(root, &discovered_sha)
+            || rejected.reason == RejectedReason::Inspection
+            || (rejected.reason == RejectedReason::Unadmitted
+                && rejected.host_sha256.as_deref() == Some(host_executable()?.sha256.as_str())))
+    {
+        // The catalog still does not admit a build seen before. Inspection
+        // failures stay terminal while the bytes are unchanged; a denied
+        // digest is rejected only while the catalog still denies it. Pending
+        // decisions belong to the xcb executable that made them: a release
+        // can add support without publishing a shared catalog entry.
+        return Ok(
+            if crate::catalog::denied(root, &discovered_sha)
+                || rejected.reason == RejectedReason::Inspection
+            {
+                (RefreshOutcome::Rejected, None)
+            } else {
+                (
+                    RefreshOutcome::PendingCatalog,
+                    Some(pending_detail(&rejected)),
+                )
+            },
+        );
+    }
+    match inspect(provider, Some(&executable), home).await {
+        Ok(mut fresh) if crate::runner::provider_admitted(root, &fresh) => {
+            fresh.save(root)?;
+            let _ = fs::remove_file(&marker);
+            Ok((RefreshOutcome::Adopted, None))
+        }
+        Ok(fresh) => {
+            let denied = crate::catalog::denied(root, &discovered_sha);
+            let reason = if denied {
+                RejectedReason::Denied
+            } else {
+                RejectedReason::Unadmitted
+            };
+            write_rejected(&marker, &discovered_sha, Some(&fresh.version), reason)?;
+            if denied {
+                Err(Error::Unavailable(
+                    "provider build is denied by the reviewed-builds catalog",
+                ))
+            } else {
+                Ok((
+                    RefreshOutcome::PendingCatalog,
+                    Some(format!("{} awaiting catalog admission", fresh.version)),
+                ))
+            }
+        }
+        Err(error) => {
+            write_rejected(&marker, &discovered_sha, None, RejectedReason::Inspection)?;
+            Err(error)
+        }
+    }
+}
+
+fn pending_detail(rejected: &Rejected) -> String {
+    match &rejected.provider_version {
+        Some(version) => format!("{version} awaiting catalog admission"),
+        None => "discovered build awaiting catalog admission".to_owned(),
+    }
+}
+
+/// A discovered build the refresh pass marked as awaiting catalog
+/// admission. Doctor and status surfaces report it without re-inspecting;
+/// inspection failures and denied builds are not pending.
+pub struct PendingBuild {
+    pub version: Option<String>,
+    pub sha256: String,
+}
+pub fn pending_build(root: &Path, provider: Provider) -> Option<PendingBuild> {
+    let marker = root
+        .join("providers")
+        .join(format!("{provider}.json"))
+        .with_extension("rejected");
+    let rejected = read_rejected(&marker)?;
+    if rejected.reason != RejectedReason::Unadmitted {
+        return None;
+    }
+    Some(PendingBuild {
+        version: rejected.provider_version,
+        sha256: rejected.sha256,
+    })
+}
+
+/// A build the refresh pass already judged: pending builds wait on the
+/// catalog or an xcb upgrade; failed inspections stay rejected while the
+/// bytes are unchanged, and denials stay rejected while the catalog denies.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Rejected {
+    version: u32,
+    sha256: String,
+    #[serde(default)]
+    provider_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    host_sha256: Option<String>,
+    reason: RejectedReason,
+    observed_at_ms: u64,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum RejectedReason {
+    Unadmitted,
+    Inspection,
+    Denied,
+}
+
+fn read_rejected(marker: &Path) -> Option<Rejected> {
+    let bytes = private::read(marker, 1024).ok()?;
+    if let Ok(rejected) = serde_json::from_slice::<Rejected>(&bytes)
+        && rejected.version == 1
+    {
+        return Some(rejected);
+    }
+    // Markers written before the catalog flow store the raw digest bytes;
+    // treat them as unadmitted builds awaiting review.
+    std::str::from_utf8(&bytes)
+        .ok()
+        .map(str::trim)
+        .filter(|sha256| sha256.len() == 64)
+        .map(|sha256| Rejected {
+            version: 1,
+            sha256: sha256.to_owned(),
+            provider_version: None,
+            host_sha256: None,
+            reason: RejectedReason::Unadmitted,
+            observed_at_ms: 0,
+        })
+}
+
+fn write_rejected(
+    marker: &Path,
+    sha256: &str,
+    provider_version: Option<&str>,
+    reason: RejectedReason,
+) -> Result<()> {
+    let record = Rejected {
+        version: 1,
+        sha256: sha256.to_owned(),
+        provider_version: provider_version.map(str::to_owned),
+        host_sha256: Some(host_executable()?.sha256.clone()),
+        reason,
+        observed_at_ms: crate::now_ms(),
+    };
+    let bytes = serde_json::to_vec_pretty(&record)?;
+    match private::read(marker, 1024) {
+        Ok(old) => private::replace(marker, &bytes, &digest(old)),
+        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            private::create(marker, &bytes)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Bytes a provider may write to stderr before the host reports the excess.
+/// Volume never fails a join: a chatty child must not turn a proven kill,
+/// reap and group-absence check into an unsettled run.
+pub const STDERR_NOTICE_BYTES: u64 = 1024 * 1024;
+
+/// Outcome of draining one child stream to EOF. `complete` is false only for
+/// a real read failure, never for volume.
+#[derive(Debug, Clone, Copy, Default)]
+struct Drained {
+    bytes: u64,
+    complete: bool,
+}
+
+/// The unit a child's whole process tree is stopped and proven absent by: a
+/// process group the child leads on Unix, a kill-on-close Job Object the
+/// child joins before it runs on Windows.
+#[cfg(unix)]
+#[derive(Clone)]
+pub(crate) struct Group(Pid);
+#[cfg(windows)]
+#[derive(Clone)]
+pub(crate) struct Group(std::sync::Arc<xcb_platform::Job>, u32);
+
+impl Group {
+    /// Make `command` start its child as the leader of a new group (Unix) or
+    /// suspended, so it can join a job before it runs (Windows).
+    pub(crate) fn prepare(command: &mut Command) {
+        #[cfg(unix)]
+        command.as_std_mut().process_group(0);
+        #[cfg(windows)]
+        command.creation_flags(xcb_platform::SPAWN_SUSPENDED);
+    }
+
+    /// The group of a child spawned after [`Group::prepare`]. On Windows this
+    /// assigns the child to a new job and resumes it; a child that cannot
+    /// join is killed.
+    pub(crate) fn adopt(child: &mut Child) -> Option<Self> {
+        let pid = child.id().filter(|pid| *pid > 1)?;
+        #[cfg(unix)]
+        {
+            i32::try_from(pid).ok().and_then(Pid::from_raw).map(Self)
+        }
+        #[cfg(windows)]
+        {
+            let joined = child
+                .raw_handle()
+                .ok_or_else(|| std::io::Error::other("reaped"))
+                .and_then(|handle| {
+                    let job = xcb_platform::Job::new()?;
+                    job.adopt(handle, pid)?;
+                    Ok(job)
+                });
+            match joined {
+                Ok(job) => Some(Self(std::sync::Arc::new(job), pid)),
+                Err(_) => {
+                    let _ = child.start_kill();
+                    None
+                }
+            }
+        }
+    }
+
+    pub(crate) fn pid(&self) -> u32 {
+        #[cfg(unix)]
+        {
+            self.0.as_raw_nonzero().get() as u32
+        }
+        #[cfg(windows)]
+        {
+            self.1
+        }
+    }
+
+    /// `killpg(SIGKILL)` / `TerminateJobObject`.
+    pub(crate) fn kill(&self) -> bool {
+        #[cfg(unix)]
+        {
+            kill_process_group(self.0, Signal::KILL).is_ok()
+        }
+        #[cfg(windows)]
+        {
+            self.0.kill().is_ok()
+        }
+    }
+
+    /// No member remains: `ESRCH` from a group probe, or a job with no
+    /// active process.
+    pub(crate) fn empty(&self) -> Option<bool> {
+        #[cfg(unix)]
+        {
+            match test_kill_process_group(self.0) {
+                Err(rustix::io::Errno::SRCH) => Some(true),
+                Ok(()) => Some(false),
+                Err(_) => None,
+            }
+        }
+        #[cfg(windows)]
+        {
+            self.0.active().ok().map(|active| active == 0)
+        }
+    }
+}
+
 pub struct StreamProcess {
-    pub(crate) stdin: ChildStdin,
+    pub(crate) stdin: Option<ChildStdin>,
     pub(crate) stdout: BufReader<ChildStdout>,
     child: Child,
-    group: Option<Pid>,
-    stderr: JoinHandle<bool>,
+    group: Option<Group>,
+    stderr: JoinHandle<Drained>,
+    stderr_bytes: Option<u64>,
+    exit_status: Option<std::process::ExitStatus>,
     frame_buffer: Vec<u8>,
 }
 impl StreamProcess {
@@ -407,42 +1129,33 @@ impl StreamProcess {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        command.as_std_mut().process_group(0);
+        Group::prepare(&mut command);
         let mut child = command.spawn().map_err(Error::LaunchNotStarted)?;
-        let pid = child
-            .id()
-            .filter(|pid| *pid > 1)
-            .and_then(|pid| i32::try_from(pid).ok())
-            .and_then(Pid::from_raw)
-            .ok_or(Error::Protocol("child process identity"))?;
+        let pid = Group::adopt(&mut child).ok_or(Error::Protocol("child process identity"))?;
         let stdin = child.stdin.take().ok_or(Error::Protocol("child stdin"))?;
         let stdout = BufReader::new(child.stdout.take().ok_or(Error::Protocol("child stdout"))?);
         let stderr = child.stderr.take().ok_or(Error::Protocol("child stderr"))?;
-        let stderr = tokio::spawn(async move { drain(stderr, 1024 * 1024).await.is_ok() });
+        let stderr = tokio::spawn(drain_to_eof(stderr));
         Ok(Self {
-            stdin,
+            stdin: Some(stdin),
             stdout,
             child,
             group: Some(pid),
             stderr,
+            stderr_bytes: None,
+            exit_status: None,
             frame_buffer: Vec::new(),
         })
     }
     pub fn pid(&self) -> u32 {
-        self.group
-            .expect("owned process group")
-            .as_raw_nonzero()
-            .get() as u32
+        self.group.as_ref().expect("owned process group").pid()
     }
     pub async fn send(&mut self, value: &serde_json::Value) -> Result<()> {
-        let mut bytes = serde_json::to_vec(value)?;
-        if bytes.len() > 16 * 1024 * 1024 {
-            return Err(Error::Protocol("input frame limit"));
-        }
-        bytes.push(b'\n');
-        self.stdin.write_all(&bytes).await?;
-        self.stdin.flush().await?;
-        Ok(())
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or(Error::Protocol("provider input closed"))?;
+        crate::wire_helpers::write_frame(stdin, value, 16 * 1024 * 1024, "input frame limit").await
     }
     pub async fn frame(&mut self) -> Result<Option<Vec<u8>>> {
         self.frame_bounded(MAX_JSON_BYTES).await
@@ -456,52 +1169,89 @@ impl StreamProcess {
         if self.frame_buffer.len() > max {
             return Err(Error::Protocol("output frame limit"));
         }
-        loop {
-            let available = self.stdout.fill_buf().await?;
-            if available.is_empty() {
-                return if self.frame_buffer.is_empty() {
-                    Ok(None)
-                } else {
-                    Err(Error::Protocol("incomplete final frame"))
-                };
-            }
-            let end = available.iter().position(|byte| *byte == b'\n');
-            let count = end.map_or(available.len(), |end| end + 1);
-            if self.frame_buffer.len() + count > max {
-                return Err(Error::Protocol("output frame limit"));
-            }
-            // Retain consumed bytes across cancellation. An adapter may select
-            // ACP stdout against an independent MCP callback channel.
-            self.frame_buffer.extend_from_slice(&available[..count]);
-            self.stdout.consume(count);
-            if end.is_some() {
-                return Ok(Some(std::mem::take(&mut self.frame_buffer)));
-            }
-        }
+        // The retained buffer survives cancellation: an adapter may select
+        // ACP stdout against an independent MCP callback channel.
+        crate::wire_helpers::frame(
+            &mut self.stdout,
+            &mut self.frame_buffer,
+            max,
+            "output frame limit",
+            "incomplete final frame",
+        )
+        .await
     }
     fn signal(&self) {
-        if let Some(group) = self.group {
-            let _ = kill_process_group(group, Signal::KILL);
+        if let Some(group) = &self.group {
+            let _ = group.kill();
         }
+    }
+    /// Total stderr bytes the child wrote when that exceeded
+    /// `STDERR_NOTICE_BYTES`; known only after `join`. The bytes themselves
+    /// are never retained: provider stderr can carry credentials or paths.
+    pub fn stderr_overflow(&self) -> Option<u64> {
+        self.stderr_bytes
+            .filter(|bytes| *bytes > STDERR_NOTICE_BYTES)
+    }
+    /// The status observed when `join`/`join_graceful` reaped the child —
+    /// how callers prove a graceful settle exited on its own rather than
+    /// under SIGKILL.
+    pub fn exit_status(&self) -> Option<std::process::ExitStatus> {
+        self.exit_status
     }
     pub async fn join(&mut self) -> bool {
         self.signal();
+        self.reap().await
+    }
+    /// The graceful settle cancellation asks for: close stdin first, give the
+    /// provider `grace` to exit on its own (after any interruption frame the
+    /// caller already sent), then kill the group exactly as `join` does. The
+    /// reaped-streams and group-absence proof is unchanged either way.
+    pub async fn join_graceful(&mut self, grace: Duration) -> bool {
+        // Dropping stdin is what sends EOF: shutdown on a child pipe is a
+        // no-op, so a provider that polls its input sees a real close.
+        self.stdin.take();
+        if tokio::time::timeout(grace, self.child.wait())
+            .await
+            .is_err()
+        {
+            self.signal();
+        }
+        self.reap().await
+    }
+    async fn reap(&mut self) -> bool {
+        // Disarm first: once the leader is reaped the group number can be
+        // recycled, so neither Drop nor later cleanup may signal it.
         let Some(group) = self.group.take() else {
             return false;
         };
         let joined = tokio::time::timeout(Duration::from_secs(5), async {
-            let _ = self.stdin.shutdown().await;
+            self.stdin.take();
             let (exit, stdout, stderr) = tokio::join!(
                 self.child.wait(),
-                drain(&mut self.stdout, 16 * 1024 * 1024),
+                drain_to_eof(&mut self.stdout),
                 &mut self.stderr
             );
-            exit.is_ok() && stdout.is_ok() && matches!(stderr, Ok(true))
+            let stderr = stderr.unwrap_or_default();
+            self.stderr_bytes = Some(stderr.bytes);
+            self.exit_status = exit.as_ref().ok().copied();
+            exit.is_ok() && stdout.complete && stderr.complete
         })
         .await
         .unwrap_or(false);
-        joined && group_absent(group).await
+        if !joined {
+            resignal_unjoined(&group, self.child.id().is_some());
+        }
+        joined && group_absent(&group).await
     }
+}
+
+/// One best-effort second SIGKILL after a timed-out join, reaching members
+/// the first signal missed (for example one forked while it was delivered).
+/// Sent only while the leader is unreaped: its pid still pins the group
+/// number, so the signal cannot reach a recycled group. The join stays
+/// unproven either way; the caller keeps the account held.
+fn resignal_unjoined(group: &Group, leader_unreaped: bool) -> bool {
+    leader_unreaped && group.kill()
 }
 impl Drop for StreamProcess {
     fn drop(&mut self) {
@@ -510,10 +1260,13 @@ impl Drop for StreamProcess {
     }
 }
 
-async fn group_absent(group: Pid) -> bool {
-    tokio::time::timeout(Duration::from_secs(5), async {
+async fn group_absent(group: &Group) -> bool {
+    // Killed members stay visible until init reaps orphaned zombies, which can
+    // lag on a loaded host; 15s keeps the bound comfortable without letting a
+    // genuinely stuck group hang the caller.
+    tokio::time::timeout(Duration::from_secs(15), async {
         loop {
-            if test_kill_process_group(group) == Err(rustix::io::Errno::SRCH) {
+            if group.empty() == Some(true) {
                 return true;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -523,6 +1276,22 @@ async fn group_absent(group: Pid) -> bool {
     .unwrap_or(false)
 }
 
+/// Prove that the process group a recorded child led is gone. On Windows the
+/// job died with the xcb process that held it (kill-on-close), so the proof
+/// is that the recorded leader no longer exists.
+#[cfg(windows)]
+pub fn prove_process_group_absent(pid: u32) -> Result<()> {
+    if pid <= 1 {
+        return Err(Error::Unavailable("process group id is invalid"));
+    }
+    match xcb_platform::process_exists(pid) {
+        Some(false) => Ok(()),
+        Some(true) => Err(Error::Conflict("process group is still present")),
+        None => Err(Error::Unavailable("process group probe failed")),
+    }
+}
+
+#[cfg(unix)]
 pub fn prove_process_group_absent(pid: u32) -> Result<()> {
     let group = i32::try_from(pid)
         .ok()
@@ -535,6 +1304,24 @@ pub fn prove_process_group_absent(pid: u32) -> Result<()> {
     }
 }
 
+/// Read a stream until EOF, counting but never retaining bytes. Only a read
+/// failure leaves `complete` false; the caller decides what volume means.
+async fn drain_to_eof(mut source: impl AsyncRead + Unpin) -> Drained {
+    let mut buffer = [0u8; 8192];
+    let mut drained = Drained::default();
+    loop {
+        match source.read(&mut buffer).await {
+            Ok(0) => {
+                drained.complete = true;
+                return drained;
+            }
+            Ok(read) => drained.bytes = drained.bytes.saturating_add(read as u64),
+            Err(_) => return drained,
+        }
+    }
+}
+
+/// Bounded drain for one-shot captures whose whole output budget is fixed.
 async fn drain(mut source: impl AsyncRead + Unpin, max: usize) -> Result<()> {
     let mut buffer = [0u8; 8192];
     let mut count = 0;
@@ -561,14 +1348,9 @@ pub async fn capture_with_input(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    command.as_std_mut().process_group(0);
+    Group::prepare(&mut command);
     let mut child = command.spawn()?;
-    let group = child
-        .id()
-        .filter(|pid| *pid > 1)
-        .and_then(|pid| i32::try_from(pid).ok())
-        .and_then(Pid::from_raw)
-        .ok_or(Error::Protocol("child process identity"))?;
+    let group = Group::adopt(&mut child).ok_or(Error::Protocol("child process identity"))?;
     let mut stdin = child.stdin.take().ok_or(Error::Protocol("child stdin"))?;
     let mut stdout = child.stdout.take().ok_or(Error::Protocol("child stdout"))?;
     let stderr = child.stderr.take().ok_or(Error::Protocol("child stderr"))?;
@@ -593,17 +1375,17 @@ pub async fn capture_with_input(
     .await;
     let timed_out = result.is_err();
     if timed_out {
-        let _ = kill_process_group(group, Signal::KILL);
+        let _ = group.kill();
     }
     let status = match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
         Ok(status) => status?,
         Err(_) => {
-            let _ = kill_process_group(group, Signal::KILL);
+            let _ = group.kill();
             let _ = child.wait().await;
             return Err(Error::Unavailable("child did not join"));
         }
     };
-    if !group_absent(group).await {
+    if !group_absent(&group).await {
         return Err(Error::Unavailable("process group did not join"));
     }
     if timed_out {
@@ -624,11 +1406,11 @@ pub(crate) enum CaptureOutcome {
     Unproven,
 }
 
-struct CaptureGroup(Option<Pid>);
+struct CaptureGroup(Option<Group>);
 impl Drop for CaptureGroup {
     fn drop(&mut self) {
-        if let Some(group) = self.0 {
-            let _ = kill_process_group(group, Signal::KILL);
+        if let Some(group) = &self.0 {
+            let _ = group.kill();
         }
     }
 }
@@ -638,11 +1420,156 @@ impl Drop for CaptureGroup {
 /// is signalled, never implemented by dropping the cleanup future. Drop only
 /// attempts a stop; the caller must retain its durable lease in that case.
 pub(crate) async fn capture_supervised(
+    command: Command,
+    max: usize,
+    deadline: Duration,
+    cancel: tokio::sync::watch::Receiver<bool>,
+    started: impl FnOnce(u32) -> Result<()>,
+) -> CaptureOutcome {
+    capture_supervised_interactive(command, max, deadline, cancel, started, None).await
+}
+
+type LoginOutputObserver = Box<dyn FnMut(&[u8]) -> Result<()> + Send>;
+
+pub(crate) struct LoginInteraction {
+    pub observer: LoginOutputObserver,
+    #[cfg(unix)]
+    pub terminal: tokio::io::unix::AsyncFd<std::fs::File>,
+    pub codes: tokio::sync::mpsc::Receiver<zeroize::Zeroizing<String>>,
+    pub stdin: Stdio,
+}
+
+#[cfg(unix)]
+pub(crate) fn login_terminal() -> std::io::Result<(Stdio, tokio::io::unix::AsyncFd<std::fs::File>)>
+{
+    use rustix::{fs, pty, termios};
+    let master = pty::openpt(pty::OpenptFlags::RDWR | pty::OpenptFlags::NOCTTY)?;
+    pty::grantpt(&master)?;
+    pty::unlockpt(&master)?;
+    let name = pty::ptsname(&master, Vec::new())?;
+    let slave = fs::open(
+        name.as_c_str(),
+        fs::OFlags::RDWR | fs::OFlags::NOCTTY | fs::OFlags::CLOEXEC,
+        fs::Mode::empty(),
+    )?;
+    // This terminal is private and never resized by the operator's shell.
+    // Native prompt renderers need a real viewport rather than openpty's 0x0.
+    termios::tcsetwinsize(
+        &slave,
+        termios::Winsize {
+            ws_row: 24,
+            ws_col: 80,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        },
+    )?;
+    let mut settings = termios::tcgetattr(&slave)?;
+    settings.local_modes.remove(termios::LocalModes::ECHO);
+    termios::tcsetattr(&slave, termios::OptionalActions::Now, &settings)?;
+    let flags = fs::fcntl_getfl(&master)?;
+    fs::fcntl_setfl(&master, flags | fs::OFlags::NONBLOCK)?;
+    rustix::io::fcntl_setfd(&master, rustix::io::FdFlags::CLOEXEC)?;
+    Ok((
+        Stdio::from(std::fs::File::from(slave)),
+        tokio::io::unix::AsyncFd::new(std::fs::File::from(master))?,
+    ))
+}
+
+/// Provider terminal libraries can write queries and rendered prompts through
+/// stdin's tty even when stdout/stderr are pipes. Draining that private output
+/// prevents both a full PTY buffer and macOS TCSADRAIN from blocking sign-in.
+#[cfg(unix)]
+async fn read_login_terminal(
+    terminal: &tokio::io::unix::AsyncFd<std::fs::File>,
+    buffer: &mut [u8],
+) -> std::io::Result<usize> {
+    loop {
+        let mut ready = terminal.readable().await?;
+        match ready
+            .try_io(|fd| rustix::io::read(fd.get_ref(), &mut *buffer).map_err(std::io::Error::from))
+        {
+            Ok(Ok(n)) => return Ok(n),
+            // Linux reports EIO when the last slave closes; other Unix PTYs
+            // report EOF. Neither is physical process-exit evidence.
+            Ok(Err(error))
+                if error.raw_os_error() == Some(rustix::io::Errno::IO.raw_os_error()) =>
+            {
+                return Ok(0);
+            }
+            Ok(Err(error)) => return Err(error),
+            Err(_) => {}
+        }
+    }
+}
+
+#[cfg(not(unix))]
+async fn read_login_terminal(_terminal: &(), _buffer: &mut [u8]) -> std::io::Result<usize> {
+    std::future::pending().await
+}
+
+/// Writes one pasted sign-in code and Enter through the provider's private
+/// terminal. Appending Enter to the secret String could leave its previous
+/// allocation unwiped after growth, so each part is written separately.
+#[cfg(unix)]
+async fn write_login_code(
+    terminal: &tokio::io::unix::AsyncFd<std::fs::File>,
+    code: &str,
+) -> std::io::Result<()> {
+    for part in [code.as_bytes(), b"\r"] {
+        let mut written = 0;
+        while written < part.len() {
+            let mut ready = terminal.writable().await?;
+            match ready.try_io(|fd| {
+                rustix::io::write(fd.get_ref(), &part[written..]).map_err(std::io::Error::from)
+            }) {
+                Ok(Ok(0)) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "sign-in input stalled",
+                    ));
+                }
+                Ok(Ok(n)) => written += n,
+                Ok(Err(error)) => return Err(error),
+                Err(_) => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn capture_supervised_interactive(
+    command: Command,
+    max: usize,
+    deadline: Duration,
+    cancel: tokio::sync::watch::Receiver<bool>,
+    started: impl FnOnce(u32) -> Result<()>,
+    interaction: Option<LoginInteraction>,
+) -> CaptureOutcome {
+    capture_supervised_interactive_diagnosed(
+        command,
+        max,
+        deadline,
+        cancel,
+        started,
+        interaction,
+        None,
+    )
+    .await
+}
+
+type CaptureDiagnostic = fn(&[u8], &[u8]) -> &'static str;
+
+/// A diagnostic may classify private output only after a nonzero exit and a
+/// proven join. It cannot stop the helper, change custody, or return raw text.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn capture_supervised_interactive_diagnosed(
     mut command: Command,
     max: usize,
     deadline: Duration,
     mut cancel: tokio::sync::watch::Receiver<bool>,
     started: impl FnOnce(u32) -> Result<()>,
+    mut interaction: Option<LoginInteraction>,
+    diagnose: Option<CaptureDiagnostic>,
 ) -> CaptureOutcome {
     if max == 0 || max > 64 * 1024 || deadline.is_zero() || deadline > Duration::from_secs(600) {
         return CaptureOutcome::NeverStarted(Error::Unavailable(
@@ -653,22 +1580,28 @@ pub(crate) async fn capture_supervised(
         return CaptureOutcome::NeverStarted(Error::Unavailable("sign-in cancelled before launch"));
     }
     command
-        .stdin(Stdio::null())
+        .stdin(
+            interaction
+                .as_mut()
+                .map(|i| std::mem::replace(&mut i.stdin, Stdio::null()))
+                .unwrap_or_else(Stdio::null),
+        )
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    command.as_std_mut().process_group(0);
+    Group::prepare(&mut command);
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => return CaptureOutcome::NeverStarted(Error::LaunchNotStarted(error)),
     };
-    let Some(pid) = child.id().filter(|pid| *pid > 1) else {
+    // Command retains configured stdio descriptors after spawn. Release our
+    // slave endpoint so terminal EOF follows the owned provider's exit.
+    drop(command);
+    let Some(group) = Group::adopt(&mut child) else {
         return CaptureOutcome::Unproven;
     };
-    let Some(group) = i32::try_from(pid).ok().and_then(Pid::from_raw) else {
-        return CaptureOutcome::Unproven;
-    };
-    let mut custody = CaptureGroup(Some(group));
+    let pid = group.pid();
+    let mut custody = CaptureGroup(Some(group.clone()));
     let recorded = started(pid);
     let Some(mut stdout) = child.stdout.take() else {
         return CaptureOutcome::Unproven;
@@ -676,23 +1609,129 @@ pub(crate) async fn capture_supervised(
     let Some(mut stderr) = child.stderr.take() else {
         return CaptureOutcome::Unproven;
     };
+    // Reserve the full bound so a reallocation cannot leave an unwiped copy
+    // of credential-bearing provider output in a freed allocation.
+    let mut diagnostic_bytes = zeroize::Zeroizing::new(Vec::with_capacity(if diagnose.is_some() {
+        64 * 1024
+    } else {
+        0
+    }));
+    let mut diagnostic_complete = true;
     let result = match recorded {
         Err(error) => Err(error),
         Ok(()) => {
             let execution = async {
-                let output = async {
-                    let mut bytes = zeroize::Zeroizing::new(Vec::new());
-                    (&mut stdout)
-                        .take(max as u64 + 1)
-                        .read_to_end(&mut bytes)
-                        .await?;
-                    if bytes.len() > max {
-                        return Err(Error::Protocol("login output limit"));
+                let mut bytes = zeroize::Zeroizing::new(Vec::with_capacity(max));
+                let mut out_closed = false;
+                let mut err_closed = false;
+                let mut out_buf = zeroize::Zeroizing::new([0u8; 4096]);
+                let mut err_buf = zeroize::Zeroizing::new([0u8; 4096]);
+                let mut stderr_count = 0usize;
+                let mut terminal_buf = zeroize::Zeroizing::new([0u8; 4096]);
+                let mut terminal_count = 0usize;
+                let (mut observer, terminal, mut codes) = match interaction.as_mut() {
+                    Some(i) => {
+                        #[cfg(unix)]
+                        let terminal = Some(&i.terminal);
+                        #[cfg(not(unix))]
+                        let terminal: Option<&()> = None;
+                        (Some(&mut i.observer), terminal, Some(&mut i.codes))
                     }
-                    Ok(bytes)
+                    None => (None, None, None),
                 };
-                let (bytes, _) = tokio::try_join!(output, drain(&mut stderr, 1024 * 1024))?;
-                Ok(bytes)
+                let mut terminal_closed = terminal.is_none();
+                let mut code_submitted = false;
+                let mut input_closed = false;
+                // A provider that mounts its input listener after the paste
+                // prompt renders discards every byte written during that
+                // window. Redeliver the retained code on a fixed cadence for
+                // the whole capture: output cannot prove delivery, and a late
+                // mount is the only safe landing for a dropped write.
+                let mut pending_resend: Option<zeroize::Zeroizing<String>> = None;
+                let mut resend_at: Option<tokio::time::Instant> = None;
+                loop {
+                    if out_closed && err_closed && terminal_closed {
+                        return Ok(bytes);
+                    }
+                    tokio::select! {
+                        read = stdout.read(&mut *out_buf), if !out_closed => {
+                            let n = read?;
+                            out_closed = n == 0;
+                            if bytes.len() + n > max { return Err(Error::Protocol("login output limit")); }
+                            if let Some(observer) = observer.as_mut() { observer(&out_buf[..n])?; }
+                            bytes.extend_from_slice(&out_buf[..n]);
+                        }
+                        read = stderr.read(&mut *err_buf), if !err_closed => {
+                            let n = read?;
+                            err_closed = n == 0;
+                            stderr_count += n;
+                            if stderr_count > 1024 * 1024 { return Err(Error::Protocol("login error output limit")); }
+                            if diagnose.is_some() {
+                                let retained = n.min((64 * 1024usize).saturating_sub(diagnostic_bytes.len()));
+                                diagnostic_bytes.extend_from_slice(&err_buf[..retained]);
+                                diagnostic_complete &= retained == n;
+                            }
+                            if let Some(observer) = observer.as_mut() { observer(&err_buf[..n])?; }
+                        }
+                        read = async {
+                            match terminal {
+                                Some(terminal) => read_login_terminal(terminal, &mut *terminal_buf).await,
+                                None => std::future::pending().await,
+                            }
+                        }, if !terminal_closed => {
+                            let n = read?;
+                            terminal_closed = n == 0;
+                            terminal_count += n;
+                            if terminal_count > 1024 * 1024 { return Err(Error::Protocol("login terminal output limit")); }
+                            if let Some(observer) = observer.as_mut() { observer(&terminal_buf[..n])?; }
+                        }
+                        code = async {
+                            if let Some(codes) = codes.as_mut() { codes.recv().await } else { std::future::pending().await }
+                        }, if !input_closed => {
+                            let Some(code) = code else {
+                                if !code_submitted {
+                                    return Err(Error::Unavailable("sign-in input closed"));
+                                }
+                                // The reader may finish immediately after handing off
+                                // its code. Provider exchange and physical cleanup
+                                // still belong to the supervised login future.
+                                input_closed = true;
+                                continue;
+                            };
+                            if code.is_empty() || code.len() > 4096 || code.chars().any(char::is_control) {
+                                return Err(Error::Protocol("invalid sign-in code"));
+                            }
+                            #[cfg(unix)]
+                            if let Some(terminal) = terminal {
+                                write_login_code(terminal, &code).await?;
+                            }
+                            pending_resend = Some(code);
+                            resend_at = Some(tokio::time::Instant::now() + Duration::from_secs(8));
+                            code_submitted = true;
+                        }
+                        _ = async {
+                            match resend_at {
+                                Some(at) => tokio::time::sleep_until(at).await,
+                                None => std::future::pending().await,
+                            }
+                        }, if pending_resend.is_some() => {
+                            #[cfg(unix)]
+                            if let (Some(terminal), Some(code)) = (terminal, pending_resend.as_ref()) {
+                                match write_login_code(terminal, code).await {
+                                    // The child is gone; its pipes close the loop.
+                                    Err(error) if error.raw_os_error() == Some(rustix::io::Errno::IO.raw_os_error())
+                                        || error.kind() == std::io::ErrorKind::BrokenPipe => {
+                                        pending_resend = None;
+                                    }
+                                    other => other?,
+                                }
+                            }
+                            resend_at = pending_resend
+                                .as_ref()
+                                .map(|_| tokio::time::Instant::now() + Duration::from_secs(8));
+                        }
+                    }
+                }
             };
             tokio::select! {
                 biased;
@@ -708,7 +1747,7 @@ pub(crate) async fn capture_supervised(
     // immediately before exit cannot turn a successful login into SIGKILL.
     if result.is_err() {
         if child.id() == Some(pid) {
-            let _ = kill_process_group(group, Signal::KILL);
+            let _ = group.kill();
         }
         custody.0 = None;
     }
@@ -720,21 +1759,35 @@ pub(crate) async fn capture_supervised(
             custody.0 = None;
             status
         };
-        tokio::join!(
-            exit,
-            drain(&mut stdout, 16 * 1024 * 1024),
-            drain(&mut stderr, 16 * 1024 * 1024)
-        )
+        tokio::join!(exit, drain_to_eof(&mut stdout), drain_to_eof(&mut stderr))
     })
     .await;
-    let Ok((Ok(status), Ok(()), Ok(()))) = cleanup else {
+    let Ok((Ok(status), stdout, stderr)) = cleanup else {
         return CaptureOutcome::Unproven;
     };
-    if !group_absent(group).await {
+    if !stdout.complete || !stderr.complete {
         return CaptureOutcome::Unproven;
     }
-    if !status.success() && result.is_ok() {
-        return CaptureOutcome::Joined(Err(Error::Unavailable("sign-in did not complete")));
+    if !group_absent(&group).await {
+        return CaptureOutcome::Unproven;
+    }
+    if !status.success()
+        && let Ok(stdout) = &result
+    {
+        return CaptureOutcome::Joined(Err(Error::Unavailable(
+            diagnose
+                .map(|diagnose| {
+                    diagnose(
+                        stdout,
+                        if diagnostic_complete {
+                            &diagnostic_bytes
+                        } else {
+                            &[]
+                        },
+                    )
+                })
+                .unwrap_or("sign-in did not complete"),
+        )));
     }
     CaptureOutcome::Joined(result)
 }
@@ -745,17 +1798,12 @@ pub async fn capture(mut command: Command, max: usize, deadline: Duration) -> Re
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    command.as_std_mut().process_group(0);
+    Group::prepare(&mut command);
     let mut child = command.spawn()?;
-    let group = child
-        .id()
-        .filter(|pid| *pid > 1)
-        .and_then(|pid| i32::try_from(pid).ok())
-        .and_then(Pid::from_raw)
-        .ok_or(Error::Protocol("child process identity"))?;
+    let group = Group::adopt(&mut child).ok_or(Error::Protocol("child process identity"))?;
     let mut stdout = child.stdout.take().ok_or(Error::Protocol("stdout"))?;
     let stderr = child.stderr.take().ok_or(Error::Protocol("stderr"))?;
-    let result = tokio::time::timeout(deadline, async {
+    let result = match tokio::time::timeout(deadline, async {
         let output = async {
             let mut bytes = Vec::new();
             (&mut stdout)
@@ -770,21 +1818,37 @@ pub async fn capture(mut command: Command, max: usize, deadline: Duration) -> Re
         let (bytes, _) = tokio::try_join!(output, drain(stderr, 1024 * 1024))?;
         Ok::<_, Error>(bytes)
     })
-    .await;
-    let _ = kill_process_group(group, Signal::KILL);
-    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
-        .await
-        .map_err(|_| Error::Unavailable("child did not join"))??;
-    if !group_absent(group).await {
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(Error::Unavailable("provider command timed out")),
+    };
+    // EOF on the pipes only proves the descriptors closed; the leader can
+    // still be a moment from its own clean exit, and a group sweep landing in
+    // that window rewrites the exit as a signal. Only a failed or timed-out
+    // read stops the group before the leader's status is known — the same
+    // distinction capture_with_input and capture_supervised already make.
+    if result.is_err() {
+        let _ = group.kill();
+    }
+    let status = match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+        Ok(status) => status?,
+        Err(_) => {
+            let _ = group.kill();
+            let _ = child.wait().await;
+            return Err(Error::Unavailable("child did not join"));
+        }
+    };
+    if !group_absent(&group).await {
         return Err(Error::Unavailable("process group did not join"));
     }
     if !status.success() {
         return Err(Error::Unavailable("provider command failed"));
     }
-    result.map_err(|_| Error::Unavailable("provider command timed out"))?
+    result
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use rustix::io::{FdFlags, fcntl_getfd};
@@ -849,10 +1913,160 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn supervised_auth_diagnostic_requires_nonzero_exit_and_complete_output() {
+        let (_sender, cancel) = tokio::sync::watch::channel(false);
+        for script in [
+            "printf 'Login failed: Request failed with status code 403\\nprivate-token private@example.test https://private.test\\n' >&2; exit 7",
+            "printf 'Login failed: Request failed with status code 403\\nprivate-token private@example.test https://private.test\\n'; exit 7",
+            "printf 'Login failed: Request failed ' >&2; sleep 0.02; printf 'with status code 403\\nprivate-token\\n' >&2; exit 7",
+        ] {
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", script]);
+            let mut pid = 0;
+            let outcome = capture_supervised_interactive_diagnosed(
+                command,
+                1024,
+                Duration::from_secs(10),
+                cancel.clone(),
+                |started| {
+                    pid = started;
+                    Ok(())
+                },
+                None,
+                Some(crate::auth::claude_auth_failure),
+            )
+            .await;
+            let CaptureOutcome::Joined(Err(error)) = outcome else {
+                panic!("nonzero helper did not join");
+            };
+            assert!(prove_process_group_absent(pid).is_ok());
+            let message = format!("{error} {error:?}");
+            assert!(message.contains("HTTP 403"));
+            assert!(!message.contains("private"));
+            assert!(!message.contains("https://"));
+        }
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "printf 'Login failed: private-token\\n' >&2; printf success",
+        ]);
+        let outcome = capture_supervised_interactive_diagnosed(
+            command,
+            1024,
+            Duration::from_secs(10),
+            cancel,
+            |_| Ok(()),
+            None,
+            Some(|_, _| panic!("successful helper was diagnosed as a failure")),
+        )
+        .await;
+        assert!(matches!(outcome, CaptureOutcome::Joined(Ok(bytes)) if &**bytes == b"success"));
+    }
+
+    #[tokio::test]
+    async fn supervised_auth_diagnostic_preserves_unproven_group_custody() {
+        use std::os::unix::process::CommandExt;
+        struct OwnedMember(Option<std::process::Child>);
+        impl Drop for OwnedMember {
+            fn drop(&mut self) {
+                if let Some(mut child) = self.0.take() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let ready = root.path().join("member-ready");
+        let mut member = OwnedMember(None);
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "while [ ! -f \"$1\" ]; do sleep 0.01; done; printf 'Login failed: private-token\\n' >&2; exit 7", "fixture"]).arg(&ready);
+        let (_sender, cancel) = tokio::sync::watch::channel(false);
+        let outcome = capture_supervised_interactive_diagnosed(
+            command,
+            1024,
+            Duration::from_secs(10),
+            cancel,
+            |pid| {
+                // This independently owned child holds the same group after
+                // the helper exits; its handle owns cleanup even on a panic.
+                member.0 = Some(
+                    std::process::Command::new("/bin/sleep")
+                        .arg("30")
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .process_group(pid as i32)
+                        .spawn()?,
+                );
+                std::fs::write(&ready, b"ready")?;
+                Ok(())
+            },
+            None,
+            Some(|_, _| panic!("unproven group was classified as stopped")),
+        )
+        .await;
+        assert!(matches!(outcome, CaptureOutcome::Unproven));
+    }
+
+    #[tokio::test]
+    async fn supervised_auth_diagnostic_does_not_replace_deadline_failure() {
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "printf 'Login failed: private-token\\n' >&2; exec sleep 30",
+        ]);
+        let (_sender, cancel) = tokio::sync::watch::channel(false);
+        let outcome = capture_supervised_interactive_diagnosed(
+            command,
+            1024,
+            Duration::from_millis(25),
+            cancel,
+            |_| Ok(()),
+            None,
+            Some(|_, _| panic!("deadline failure was reclassified")),
+        )
+        .await;
+        assert!(matches!(
+            outcome,
+            CaptureOutcome::Joined(Err(Error::Unavailable("sign-in timed out")))
+        ));
+    }
+
+    #[tokio::test]
+    async fn supervised_auth_diagnostic_discards_truncated_stderr() {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("stderr");
+        let mut bytes = b"Login failed: Request failed with status code 403\n".to_vec();
+        bytes.resize(64 * 1024 + 1, b'x');
+        fs::write(&output, bytes).unwrap();
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "cat \"$1\" >&2; exit 7", "fixture"])
+            .arg(output);
+        let (_sender, cancel) = tokio::sync::watch::channel(false);
+        let outcome = capture_supervised_interactive_diagnosed(
+            command,
+            1024,
+            Duration::from_secs(10),
+            cancel,
+            |_| Ok(()),
+            None,
+            Some(crate::auth::claude_auth_failure),
+        )
+        .await;
+        let CaptureOutcome::Joined(Err(Error::Unavailable(message))) = outcome else {
+            panic!("oversize diagnostic changed helper cleanup");
+        };
+        assert_eq!(message, crate::auth::claude_auth_failure(&[], &[]));
+    }
+
+    #[tokio::test]
     async fn supervised_capture_cancel_deadline_and_drop_stop_owned_groups() {
         for mode in ["cancel", "deadline", "drop"] {
             let mut command = Command::new("/bin/sh");
-            command.args(["-c", "sleep 30"]);
+            // Do not introduce an orphan-reaping dependency into the joined
+            // cancellation/deadline/drop fixture.
+            command.args(["-c", "exec sleep 30"]);
             let (sender, cancel) = tokio::sync::watch::channel(false);
             let (ready, pid) = tokio::sync::oneshot::channel();
             let task = tokio::spawn(capture_supervised(
@@ -954,7 +2168,7 @@ mod tests {
     fn discovery_repairs_only_owned_single_link_ordinary_executables() {
         let directory = tempfile::tempdir().unwrap();
         let path = write_executable(directory.path(), 0o777);
-        let canonical = path.canonicalize().unwrap();
+        let canonical = xcb_core::canonical(&path).unwrap();
         assert_eq!(
             discover(Provider::Claude, Some(&canonical)).unwrap(),
             canonical
@@ -993,6 +2207,48 @@ mod tests {
         let file = executable_file(&path).unwrap();
         let flags = fcntl_getfd(&file).unwrap();
         assert!(flags.contains(FdFlags::CLOEXEC));
+    }
+
+    #[test]
+    fn executable_checks_name_the_failed_rule() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = write_executable(directory.path(), 0o777);
+        match executable_file(&path) {
+            Err(Error::Unavailable(message)) => {
+                assert!(message.contains("world-writable"), "{message}")
+            }
+            other => panic!("expected a permissions error, got {other:?}"),
+        }
+        let path = write_executable(directory.path(), 0o600);
+        match executable_file(&path) {
+            Err(Error::Unavailable(message)) => assert_eq!(message, "executable is not executable"),
+            other => panic!("expected a mode error, got {other:?}"),
+        }
+    }
+
+    /// Package managers reinstall the same bytes with writable modes. A pin
+    /// whose bytes still match tightens the mode instead of failing until the
+    /// operator reruns doctor; bytes that changed still fail.
+    #[test]
+    fn pin_verify_repairs_an_owned_world_writable_executable() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = xcb_core::canonical(write_executable(directory.path(), 0o777)).unwrap();
+        let sha256 = digest_file(fs::File::open(&path).unwrap(), 1 << 20).unwrap();
+        let (_, host_sha256) = host_identity().unwrap();
+        let pin = Pin {
+            provider: Provider::Claude,
+            executable: path.clone(),
+            sha256,
+            version: "2.1.282".into(),
+            host_sha256,
+            observed_at_ms: 0,
+        };
+        pin.verify().unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o755);
+        // Changed bytes are not adopted, writable or not.
+        fs::write(&path, b"#!/bin/sh\necho changed\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(pin.verify().is_err());
     }
 
     #[test]
@@ -1035,6 +2291,668 @@ mod tests {
     fn zero_process_group_id_is_rejected_as_absence_proof() {
         assert!(prove_process_group_absent(0).is_err());
     }
+
+    /// A pinned executable digest that bypasses the verified-digest cache, so
+    /// tests can observe the first `Pin::load` re-hash directly.
+    fn uncached_digest(path: &Path) -> String {
+        digest_file(executable_file(path).unwrap(), 512 * 1024 * 1024).unwrap()
+    }
+
+    fn codex_pin(root: &Path, executable: &Path, sha256: String) -> Pin {
+        let (_, host_sha256) = host_identity().unwrap();
+        let mut pin = Pin {
+            provider: Provider::Codex,
+            executable: executable.to_owned(),
+            sha256,
+            version: "0.0.0".into(),
+            host_sha256,
+            observed_at_ms: crate::now_ms(),
+        };
+        pin.save(root).unwrap();
+        pin
+    }
+
+    #[test]
+    fn repeated_pin_loads_verify_against_one_executable_digest() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        let executable = xcb_core::canonical(write_executable(&root, 0o755)).unwrap();
+        host_identity().unwrap();
+        let pin = codex_pin(&root, &executable, uncached_digest(&executable));
+        let digested = digested_executables(&pin.executable);
+        for _ in 0..3 {
+            Pin::load(&root, Provider::Codex).unwrap();
+        }
+        // Each load re-verifies through the inode-bound digest cache: at most
+        // one digest per load. The shared 16-entry cache may evict the
+        // custodied copy between loads when sibling tests run in parallel, so
+        // three loads can digest up to three times.
+        assert!(digested_executables(&pin.executable) - digested <= 3);
+    }
+
+    #[test]
+    fn touched_and_resized_executables_are_digested_again() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        let executable = xcb_core::canonical(write_executable(&root, 0o755)).unwrap();
+        host_identity().unwrap();
+        let pin = codex_pin(&root, &executable, uncached_digest(&executable));
+        Pin::load(&root, Provider::Codex).unwrap();
+        let digested = digested_executables(&pin.executable);
+        // A pure metadata touch still re-hashes; identical bytes pass again.
+        File::options()
+            .write(true)
+            .open(&pin.executable)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(60))
+            .unwrap();
+        pin.verify_bytes().unwrap();
+        assert_eq!(digested_executables(&pin.executable) - digested, 1);
+        Pin::load(&root, Provider::Codex).unwrap();
+        let digested = digested_executables(&pin.executable);
+        // A size change re-hashes and the changed bytes fail verification.
+        fs::write(&pin.executable, b"#!/bin/sh\necho changed\n").unwrap();
+        fs::set_permissions(&pin.executable, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(pin.verify_bytes().is_err());
+        assert_eq!(digested_executables(&pin.executable) - digested, 1);
+        assert!(Pin::load(&root, Provider::Codex).is_err());
+    }
+
+    #[test]
+    fn a_replaced_inode_with_the_same_size_is_digested_again() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        let executable = xcb_core::canonical(write_executable(&root, 0o755)).unwrap();
+        host_identity().unwrap();
+        let pin = codex_pin(&root, &executable, uncached_digest(&executable));
+        Pin::load(&root, Provider::Codex).unwrap();
+        let digested = digested_executables(&pin.executable);
+        // Same size, different inode and bytes: a stale path or size cache
+        // would return the old digest; verification must fail closed.
+        let replacement = root.join("replacement");
+        fs::write(&replacement, b"#!/bin/sh\necho no\n").unwrap();
+        fs::set_permissions(&replacement, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::rename(&replacement, &pin.executable).unwrap();
+        // Observe one verification directly. Pin::load retries failed byte
+        // verification, and parallel tests can evict the shared cache between
+        // those attempts, legitimately performing a second digest.
+        assert!(pin.verify_bytes().is_err());
+        assert_eq!(digested_executables(&pin.executable) - digested, 1);
+        assert!(Pin::load(&root, Provider::Codex).is_err());
+    }
+
+    fn claude_pin(root: &Path, executable: &Path, version: &str) -> Pin {
+        let (_, host_sha256) = host_identity().unwrap();
+        let mut pin = Pin {
+            provider: Provider::Claude,
+            executable: executable.to_owned(),
+            sha256: uncached_digest(executable),
+            version: version.into(),
+            host_sha256,
+            observed_at_ms: crate::now_ms(),
+        };
+        pin.save(root).unwrap();
+        pin
+    }
+
+    /// The failure this whole change exists to prevent: a provider upgrade
+    /// replaces the discovered binary, and the pin must keep pointing at the
+    /// admitted bytes rather than the moved path.
+    #[test]
+    fn a_pinned_provider_update_cannot_move_the_custodied_executable() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        let executable = xcb_core::canonical(write_executable(&root, 0o755)).unwrap();
+        let pin = claude_pin(&root, &executable, "2.1.300");
+        let custody = pin.executable.clone();
+        assert!(custody.starts_with(root.join("providers").join("bin")));
+        assert_eq!(fs::metadata(&custody).unwrap().mode() & 0o777, 0o700);
+        // The provider's own path is replaced — the pinned copy does not move.
+        fs::write(&executable, b"#!/bin/sh\necho newer\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let loaded = Pin::load(&root, Provider::Claude).unwrap();
+        assert_eq!(loaded.executable, custody);
+        // Stale custody copies for the same provider are retired on save.
+        assert_eq!(
+            fs::read_dir(root.join("providers").join("bin"))
+                .unwrap()
+                .count(),
+            1
+        );
+    }
+
+    /// A pin recorded by an older xcb binds its host hash; identical provider
+    /// bytes prove nothing about the artifact changed, so the binding heals
+    /// instead of demanding `xcb doctor` after every upgrade.
+    #[test]
+    fn load_heals_a_pin_bound_to_a_replaced_host_binary() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        let executable = xcb_core::canonical(write_executable(&root, 0o755)).unwrap();
+        let pin = claude_pin(&root, &executable, "2.1.300");
+        let record = root.join("providers").join("claude.json");
+        let stale = "0".repeat(64);
+        let bytes = fs::read_to_string(&record)
+            .unwrap()
+            .replace(&pin.host_sha256, &stale);
+        fs::write(&record, bytes).unwrap();
+        let healed = Pin::load(&root, Provider::Claude).unwrap();
+        let (_, host_sha256) = host_identity().unwrap();
+        assert_eq!(healed.host_sha256, host_sha256);
+        // A drifted provider digest still refuses to heal.
+        fs::write(
+            &record,
+            fs::read_to_string(&record)
+                .unwrap()
+                .replace(&host_sha256, &stale),
+        )
+        .unwrap();
+        fs::write(&pin.executable, b"#!/bin/sh\necho tampered\n").unwrap();
+        fs::set_permissions(&pin.executable, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(Pin::load(&root, Provider::Claude).is_err());
+    }
+
+    /// Pins written before custody point at the live provider path; loading
+    /// one migrates the admitted bytes into private custody so subsequent
+    /// provider upgrades cannot break it.
+    #[test]
+    fn load_migrates_a_live_path_pin_into_custody() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        let executable = xcb_core::canonical(write_executable(&root, 0o755)).unwrap();
+        let (_, host_sha256) = host_identity().unwrap();
+        let legacy = Pin {
+            provider: Provider::Claude,
+            executable: executable.clone(),
+            sha256: uncached_digest(&executable),
+            version: "2.1.300".into(),
+            host_sha256,
+            observed_at_ms: 0,
+        };
+        private::directory(&root.join("providers")).unwrap();
+        private::create(
+            &root.join("providers").join("claude.json"),
+            serde_json::to_vec_pretty(&legacy).unwrap().as_slice(),
+        )
+        .unwrap();
+        let migrated = Pin::load(&root, Provider::Claude).unwrap();
+        assert!(migrated.executable.starts_with(root.join("providers/bin")));
+        fs::write(&executable, b"#!/bin/sh\necho newer\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(Pin::load(&root, Provider::Claude).is_ok());
+    }
+
+    fn version_script(directory: &Path, version: &str) -> PathBuf {
+        let path = directory.join("provider");
+        fs::write(&path, format!("#!/bin/sh\necho {version}\n")).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        xcb_core::canonical(&path).unwrap()
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn refresh_keeps_an_admitted_saved_pin_when_launchd_path_cannot_find_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        let home = private::directory(&root.join("home")).unwrap();
+        let executable = version_script(&root, "2.1.300");
+        let pin = claude_pin(&root, &executable, "2.1.300");
+        fs::remove_file(&executable).unwrap();
+        let missing = || Error::guided("provider is not on PATH", "xcb doctor");
+        let report = refresh_discovered_provider(
+            &root,
+            Provider::Claude,
+            &home,
+            Pin::load(&root, Provider::Claude).ok(),
+            Err(missing()),
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report, (RefreshOutcome::Kept, None));
+        assert_eq!(
+            Pin::load(&root, Provider::Claude).unwrap().sha256,
+            pin.sha256
+        );
+
+        // A supplied executable or XCB_CLAUDE override must report its own
+        // failure instead of silently using a different executable.
+        assert!(
+            refresh_discovered_provider(
+                &root,
+                Provider::Claude,
+                &home,
+                Pin::load(&root, Provider::Claude).ok(),
+                Err(missing()),
+                false,
+            )
+            .await
+            .is_err()
+        );
+        fs::write(&pin.executable, b"#!/bin/sh\necho changed\n").unwrap();
+        assert!(
+            refresh_discovered_provider(
+                &root,
+                Provider::Claude,
+                &home,
+                Pin::load(&root, Provider::Claude).ok(),
+                Err(missing()),
+                true,
+            )
+            .await
+            .is_err(),
+            "changed saved bytes never supply a fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_names_an_unsupported_saved_build_instead_of_missing_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        let home = private::directory(&root.join("home")).unwrap();
+        let executable = version_script(&root, "codex-cli 0.0.0");
+        codex_pin(&root, &executable, uncached_digest(&executable));
+        // The same unsupported bytes used to report Kept; a missing PATH
+        // used to obscure the real supported-build requirement.
+        for discovered in [
+            Ok(executable),
+            Err(Error::guided("provider is not on PATH", "xcb doctor")),
+        ] {
+            let (outcome, detail) = refresh_discovered_provider(
+                &root,
+                Provider::Codex,
+                &home,
+                Pin::load(&root, Provider::Codex).ok(),
+                discovered,
+                true,
+            )
+            .await
+            .unwrap();
+            assert_eq!(outcome, RefreshOutcome::PendingCatalog);
+            let detail = detail.unwrap();
+            assert!(detail.contains("codex 0.0.0"), "{detail}");
+            assert!(detail.contains("not supported"), "{detail}");
+            assert!(!detail.contains("PATH"), "{detail}");
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_rechecks_denial_when_saved_bytes_are_unchanged_or_path_is_missing() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        let home = private::directory(&root.join("home")).unwrap();
+        let executable = version_script(&root, "2.1.300");
+        let pin = claude_pin(&root, &executable, "2.1.300");
+        private::create(
+            &root.join("providers/catalog.json"),
+            serde_json::json!({"version":1,"deny":{"claude":[pin.sha256]}})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap();
+        for discovered in [
+            Ok(executable),
+            Err(Error::guided("provider is not on PATH", "xcb doctor")),
+        ] {
+            let error = refresh_discovered_provider(
+                &root,
+                Provider::Claude,
+                &home,
+                Pin::load(&root, Provider::Claude).ok(),
+                discovered,
+                true,
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("denied"), "{error}");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn refresh_adopts_an_admitted_update_and_keeps_routes_on_the_pin() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        let home = private::directory(&root.join("home")).unwrap();
+        let executable = version_script(&root, "2.1.300");
+        let pin = claude_pin(&root, &executable, "2.1.300");
+        let report = refresh_provider(&root, Provider::Claude, Some(&executable), &home).await;
+        assert_eq!(report.outcome, RefreshOutcome::Kept);
+        // An upstream update at the same path: admitted, so the pin follows it.
+        fs::write(&executable, b"#!/bin/sh\necho 2.1.301\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let report = refresh_provider(&root, Provider::Claude, Some(&executable), &home).await;
+        assert_eq!(report.outcome, RefreshOutcome::Adopted);
+        let loaded = Pin::load(&root, Provider::Claude).unwrap();
+        assert_eq!(loaded.version, "2.1.301");
+        assert_ne!(loaded.executable, pin.executable);
+        // The retired custody copy was collected with the adoption.
+        assert!(!pin.executable.exists());
+    }
+
+    /// Exact-artifact adoption without an xcb release: a pending Codex
+    /// build adopts on the first pass after the catalog lists its
+    /// `(version, digest)` pair.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_pending_codex_build_adopts_once_the_catalog_lists_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        let home = private::directory(&root.join("home")).unwrap();
+        let executable = version_script(&root, "codex-cli 0.156.1");
+        let pin = codex_pin(&root, &executable, uncached_digest(&executable));
+        fs::write(&executable, b"#!/bin/sh\necho codex-cli 0.157.1\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let report = refresh_provider(&root, Provider::Codex, Some(&executable), &home).await;
+        assert_eq!(report.outcome, RefreshOutcome::PendingCatalog);
+        let report = refresh_provider(&root, Provider::Codex, Some(&executable), &home).await;
+        assert_eq!(report.outcome, RefreshOutcome::PendingCatalog);
+        // The catalog publication lists the pending pair.
+        let sha = uncached_digest(&executable);
+        let catalog = serde_json::json!({
+            "version": 1,
+            "codex": [{"version": "0.157.1", "sha256": sha,
+                "platform": "darwin-aarch64"}],
+        });
+        private::create(
+            &root.join("providers").join("catalog.json"),
+            catalog.to_string().as_bytes(),
+        )
+        .unwrap();
+        let report = refresh_provider(&root, Provider::Codex, Some(&executable), &home).await;
+        assert_eq!(report.outcome, RefreshOutcome::Adopted);
+        let loaded = Pin::load(&root, Provider::Codex).unwrap();
+        assert_eq!(loaded.version, "0.157.1");
+        assert_eq!(loaded.sha256, sha);
+        assert_ne!(loaded.executable, pin.executable);
+        assert!(!root.join("providers").join("codex.rejected").exists());
+    }
+
+    /// A release can add support for a protocol change without listing it in
+    /// the shared catalog (older xcb releases cannot enforce its controls).
+    /// Its old pending decision must not prevent fresh inspection/adoption.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn an_xcb_upgrade_reconsiders_pending_builds_without_a_catalog_entry() {
+        for prior in ["old-host", "missing-host", "raw-digest"] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = xcb_core::canonical(directory.path()).unwrap();
+            let home = private::directory(&root.join("home")).unwrap();
+            let executable = version_script(&root, "2.1.300");
+            claude_pin(&root, &executable, "2.1.300");
+            fs::write(&executable, b"#!/bin/sh\necho 2.1.301\n").unwrap();
+            let sha = uncached_digest(&executable);
+            let marker = root.join("providers/claude.rejected");
+            let bytes = if prior == "raw-digest" {
+                sha.as_bytes().to_vec()
+            } else {
+                let mut record = serde_json::json!({
+                    "version": 1,
+                    "sha256": sha,
+                    // Fresh inspection must replace this stale observation.
+                    "providerVersion": "2.1.299",
+                    "reason": "unadmitted",
+                    "observedAtMs": 1,
+                });
+                if prior == "old-host" {
+                    record["hostSha256"] = serde_json::json!("0".repeat(64));
+                }
+                serde_json::to_vec(&record).unwrap()
+            };
+            private::create(&marker, &bytes).unwrap();
+            assert!(!crate::catalog::listed(&root, &sha));
+            let report = refresh_provider(&root, Provider::Claude, Some(&executable), &home).await;
+            assert_eq!(
+                report.outcome,
+                RefreshOutcome::Adopted,
+                "{prior}: {report:?}"
+            );
+            let loaded = Pin::load(&root, Provider::Claude).unwrap();
+            assert_eq!(loaded.version, "2.1.301");
+            assert_eq!(loaded.sha256, sha);
+            assert!(!marker.exists());
+        }
+    }
+
+    /// A build the host can inspect but no admission path accepts waits on
+    /// the reviewed-builds catalog rather than being rejected outright: the
+    /// pin keeps routing, the digest is remembered, and a later catalog
+    /// publication adopts it.
+    #[tokio::test]
+    async fn refresh_parks_an_unadmitted_build_for_the_catalog() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        let home = private::directory(&root.join("home")).unwrap();
+        let executable = version_script(&root, "2.1.300");
+        let pin = claude_pin(&root, &executable, "2.1.300");
+        fs::write(&executable, b"#!/bin/sh\necho 9.9.9\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let report = refresh_provider(&root, Provider::Claude, Some(&executable), &home).await;
+        assert_eq!(report.outcome, RefreshOutcome::PendingCatalog);
+        assert_eq!(
+            report.detail.as_deref(),
+            Some("9.9.9 awaiting catalog admission")
+        );
+        // The previous pin is untouched and still resolves.
+        let loaded = Pin::load(&root, Provider::Claude).unwrap();
+        assert_eq!(loaded.executable, pin.executable);
+        // The marker records the pending decision: a second pass skips
+        // inspection and reports the stored version.
+        let marker = root.join("providers").join("claude.rejected");
+        let marker: serde_json::Value =
+            serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
+        assert_eq!(marker["sha256"], uncached_digest(&executable));
+        assert_eq!(marker["providerVersion"], "9.9.9");
+        assert_eq!(marker["reason"], "unadmitted");
+        let report = refresh_provider(&root, Provider::Claude, Some(&executable), &home).await;
+        assert_eq!(report.outcome, RefreshOutcome::PendingCatalog);
+        fs::remove_file(&executable).unwrap();
+        let report = refresh_provider(&root, Provider::Claude, Some(&executable), &home).await;
+        assert_eq!(report.outcome, RefreshOutcome::Rejected);
+    }
+
+    /// A build that could not even be inspected stays rejected while its
+    /// bytes stand: the catalog must never be consulted for it.
+    #[tokio::test]
+    async fn an_inspection_failure_stays_rejected_until_the_bytes_change() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        let home = private::directory(&root.join("home")).unwrap();
+        let executable = version_script(&root, "2.1.300");
+        claude_pin(&root, &executable, "2.1.300");
+        // A binary whose --version output never parses cannot be qualified.
+        fs::write(&executable, b"#!/bin/sh\necho not-a-version\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let report = refresh_provider(&root, Provider::Claude, Some(&executable), &home).await;
+        assert_eq!(report.outcome, RefreshOutcome::Rejected);
+        let marker = root.join("providers").join("claude.rejected");
+        let marker: serde_json::Value =
+            serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
+        assert_eq!(marker["reason"], "inspection");
+        // Even listing the digest would not help: the marker-hit arm only
+        // reconsiders for catalog-listed digests.
+        let report = refresh_provider(&root, Provider::Claude, Some(&executable), &home).await;
+        assert_eq!(report.outcome, RefreshOutcome::Rejected);
+        assert_eq!(report.detail, None);
+    }
+
+    #[tokio::test]
+    async fn a_catalog_denied_build_is_rejected_outright() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        let home = private::directory(&root.join("home")).unwrap();
+        let executable = version_script(&root, "2.1.300");
+        claude_pin(&root, &executable, "2.1.300");
+        fs::write(&executable, b"#!/bin/sh\necho 9.9.9\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let sha = uncached_digest(&executable);
+        let catalog = serde_json::json!({
+            "version": 1,
+            "claude": [], "codex": [], "devin": [],
+            "deny": {"claude": [sha]}
+        });
+        private::create(
+            &root.join("providers").join("catalog.json"),
+            catalog.to_string().as_bytes(),
+        )
+        .unwrap();
+        let report = refresh_provider(&root, Provider::Claude, Some(&executable), &home).await;
+        assert_eq!(report.outcome, RefreshOutcome::Rejected);
+        assert!(report.detail.unwrap().contains("denied"));
+        // The denial is remembered; a second pass stays rejected.
+        let report = refresh_provider(&root, Provider::Claude, Some(&executable), &home).await;
+        assert_eq!(report.outcome, RefreshOutcome::Rejected);
+    }
+
+    /// Legacy pending records are reconsidered once, then bound to the
+    /// current xcb host even when fresh inspection still finds no support.
+    #[tokio::test]
+    async fn a_raw_digest_marker_is_read_as_pending() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        let home = private::directory(&root.join("home")).unwrap();
+        let executable = version_script(&root, "2.1.300");
+        claude_pin(&root, &executable, "2.1.300");
+        fs::write(&executable, b"#!/bin/sh\necho 9.9.9\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        private::create(
+            &root.join("providers").join("claude.rejected"),
+            uncached_digest(&executable).as_bytes(),
+        )
+        .unwrap();
+        let report = refresh_provider(&root, Provider::Claude, Some(&executable), &home).await;
+        assert_eq!(report.outcome, RefreshOutcome::PendingCatalog);
+        assert_eq!(
+            report.detail.as_deref(),
+            Some("9.9.9 awaiting catalog admission")
+        );
+        let marker = root.join("providers/claude.rejected");
+        let rejected = read_rejected(&marker).unwrap();
+        assert_eq!(
+            rejected.host_sha256.as_deref(),
+            Some(host_executable().unwrap().sha256.as_str())
+        );
+        let first = private::read(&marker, 1024).unwrap();
+        let report = refresh_provider(&root, Provider::Claude, Some(&executable), &home).await;
+        assert_eq!(report.outcome, RefreshOutcome::PendingCatalog);
+        assert_eq!(private::read(&marker, 1024).unwrap(), first);
+    }
+
+    #[tokio::test]
+    async fn refresh_leaves_unpinned_providers_to_doctor() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        let home = private::directory(&root.join("home")).unwrap();
+        let executable = version_script(&root, "2.1.300");
+        let report = refresh_provider(&root, Provider::Claude, Some(&executable), &home).await;
+        assert_eq!(report.outcome, RefreshOutcome::Unpinned);
+        assert!(!root.join("providers").join("claude.json").exists());
+    }
+
+    #[test]
+    fn snapshot_clones_then_proves_the_pinned_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        let executable = xcb_core::canonical(write_executable(&root, 0o755)).unwrap();
+        let pin = codex_pin(&root, &executable, uncached_digest(&executable));
+        let launch = private::directory(&root.join("launch")).unwrap();
+        let snapshot = pin.snapshot(&launch).unwrap();
+        assert_eq!(executable_digest(&snapshot).unwrap(), pin.sha256);
+        assert_eq!(
+            fs::metadata(&snapshot).unwrap().permissions().mode() & 0o7777,
+            0o500
+        );
+        // The snapshot is a distinct inode: on clone-capable filesystems this
+        // also proves the clone path produced launch-owned bytes.
+        assert_ne!(
+            fs::metadata(&snapshot).unwrap().ino(),
+            fs::metadata(&pin.executable).unwrap().ino()
+        );
+        assert!(pin.snapshot(&launch).is_err());
+    }
+
+    /// Launch-path timing on a synthetic 150 MiB provider executable that
+    /// embeds the Codex catalog fixture. Fixtures live under `XCB_BENCH_DIR`
+    /// (default: the system temp directory). Run with
+    /// `cargo test -p xcb-runtime launch_path_benchmark --locked -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "launch-path benchmark; run explicitly with --ignored --nocapture"]
+    fn launch_path_benchmark() {
+        use std::time::Instant;
+        let base = std::env::var_os("XCB_BENCH_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        fs::create_dir_all(&base).unwrap();
+        let directory = tempfile::tempdir_in(&base).unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        let executable = root.join("codex");
+        {
+            // 150 MiB of xorshift filler with the pretty-printed catalog
+            // fixture embedded once, NUL-terminated, a third of the way in.
+            let mut file = std::io::BufWriter::new(fs::File::create(&executable).unwrap());
+            let mut state = 0x9E37_79B9_7F4A_7C15u64;
+            let mut block = [0u8; 64 * 1024];
+            let total = 150 * 1024 * 1024usize;
+            let catalog_at = total / 3;
+            let mut written = 0usize;
+            let mut fixture =
+                serde_json::to_vec_pretty(&crate::codex::fixture_catalog_source()).unwrap();
+            fixture.push(0);
+            while written < total {
+                for chunk in block.chunks_mut(8) {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    chunk.copy_from_slice(&state.to_le_bytes()[..chunk.len()]);
+                }
+                if written == catalog_at {
+                    file.write_all(&fixture).unwrap();
+                }
+                file.write_all(&block).unwrap();
+                written += block.len();
+            }
+            file.flush().unwrap();
+        }
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let sha256 = executable_digest(&executable).unwrap();
+        let (_, host_sha256) = host_identity().unwrap();
+        let mut pin = Pin {
+            provider: Provider::Codex,
+            executable: executable.clone(),
+            sha256: sha256.clone(),
+            version: crate::codex::VERSION.into(),
+            host_sha256,
+            observed_at_ms: crate::now_ms(),
+        };
+        pin.save(&root).unwrap();
+        let size = fs::metadata(&executable).unwrap().len();
+        eprintln!(
+            "benchmark executable: {} bytes at {}",
+            size,
+            executable.display()
+        );
+        for round in 1..=3 {
+            let started = Instant::now();
+            let loaded = Pin::load(&root, Provider::Codex).unwrap();
+            assert_eq!(loaded.sha256, sha256);
+            eprintln!("Pin::load #{round}: {:?}", started.elapsed());
+        }
+        for round in 1..=2 {
+            let launch = private::directory(&root.join(format!("launch-{round}"))).unwrap();
+            let started = Instant::now();
+            let snapshot = pin.snapshot(&launch).unwrap();
+            eprintln!("Pin::snapshot #{round}: {:?}", started.elapsed());
+            assert_eq!(fs::metadata(&snapshot).unwrap().len(), size);
+        }
+        for round in 1..=3 {
+            let started = Instant::now();
+            let catalog =
+                crate::codex::static_catalog_bound(&root, &pin, Some("gpt-6-astra"), &sha256)
+                    .unwrap();
+            eprintln!("static_catalog #{round}: {:?}", started.elapsed());
+            assert!(catalog.admission.models.contains("gpt-6-astra"));
+        }
+    }
     #[tokio::test]
     async fn interrupted_frame_read_preserves_the_partial_json_prefix() {
         let mut command = Command::new("/bin/sh");
@@ -1069,5 +2987,285 @@ mod tests {
             serde_json::json!({"ok":true})
         );
         assert!(process.join().await);
+    }
+    /// After a timed-out join the group gets one more SIGKILL, but only
+    /// while its unreaped leader still pins the group number; a reaped
+    /// leader's number may already name someone else's group.
+    #[test]
+    fn a_timed_out_join_resignals_only_a_group_its_unreaped_leader_pins() {
+        let mut leader = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = leader.id();
+        let group = Group(Pid::from_raw(pid as i32).unwrap());
+        assert!(!resignal_unjoined(&group, false));
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            prove_process_group_absent(pid).is_err(),
+            "nothing was sent to a group whose leader counts as reaped"
+        );
+        assert!(resignal_unjoined(&group, true));
+        leader.wait().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while prove_process_group_absent(pid).is_err() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the second SIGKILL reached the group"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[tokio::test]
+    async fn stderr_volume_never_leaves_a_proven_join_unsettled() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "head -c 2000000 /dev/zero >&2; echo '{}'"]);
+        let mut process = StreamProcess::spawn(command).unwrap();
+        let frame = tokio::time::timeout(Duration::from_secs(10), process.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(frame, b"{}\n");
+        assert!(process.stderr_overflow().is_none(), "unknown before join");
+        assert!(process.join().await);
+        assert_eq!(process.stderr_overflow(), Some(2_000_000));
+
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "echo quiet >&2; echo '{}'"]);
+        let mut process = StreamProcess::spawn(command).unwrap();
+        assert!(process.frame().await.unwrap().is_some());
+        assert!(process.join().await);
+        assert!(process.stderr_overflow().is_none());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod login_interaction_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn raw_terminal_code_submission_survives_input_sender_completion() {
+        let (stdin, terminal) = login_terminal().unwrap();
+        let (sender, codes) = tokio::sync::mpsc::channel(1);
+        let mut sender = Some(sender);
+        let interaction = LoginInteraction {
+            stdin,
+            terminal,
+            codes,
+            observer: Box::new(move |bytes| {
+                if bytes.windows(5).any(|window| window == b"ready") {
+                    // A terminal reader has completed its one requested code.
+                    // Closing its channel must not kill an in-flight exchange.
+                    if let Some(sender) = sender.take() {
+                        sender
+                            .try_send(zeroize::Zeroizing::new("manual-code".into()))
+                            .unwrap();
+                    }
+                }
+                Ok(())
+            }),
+        };
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "/bin/stty raw -echo; printf 'ready\\n'; code=$(/bin/dd bs=1 count=12 2>/dev/null); test \"$code\" = \"$(printf 'manual-code\\r')\" || exit 3; /bin/sleep 0.05; printf 'synthetic-token\\n'",
+        ]);
+        let (_cancel, receiver) = tokio::sync::watch::channel(false);
+        let result = capture_supervised_interactive(
+            command,
+            1024,
+            Duration::from_secs(5),
+            receiver,
+            |_| Ok(()),
+            Some(interaction),
+        )
+        .await;
+        let CaptureOutcome::Joined(Ok(bytes)) = result else {
+            panic!("raw provider exchange was cancelled when its code sender completed");
+        };
+        assert_eq!(&*bytes, b"ready\nsynthetic-token\n");
+    }
+
+    #[tokio::test]
+    async fn terminal_rendering_is_drained_before_code_submission() {
+        let (stdin, terminal) = login_terminal().unwrap();
+        let (sender, codes) = tokio::sync::mpsc::channel(1);
+        let mut sender = Some(sender);
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observer_seen = seen.clone();
+        let interaction = LoginInteraction {
+            stdin,
+            terminal,
+            codes,
+            observer: Box::new(move |bytes| {
+                let mut seen = observer_seen.lock().unwrap();
+                seen.extend_from_slice(bytes);
+                if seen.windows(5).any(|window| window == b"ready")
+                    && let Some(sender) = sender.take()
+                {
+                    sender
+                        .try_send(zeroize::Zeroizing::new("manual-code".into()))
+                        .unwrap();
+                }
+                Ok(())
+            }),
+        };
+        let mut command = Command::new("/bin/sh");
+        // More than a PTY buffer, followed by a draining terminal mode change.
+        // The real provider renders through its stdin tty as well as pipes.
+        command.args(["-c", "test \"$(/bin/stty size)\" = '24 80' || exit 2; head -c 65536 /dev/zero >&0; /bin/stty -echo; printf ready >&0; IFS= read -r code; test \"$code\" = manual-code || exit 3; printf 'synthetic-token\\n'"]);
+        let (_cancel, cancel) = tokio::sync::watch::channel(false);
+        let result = capture_supervised_interactive(
+            command,
+            1024,
+            Duration::from_secs(5),
+            cancel,
+            |_| Ok(()),
+            Some(interaction),
+        )
+        .await;
+        let CaptureOutcome::Joined(Ok(bytes)) = result else {
+            panic!("provider terminal rendering prevented code exchange");
+        };
+        assert_eq!(&*bytes, b"synthetic-token\n");
+        assert!(
+            !seen
+                .lock()
+                .unwrap()
+                .windows(11)
+                .any(|window| window == b"manual-code")
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_output_is_drained_after_both_pipes_close() {
+        let (stdin, terminal) = login_terminal().unwrap();
+        let (_sender, codes) = tokio::sync::mpsc::channel(1);
+        let interaction = LoginInteraction {
+            stdin,
+            terminal,
+            codes,
+            observer: Box::new(|_| Ok(())),
+        };
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "exec 1>&- 2>&-; head -c 65536 /dev/zero >&0; /bin/stty -echo",
+        ]);
+        let (_cancel, cancel) = tokio::sync::watch::channel(false);
+        assert!(matches!(capture_supervised_interactive(
+            command, 1024, Duration::from_secs(5), cancel, |_| Ok(()), Some(interaction),
+        ).await, CaptureOutcome::Joined(Ok(bytes)) if bytes.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn excessive_private_terminal_output_stops_and_joins_the_provider() {
+        let (stdin, terminal) = login_terminal().unwrap();
+        let (_sender, codes) = tokio::sync::mpsc::channel(1);
+        let interaction = LoginInteraction {
+            stdin,
+            terminal,
+            codes,
+            observer: Box::new(|_| Ok(())),
+        };
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "head -c 1100000 /dev/zero >&0; sleep 30"]);
+        let (_cancel, cancel) = tokio::sync::watch::channel(false);
+        assert!(matches!(
+            capture_supervised_interactive(
+                command,
+                1024,
+                Duration::from_secs(5),
+                cancel,
+                |_| Ok(()),
+                Some(interaction),
+            )
+            .await,
+            CaptureOutcome::Joined(Err(Error::Protocol("login terminal output limit")))
+        ));
+    }
+
+    #[tokio::test]
+    async fn terminal_login_cancellation_proves_process_group_exit() {
+        let (stdin, terminal) = login_terminal().unwrap();
+        let (_tx, codes) = tokio::sync::mpsc::channel(1);
+        let interaction = LoginInteraction {
+            stdin,
+            terminal,
+            codes,
+            observer: Box::new(|_| Ok(())),
+        };
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 30 & wait"]);
+        let (cancel, receiver) = tokio::sync::watch::channel(false);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let login = tokio::spawn(capture_supervised_interactive(
+            command,
+            1024,
+            Duration::from_secs(5),
+            receiver,
+            move |pid| {
+                let _ = started_tx.send(pid);
+                Ok(())
+            },
+            Some(interaction),
+        ));
+        let pid = started_rx.await.unwrap();
+        cancel.send(true).unwrap();
+        assert!(matches!(
+            login.await.unwrap(),
+            CaptureOutcome::Joined(Err(_))
+        ));
+        assert!(
+            rustix::process::test_kill_process_group(
+                rustix::process::Pid::from_raw(pid as i32).unwrap()
+            )
+            .is_err()
+        );
+    }
+    #[tokio::test]
+    async fn terminal_input_is_private_and_supervised() {
+        let (stdin, terminal) = login_terminal().unwrap();
+        let (tx, codes) = tokio::sync::mpsc::channel(1);
+        tx.send(zeroize::Zeroizing::new("manual-code".into()))
+            .await
+            .unwrap();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observer_seen = seen.clone();
+        let interaction = LoginInteraction {
+            stdin,
+            terminal,
+            codes,
+            observer: Box::new(move |bytes| {
+                observer_seen.lock().unwrap().extend_from_slice(bytes);
+                Ok(())
+            }),
+        };
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "test -t 0 || exit 2; printf 'ready\n'; IFS= read -r code; test \"$code\" = manual-code || exit 3; printf 'synthetic-token\n'"]);
+        let (_cancel, receiver) = tokio::sync::watch::channel(false);
+        let result = capture_supervised_interactive(
+            command,
+            1024,
+            Duration::from_secs(5),
+            receiver,
+            |_| Ok(()),
+            Some(interaction),
+        )
+        .await;
+        let CaptureOutcome::Joined(Ok(bytes)) = result else {
+            panic!("interactive child did not join");
+        };
+        assert_eq!(&*bytes, b"ready\nsynthetic-token\n");
+        assert!(
+            !seen
+                .lock()
+                .unwrap()
+                .windows(11)
+                .any(|s| s == b"manual-code")
+        );
     }
 }

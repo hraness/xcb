@@ -1,16 +1,16 @@
 use crate::{
     Error, Result, attachments, auth,
-    config::Config,
-    digest, exports, hooks, judge, new_id, now_ms, panes, private,
+    config::{Config, ReflexMode},
+    digest, exports, hooks, judge, managed, new_id, now_ms, panes, private,
     process::Pin,
+    reflex, routing,
     runner::{self, Observer, Outcome, Progress, RunInput},
     store::Store,
     summary,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    fs::{File, OpenOptions},
-    os::unix::fs::OpenOptionsExt,
+    fs::OpenOptions,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -26,10 +26,17 @@ use xcb_core::{
     Id, Provider,
     models::{ModelChoice, Preference},
     panes::Pane,
-    policy::{RouteCandidate, Terminal, next_route, should_continue},
+    policy::{
+        EffectState, Failure, RouteCandidate, Terminal, TurnFacts, failover_permitted, next_route,
+        should_continue,
+    },
     session::{Message, MessageProvenance, Role, Session, State, Subagent},
-    ui::{Intent, RoutePreview, Update},
+    ui::{AccountRow, Intent, RoutePreview, Update, View},
 };
+
+/// Shown in a direct session when the provider completed a turn without a
+/// reply or file changes, so the empty turn does not read as an answer.
+const NO_REPLY_NOTICE: &str = "The turn ended without a reply or file changes. Send another message to continue, or choose another model with /model.";
 
 pub fn choose_model(
     store: &Store,
@@ -53,6 +60,9 @@ pub fn choose_model(
             })
             .collect();
         return match matches.as_slice() {
+            [choice] if config.routing.excluded(choice) => {
+                Err(xcb_core::Error::Invalid(crate::routing_stack::EXCLUDED_BY_NEVER).into())
+            }
             [choice] => Ok(choice.clone()),
             [] => Err(Error::Unavailable(
                 "model not observed; refresh the catalog",
@@ -85,15 +95,17 @@ pub async fn auto_route(
     let admitted_providers: BTreeSet<_> = Provider::ALL
         .into_iter()
         .filter(|provider| {
-            Pin::load(store.root(), *provider).is_ok_and(|pin| runner::provider_admitted(&pin))
+            Pin::load(store.root(), *provider)
+                .is_ok_and(|pin| runner::provider_admitted(store.root(), &pin))
         })
         .collect();
     let mut candidates: Vec<(Id, ModelChoice, Option<f64>)> = Vec::new();
     for model in &view.models {
         for view_account in &view.accounts {
             if view_account.provider != model.provider
-                || view_account.busy
+                || view_account.active_runs >= config.max_runs_per_account
                 || !view_account.enabled
+                || view_account.authentication_required
                 || view_account.quota_blocked_until_ms.is_some()
                 || account.is_some_and(|id| id != &view_account.id)
                 || candidates.len() >= 16
@@ -228,6 +240,65 @@ async fn judge_continuation(
         .is_some_and(|probability| probability >= JUDGE_CONTINUE_THRESHOLD))
 }
 
+/// A settle head's verdict on a completed direct turn: `Some((head,
+/// decision))` when the turn stopped short of the task or asked to confirm a
+/// routine step and the head may act. This is the envelope the managed
+/// supervisor applies (`task_should_continue_inbox`): the turn is joined
+/// with no failure, no denied request and no step only the user can take;
+/// it is not a repeat; the continuation budget holds; the `confirm` head
+/// also needs no risk cue and the veto list clear; under `auto` the head
+/// must be certified by the operator's labels, and about one turn in ten is
+/// left to them as unbiased evidence.
+async fn settle_continuation(
+    store: &Store,
+    config: &Config,
+    outcome: &Outcome,
+    session: &Id,
+    budget: ContinuationBudget,
+) -> Option<(&'static str, reflex::Decision)> {
+    let policy = &config.extensions.auto_continue;
+    if !policy.enabled
+        || budget.repeated
+        || budget.consecutive >= policy.max_consecutive
+        || budget.elapsed_ms >= policy.max_elapsed_ms
+        || !outcome.askable()
+        || outcome.denied()
+        || outcome.facts.terminal != Terminal::Completed
+        || !outcome.facts.joined
+        || outcome.facts.effects == EffectState::Uncertain
+        || outcome.facts.failure.is_some()
+    {
+        return None;
+    }
+    let decision = managed::settle_decision(store, config, outcome).await?;
+    if xcb_core::reflex::owner_only(&decision.features) {
+        return None;
+    }
+    let reflexes = &config.extensions.reflexes;
+    let head = match decision.value.as_str() {
+        "stopped_short" => xcb_core::reflex::SETTLE_UNFINISHED,
+        "confirm" if managed::confirmable(&decision, &outcome.text) => {
+            xcb_core::reflex::SETTLE_CONFIRM
+        }
+        _ => return None,
+    };
+    let acts = managed::head_acts(store.root(), reflexes, head, &decision.features)
+        && !(managed::head_mode(reflexes, head) == ReflexMode::Auto
+            && managed::held_turn(head, session, budget.turn));
+    acts.then_some((head, decision))
+}
+
+/// Where a direct session stands in its continuation budget when a turn
+/// settles: the turn number within this call, automatic turns in a row,
+/// time since the call started, and whether the output repeats the last.
+#[derive(Clone, Copy)]
+struct ContinuationBudget {
+    turn: u64,
+    consecutive: u32,
+    elapsed_ms: u64,
+    repeated: bool,
+}
+
 async fn configured_judge_continuation(
     root: &Path,
     config: &crate::config::JudgeConfig,
@@ -237,12 +308,46 @@ async fn configured_judge_continuation(
     judge_continuation(judge.as_ref(), input).await
 }
 
+/// Hard route constraints checked after resolving explicit model aliases.
+#[derive(Clone, Copy, Default)]
+pub struct SessionRoutePolicy {
+    pub requirements: xcb_core::session::TaskRequirements,
+    pub required_provider: Option<Provider>,
+}
+
+/// `managed_task` marks the session with the owning managed task atomically
+/// at creation, so reconciliation can prove custody of an orphan if the
+/// supervisor dies before `prepare` admits it. Direct/interactive sessions
+/// pass `None` and are never swept.
 pub fn new_session(
     store: &Store,
     workspace: &Path,
     config: &Config,
     account: Option<&Id>,
     model: Option<&str>,
+    managed_task: Option<&Id>,
+) -> Result<Session> {
+    new_session_with_policy(
+        store,
+        workspace,
+        config,
+        account,
+        model,
+        managed_task,
+        SessionRoutePolicy::default(),
+    )
+}
+
+/// Resolve the established account/model aliases, then check hard route
+/// requirements before persisting any session or launching a provider.
+pub fn new_session_with_policy(
+    store: &Store,
+    workspace: &Path,
+    config: &Config,
+    account: Option<&Id>,
+    model: Option<&str>,
+    managed_task: Option<&Id>,
+    policy: SessionRoutePolicy,
 ) -> Result<Session> {
     // An explicit model chooses its provider when no account was supplied.
     // The saved default is a preference, not a cross-provider override.
@@ -281,18 +386,19 @@ pub fn new_session(
     };
     let accounts = store.accounts()?;
     let now = now_ms();
-    let mut quota_blocked = BTreeSet::new();
+    let mut unavailable_accounts = BTreeSet::new();
     for candidate in &accounts {
         if candidate.enabled
             && requested_provider.is_none_or(|provider| candidate.provider == provider)
-            && store.quota_blocked_until(&candidate.id, now)?.is_some()
+            && (store.quota_blocked_until(&candidate.id, now)?.is_some()
+                || store.authentication_required(&candidate.id)?)
         {
-            quota_blocked.insert(candidate.id.clone());
+            unavailable_accounts.insert(candidate.id.clone());
         }
     }
     let compatible = |candidate: &&crate::store::Account| {
         candidate.enabled
-            && !quota_blocked.contains(&candidate.id)
+            && !unavailable_accounts.contains(&candidate.id)
             && requested_provider.is_none_or(|provider| candidate.provider == provider)
     };
     let id = match account {
@@ -302,6 +408,7 @@ pub fn new_session(
                 return Err(Error::Unavailable("selected account is disabled"));
             }
             store.require_quota_available(id, now)?;
+            store.require_authenticated_account(id)?;
             id.clone()
         }
         None => usable_account(store, requested_provider, None, config)?
@@ -321,7 +428,23 @@ pub fn new_session(
     };
     let account = store.account(&id)?;
     let model = choose_model(store, account.provider, model, config)?;
-    let session = store.create_session(&id, model, workspace, now_ms())?;
+    if !policy.requirements.allows(model.provider) {
+        return Err(Error::Conflict(
+            "this task requires Codex; remove the incompatible provider, account, or model pin",
+        ));
+    }
+    if policy
+        .required_provider
+        .is_some_and(|provider| provider != model.provider)
+    {
+        return Err(Error::Conflict(
+            "explicit provider conflicts with the selected account or model",
+        ));
+    }
+    let session = match managed_task {
+        Some(task) => store.create_managed_session(&id, model, workspace, now_ms(), task)?,
+        None => store.create_session(&id, model, workspace, now_ms())?,
+    };
     store.select_pane(&session.id, &config.pane)?;
     store
         .session(&session.id)?
@@ -348,11 +471,17 @@ fn usable_account(
     current: Option<&Id>,
     config: &Config,
 ) -> Result<Option<Id>> {
-    let held: BTreeSet<_> = store
-        .unsettled_runs()?
-        .into_iter()
-        .map(|run| run.account)
-        .collect();
+    // Session runs share an account up to the configured limit; a probe run
+    // (no session) holds its account alone.
+    let mut held: BTreeMap<Id, u32> = BTreeMap::new();
+    let mut probing: BTreeSet<Id> = BTreeSet::new();
+    for run in store.unsettled_runs()? {
+        if run.session.is_none() {
+            probing.insert(run.account);
+        } else {
+            *held.entry(run.account).or_default() += 1;
+        }
+    }
     let now = now_ms();
     let mut accounts = store.accounts()?;
     let mut remaining: BTreeMap<Id, f64> = BTreeMap::new();
@@ -388,7 +517,9 @@ fn usable_account(
     for account in accounts {
         if provider.is_none_or(|provider| account.provider == provider)
             && account.enabled
-            && !held.contains(&account.id)
+            && !store.authentication_required(&account.id)?
+            && !probing.contains(&account.id)
+            && held.get(&account.id).copied().unwrap_or(0) < config.max_runs_per_account
             && store.quota_blocked_until(&account.id, now_ms())?.is_none()
             && auth::has_credentials(store, &account.id)?
         {
@@ -409,16 +540,17 @@ fn model_account(
     ))
 }
 
-fn workspace_lease(store: &Store, session: &Session) -> Result<File> {
+fn workspace_lease(store: &Store, session: &Session) -> Result<private::ExclusiveLock> {
     let directory = private::directory(&store.root().join("workspace-runs"))?;
     let path = directory.join(format!("{}.lock", digest(session.workspace.as_bytes())));
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(path)?;
+    let file = crate::os::owner_only(
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false),
+    )
+    .open(path)?;
     private::check_file(&file, 4096)?;
     match file.try_lock() {
         Ok(()) => (),
@@ -427,15 +559,17 @@ fn workspace_lease(store: &Store, session: &Session) -> Result<File> {
         }
         Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
     }
+    let file = private::ExclusiveLock::held(file);
     // Inspect durable custody only after excluding competing launchers. An
     // earlier owner may have released this lock with an unsettled run between
     // a pre-lock check and acquisition; the filesystem lock alone is no proof
-    // that its provider and effects have stopped.
+    // that its provider and effects have stopped. A run in a nested or
+    // enclosing directory writes the same files, so it blocks too.
     for run in store.unsettled_runs()? {
         if let Some(id) = run.session
-            && store
-                .session(&id)?
-                .is_some_and(|active| active.workspace == session.workspace)
+            && store.session(&id)?.is_some_and(|active| {
+                crate::workspace_infer::workspaces_overlap(&active.workspace, &session.workspace)
+            })
         {
             return Err(Error::Conflict("workspace has an unsettled writer"));
         }
@@ -448,8 +582,9 @@ fn ready(store: &Store, session: &Session) -> Result<()> {
         return Err(Error::Unavailable("selected account is disabled"));
     }
     store.require_quota_available(&session.account, now_ms())?;
+    store.require_authenticated_account(&session.account)?;
     let pin = Pin::load(store.root(), session.model.provider)?;
-    if !runner::provider_admitted(&pin) {
+    if !runner::provider_admitted(store.root(), &pin) {
         return Err(Error::Unavailable(
             "native execution for this provider/runtime is not qualified; run xcb doctor",
         ));
@@ -459,12 +594,23 @@ fn ready(store: &Store, session: &Session) -> Result<()> {
             session.model.provider,
         )));
     }
-    if store
-        .unsettled_runs()?
-        .iter()
-        .any(|run| run.account == session.account)
-    {
-        return Err(Error::Conflict("account has an unsettled run"));
+    // Mirrors `Store::prepare_run`: session runs share the account up to the
+    // configured limit, while a probe run still holds the account alone.
+    let capacity = Config::load(store.root())?.0.max_runs_per_account;
+    let mut held = 0u32;
+    for run in store.unsettled_runs()? {
+        if run.account != session.account {
+            continue;
+        }
+        if run.session.is_none() {
+            return Err(Error::Conflict("account has an unsettled probe"));
+        }
+        held += 1;
+    }
+    if held >= capacity {
+        return Err(Error::Conflict(
+            "account has reached its concurrent run limit",
+        ));
     }
     Ok(())
 }
@@ -530,6 +676,7 @@ pub async fn execute(
         },
         cancel,
         observer,
+        None,
     )
     .await
 }
@@ -550,10 +697,37 @@ pub async fn execute_once(
         ExecutionMode::Managed,
         cancel,
         observer,
+        None,
     )
     .await
 }
 
+struct UiSubmission {
+    id: Id,
+    outbox: Arc<Mutex<Outbox>>,
+    accepted: std::sync::atomic::AtomicBool,
+}
+impl UiSubmission {
+    fn accepted(&self) -> bool {
+        self.accepted.load(std::sync::atomic::Ordering::Acquire)
+    }
+    fn acknowledge(&self, session: &Id) {
+        if !self
+            .accepted
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            queue(
+                &self.outbox,
+                Update::Submitted {
+                    id: self.id.clone(),
+                    context: xcb_core::ui::TranscriptContext::Session(session.clone()),
+                },
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn execute_mode(
     store: Arc<Store>,
     session_id: Id,
@@ -562,12 +736,56 @@ async fn execute_mode(
     mode: ExecutionMode,
     cancel: watch::Receiver<bool>,
     observer: Observer,
+    submission: Option<&UiSubmission>,
 ) -> Result<Outcome> {
     let pane_generation = mode.pane_generation();
     let config = Config::load(store.root())?.0;
-    let session = store
+    let mut session = store
         .session(&session_id)?
         .ok_or(Error::Unavailable("session not found"))?;
+    if !session.requirements.allows(session.model.provider) {
+        let prior = store.latest_settled_outcome(&session_id)?;
+        if !prior.as_ref().is_some_and(|outcome| {
+            computer_resume_permitted(outcome, pane_generation, *cancel.borrow())
+        }) {
+            return Err(Error::Unavailable(
+                "computer tool handoff needs a current joined turn with settled effects and no pending approval",
+            ));
+        }
+        let excluded_routes = BTreeSet::new();
+        let excluded_accounts = BTreeSet::new();
+        let decision = routing::smart_route(
+            &store,
+            &config,
+            routing::RouteRequest {
+                requirements: session.requirements,
+                task: &text,
+                required_provider: session.route_pins.provider,
+                preferred_provider: Some(Provider::Codex),
+                required_model: session.route_pins.model.as_deref(),
+                excluded_routes: &excluded_routes,
+                excluded_accounts: &excluded_accounts,
+                account: session.route_pins.account.as_ref(),
+            },
+        )
+        .await?;
+        if *cancel.borrow() {
+            return Err(Error::Unavailable("cancelled before computer tool handoff"));
+        }
+        store.rebind(
+            &session_id,
+            session.revision,
+            &decision.account,
+            decision.model,
+        )?;
+        session = store
+            .session(&session_id)?
+            .ok_or(Error::Unavailable("session not found"))?;
+        observer(Progress::Notice(format!(
+            "Computer access: continuing on Codex · {}",
+            session.model.label
+        )));
+    }
     let _workspace = workspace_lease(&store, &session)?;
     fire_hooks(
         &store,
@@ -586,6 +804,7 @@ async fn execute_mode(
         mode,
         cancel,
         observer.clone(),
+        submission,
     )
     .await;
     if let Some(session) = store.session(&session_id)? {
@@ -600,7 +819,7 @@ async fn execute_mode(
             && let Err(error) = exports::export_session(&store, &session_id)
         {
             observer(Progress::Notice(format!(
-                "aiCharts local idle export failed: {error}"
+                "aicharts local idle export failed: {error}"
             )));
         }
         fire_hooks(
@@ -616,6 +835,7 @@ async fn execute_mode(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_inner(
     store: Arc<Store>,
     session_id: Id,
@@ -624,13 +844,19 @@ async fn execute_inner(
     mode: ExecutionMode,
     mut cancel: watch::Receiver<bool>,
     observer: Observer,
+    submission: Option<&UiSubmission>,
 ) -> Result<Outcome> {
     let pane_generation = mode.pane_generation();
     let supervise = mode.supervise();
     let started = now_ms();
     let mut consecutive = 0u32;
+    // Turns this call ran, for the reflex ledger's observation subject.
+    let mut turn = 0u64;
     let mut previous_output = None;
     let mut tried = BTreeSet::new();
+    // Accounts that reported an account-wide usage limit during this task.
+    // A later failover never returns to them, even on another model.
+    let mut limited_accounts: BTreeSet<Id> = BTreeSet::new();
     let original_task = text.clone();
     let mut text = text;
     let mut attachments = attachments;
@@ -646,7 +872,9 @@ async fn execute_inner(
         ready(&store, &session)?;
         tried.insert(format!("{}/{}", session.account, session.model.key()));
         let message = Message {
-            id: new_id("m"),
+            id: submission
+                .filter(|input| !input.accepted())
+                .map_or_else(|| new_id("m"), |input| input.id.clone()),
             role,
             text,
             attachments,
@@ -657,7 +885,7 @@ async fn execute_inner(
                 run: None,
             }),
         };
-        let current = store.append_message(&session_id, session.revision, &message)?;
+        let current = append_input(&store, &session, &message, submission)?;
         fire_hooks(
             &store,
             &config,
@@ -692,6 +920,55 @@ async fn execute_inner(
         )
         .await;
         let outcome = result?;
+        // Capability discovery is a handoff, including one-shot managed turns.
+        // Never report its provider notice as successful task completion.
+        let durable = store
+            .session(&session_id)?
+            .ok_or(Error::Unavailable("session not found"))?;
+        if !durable.requirements.allows(session.model.provider) {
+            if !supervise {
+                return Ok(outcome);
+            }
+            if !computer_handoff_permitted(&outcome, pane_generation, *cancel.borrow()) {
+                return Err(Error::Unavailable(
+                    "computer tool handoff is blocked until the prior provider is joined and all effects and attention are settled",
+                ));
+            }
+            let excluded_routes = BTreeSet::new();
+            let excluded_accounts = BTreeSet::new();
+            let decision = routing::smart_route(
+                &store,
+                &config,
+                routing::RouteRequest {
+                    requirements: durable.requirements,
+                    task: &original_task,
+                    required_provider: durable.route_pins.provider,
+                    preferred_provider: Some(Provider::Codex),
+                    required_model: durable.route_pins.model.as_deref(),
+                    excluded_routes: &excluded_routes,
+                    excluded_accounts: &excluded_accounts,
+                    account: durable.route_pins.account.as_ref(),
+                },
+            )
+            .await?;
+            if *cancel.borrow() {
+                return Err(Error::Unavailable("cancelled before computer tool handoff"));
+            }
+            store.rebind(
+                &session_id,
+                durable.revision,
+                &decision.account,
+                decision.model.clone(),
+            )?;
+            observer(Progress::Notice(format!(
+                "Computer access: continuing the same task on Codex · {}",
+                decision.model.label
+            )));
+            text = "The previous provider discovered that this task requires Codex computer tools and has stopped cleanly. Continue the original user task from the complete conversation and current workspace. Do not repeat completed effects; inspect relevant state first. Use only the browser or desktop access required by that original task, and retain all existing task scope and permissions.".into();
+            attachments = vec![];
+            role = Role::System;
+            continue;
+        }
         if !supervise || pane_generation || *cancel.borrow() {
             return Ok(outcome);
         }
@@ -701,6 +978,7 @@ async fn execute_inner(
         if current.account != session.account || current.model.key() != session.model.key() {
             return Ok(outcome);
         }
+        turn += 1;
         let current_config = Config::load(store.root())?.0;
         let output_digest = digest(&outcome.text);
         let repeat = previous_output.as_ref() == Some(&output_digest);
@@ -712,7 +990,35 @@ async fn execute_inner(
             elapsed_ms,
             repeat,
         );
-        let continue_turn = if deterministic_continue && current_config.extensions.judge.enabled {
+        // A completed turn the settle reflex reads as stopped short, or as a
+        // routine request for a go-ahead, continues the way the managed
+        // supervisor continues it; the deterministic gate covers limits.
+        let settled = if deterministic_continue {
+            None
+        } else {
+            tokio::select! {
+                biased;
+                _ = cancellation_requested(&mut cancel) => return Ok(outcome),
+                settled = settle_continuation(
+                    &store,
+                    &current_config,
+                    &outcome,
+                    &session_id,
+                    ContinuationBudget { turn, consecutive, elapsed_ms, repeated: repeat },
+                ) => settled,
+            }
+        };
+        if let Some((head, decision)) = &settled {
+            if let Ok(reflexes) = reflex::ReflexStore::open(store.root()) {
+                let _ = reflexes.observe(&format!("{}#{turn}", session_id.as_str()), decision);
+            }
+            observer(Progress::Notice(format!(
+                "Settle reflex `{head}` continues the task on its own"
+            )));
+        }
+        let continue_turn = if (deterministic_continue || settled.is_some())
+            && current_config.extensions.judge.enabled
+        {
             let judgment = tokio::select! {
                 biased;
                 _ = cancellation_requested(&mut cancel) => return Ok(outcome),
@@ -750,77 +1056,133 @@ async fn execute_inner(
                 }
             }
         } else {
-            deterministic_continue
+            deterministic_continue || settled.is_some()
         };
-        if *cancel.borrow()
-            || now_ms().saturating_sub(started)
-                >= current_config.extensions.auto_continue.max_elapsed_ms
-        {
+        if *cancel.borrow() {
             return Ok(outcome);
         }
-        if continue_turn {
+        // The judge may have taken time: the elapsed budget is checked again
+        // here, for continuation only. Failover is bounded by the routes
+        // tried and by cancellation, so a long turn that then hits a usage
+        // limit still moves to another account.
+        let step = supervision_step(
+            &current_config,
+            &outcome,
+            continue_turn,
+            now_ms().saturating_sub(started),
+        );
+        if step == Supervision::Continue {
             consecutive += 1;
             previous_output = Some(output_digest);
             observer(Progress::Notice(format!(
                 "Auto-continue {consecutive}/{} · same task and permissions",
                 current_config.extensions.auto_continue.max_consecutive
             )));
-            text = "Continue the existing task from the last confirmed checkpoint. Do not repeat completed effects, expand the task, or answer for the user. Stop if approval or missing input is required.".into();
+            text = match &settled {
+                Some((head, decision)) => {
+                    xcb_core::reflex::continuation_prompt(Some(head), Some(&decision.features))
+                }
+                None => "Continue the existing task from the last confirmed checkpoint. Do not repeat completed effects, expand the task, or answer for the user. Stop if approval or missing input is required.".into(),
+            };
             attachments = vec![];
             role = Role::System;
             continue;
         }
-        if current_config.auto_failover
-            && outcome.facts.terminal == Terminal::Failed
-            && matches!(
-                outcome.facts.failure,
-                Some(
-                    xcb_core::policy::Failure::AccountQuota | xcb_core::policy::Failure::ModelQuota
-                )
-            )
-        {
-            let view = summary::snapshot(&store, Some(&session_id), &current_config, now_ms())?;
+        if let Supervision::Failover(failure) = step {
+            if failure == Failure::AccountQuota {
+                limited_accounts.insert(current.account.clone());
+            }
+            let now = now_ms();
+            let view = summary::snapshot(&store, Some(&session_id), &current_config, now)?;
+            let checkpointed = checkpointed(&outcome);
+            let limit = usage_limit_label(&view, &current.account, &current.model, failure);
+            if let Some(reason) = failover_blocked_reason(&outcome.facts, &tried, checkpointed) {
+                observer(Progress::Notice(format!("{limit} · {reason}")));
+                return Ok(outcome);
+            }
             let source = RouteCandidate {
                 account: current.account.clone(),
                 model: current.model.clone(),
                 admitted: true,
-                quota_fresh: true,
+                quota_clear: false,
                 available: false,
             };
             let admitted_providers: BTreeSet<_> = Provider::ALL
                 .into_iter()
                 .filter(|provider| {
                     Pin::load(store.root(), *provider)
-                        .is_ok_and(|pin| runner::provider_admitted(&pin))
+                        .is_ok_and(|pin| runner::provider_admitted(store.root(), &pin))
                 })
                 .collect();
-            let mut candidates = Vec::new();
-            for model in &view.models {
-                for account in &view.accounts {
-                    if account.provider != model.provider
-                        || account.busy
-                        || !account.enabled
-                        || account.quota_blocked_until_ms.is_some()
-                        || candidates.len() >= 256
-                    {
-                        continue;
-                    }
-                    candidates.push(RouteCandidate {
-                        account: account.id.clone(),
-                        model: model.clone(),
-                        admitted: admitted_providers.contains(&model.provider)
-                            && auth::has_credentials(&store, &account.id)?,
-                        quota_fresh: account.remaining_percent.is_some(),
-                        available: account
-                            .remaining_percent
-                            .is_some_and(|remaining| remaining > 0.0),
-                    });
-                }
-            }
-            let checkpointed = !outcome.text.is_empty()
-                || outcome.facts.effects == xcb_core::policy::EffectState::None;
+            let credentialed: BTreeSet<Id> = view
+                .accounts
+                .iter()
+                .filter(|account| auth::has_credentials(&store, &account.id).unwrap_or(false))
+                .map(|account| account.id.clone())
+                .collect();
+            // An opening "Use <provider>" directive pins the provider for the
+            // whole task; failover never widens past it.
+            let required_provider = current
+                .route_pins
+                .provider
+                .or_else(|| routing::explicit_provider_intent(&original_task));
+            // The router applies the same eligibility as automatic routing
+            // (a Devin account without a meter, or one whose last reading
+            // aged out, is a target) and orders the routes; `next_route`
+            // stays the safety gate over facts read from the account view.
+            let ranked = tokio::select! {
+                biased;
+                _ = cancellation_requested(&mut cancel) => return Ok(outcome),
+                ranked = routing::failover_routes(
+                    &store,
+                    &current_config,
+                    routing::FailoverRequest {
+                    requirements: current.requirements,
+                        task: &original_task,
+                        account: &current.account,
+                        model: &current.model,
+                        failure,
+                        tried: &tried,
+                        limited_accounts: &limited_accounts,
+                        required_provider,
+                        required_model: current.route_pins.model.as_deref(),
+                        required_account: current.route_pins.account.as_ref(),
+                    },
+                ) => ranked?,
+            };
+            store.require_session_capabilities(&session_id, ranked.requirements)?;
+            let mut candidates: Vec<_> = ranked
+                .routes
+                .into_iter()
+                .filter_map(|route| {
+                    let row = view.accounts.iter().find(|row| row.id == route.account)?;
+                    let admitted = admitted_providers.contains(&route.model.provider)
+                        && credentialed.contains(&row.id);
+                    Some(failover_candidate(
+                        row,
+                        route.model,
+                        admitted,
+                        current_config.max_runs_per_account,
+                    ))
+                })
+                .collect();
             let eligible = eligible_failover_routes(&source, &candidates, &tried, &outcome);
             if eligible.is_empty() {
+                observer(Progress::Notice(failover_unavailable_notice(
+                    &FailoverNoticeInput {
+                        view: &view,
+                        account: &current.account,
+                        model: &current.model,
+                        failure,
+                        tried: &tried,
+                        limited_accounts: &limited_accounts,
+                        admitted: &admitted_providers,
+                        credentialed: &credentialed,
+                        required_provider,
+                        run_limit: current_config.max_runs_per_account,
+                        now,
+                    },
+                )));
                 return Ok(outcome);
             }
             // Ask the judge to rank the routes `next_route` could pick; on any
@@ -892,10 +1254,7 @@ async fn execute_inner(
                     ))),
                 }
             }
-            if *cancel.borrow()
-                || now_ms().saturating_sub(started)
-                    >= current_config.extensions.auto_continue.max_elapsed_ms
-            {
+            if *cancel.borrow() {
                 return Ok(outcome);
             }
             if let Some(target) =
@@ -921,9 +1280,265 @@ async fn execute_inner(
     }
 }
 
+fn computer_resume_permitted(outcome: &Outcome, pane_generation: bool, cancelled: bool) -> bool {
+    computer_handoff_permitted(outcome, pane_generation, cancelled)
+        || (!cancelled
+            && !pane_generation
+            && outcome.state == State::Limited
+            && failover_permitted(&outcome.facts, &BTreeSet::new(), checkpointed(outcome)))
+}
+
+fn computer_handoff_permitted(outcome: &Outcome, pane_generation: bool, cancelled: bool) -> bool {
+    !cancelled
+        && !pane_generation
+        && outcome.facts.joined
+        && outcome.facts.effects != EffectState::Uncertain
+        && !outcome.facts.pending_attention
+        && outcome.facts.failure.is_none()
+        && matches!(
+            outcome.facts.terminal,
+            Terminal::Completed | Terminal::TurnLimit
+        )
+        && outcome.state == State::Idle
+}
+
+fn append_input(
+    store: &Store,
+    session: &Session,
+    message: &Message,
+    submission: Option<&UiSubmission>,
+) -> Result<Session> {
+    let current = store.append_message(&session.id, session.revision, message)?;
+    if let Some(input) = submission
+        && message.id == input.id
+    {
+        input.acknowledge(&session.id);
+    }
+    Ok(current)
+}
+
 async fn cancellation_requested(cancel: &mut watch::Receiver<bool>) {
     // Sender loss also ends supervision, just as it ends an active runner.
     let _ = cancel.wait_for(|cancelled| *cancelled).await;
+}
+
+/// What supervision does after a settled turn, decided from the turn alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Supervision {
+    Continue,
+    Failover(Failure),
+    Stop,
+}
+
+/// Continuation keeps its own elapsed budget. Failover has none: it is
+/// bounded by the sixteen routes `next_route` allows and by cancellation, so
+/// a turn that ran past the continuation budget and then hit a usage limit
+/// still moves to another account.
+fn supervision_step(
+    config: &Config,
+    outcome: &Outcome,
+    continue_turn: bool,
+    elapsed_ms: u64,
+) -> Supervision {
+    if continue_turn && elapsed_ms < config.extensions.auto_continue.max_elapsed_ms {
+        return Supervision::Continue;
+    }
+    match outcome.facts.failure {
+        Some(failure @ (Failure::AccountQuota | Failure::ModelQuota))
+            if config.auto_failover && outcome.facts.terminal == Terminal::Failed =>
+        {
+            Supervision::Failover(failure)
+        }
+        _ => Supervision::Stop,
+    }
+}
+
+/// A turn left something to continue from: answer text, or no effects at all.
+fn checkpointed(outcome: &Outcome) -> bool {
+    !outcome.text.is_empty() || outcome.facts.effects == EffectState::None
+}
+
+/// The facts the failover gate reads about one route, taken from the account
+/// view the terminal shows. The router already applied the same rules; the
+/// gate re-reads them so a candidate can never be admitted by construction.
+fn failover_candidate(
+    account: &AccountRow,
+    model: ModelChoice,
+    admitted: bool,
+    run_limit: u32,
+) -> RouteCandidate {
+    RouteCandidate {
+        account: account.id.clone(),
+        model,
+        admitted: admitted && !account.authentication_required,
+        quota_clear: account.quota_blocked_until_ms.is_none()
+            && account
+                .remaining_percent
+                .is_none_or(|remaining| remaining > 0.0),
+        available: account.enabled && account.active_runs < run_limit,
+    }
+}
+
+/// Why a usage-limited turn cannot move at all, before any route is ranked.
+fn failover_blocked_reason(
+    facts: &TurnFacts,
+    tried: &BTreeSet<String>,
+    checkpointed: bool,
+) -> Option<&'static str> {
+    if failover_permitted(facts, tried, checkpointed) {
+        return None;
+    }
+    Some(
+        if !facts.joined || facts.effects == EffectState::Uncertain {
+            "xcb could not confirm how the run ended, so it keeps this account and does not switch"
+        } else if facts.pending_attention {
+            "the provider is waiting for an answer, so xcb does not switch"
+        } else if !checkpointed {
+            "the turn changed files without a reply, so xcb does not continue it on another account"
+        } else if tried.len() >= 16 {
+            "16 routes already ran this task, so xcb stops here"
+        } else {
+            "the turn did not settle with a usage limit"
+        },
+    )
+}
+
+fn usage_limit_label(view: &View, account: &Id, model: &ModelChoice, failure: Failure) -> String {
+    let name = view
+        .accounts
+        .iter()
+        .find(|row| &row.id == account)
+        .map_or_else(|| account.to_string(), |row| row.name.clone());
+    match failure {
+        Failure::ModelQuota => format!(
+            "Usage limit for {} on {} · {name}",
+            model.label, model.provider
+        ),
+        _ => format!("Usage limit on {} · {name}", model.provider),
+    }
+}
+
+/// Everything the no-target notice is written from.
+pub struct FailoverNoticeInput<'a> {
+    pub view: &'a View,
+    pub account: &'a Id,
+    pub model: &'a ModelChoice,
+    pub failure: Failure,
+    /// Routes this task already ran, as `<account>/<model key>`.
+    pub tried: &'a BTreeSet<String>,
+    pub limited_accounts: &'a BTreeSet<Id>,
+    /// Providers whose pinned build xcb can run.
+    pub admitted: &'a BTreeSet<Provider>,
+    /// Accounts with usable credentials.
+    pub credentialed: &'a BTreeSet<Id>,
+    pub required_provider: Option<Provider>,
+    /// Configured per-account concurrent run limit; a row counts as held
+    /// only when its unsettled runs reach it.
+    pub run_limit: u32,
+    pub now: u64,
+}
+
+fn wait_label(until: u64, now: u64) -> String {
+    let minutes = until.saturating_sub(now).div_ceil(60_000).max(1);
+    if minutes >= 60 * 24 {
+        format!("{}d", minutes / (60 * 24))
+    } else if minutes >= 60 {
+        format!("{}h {}m", minutes / 60, minutes % 60)
+    } else {
+        format!("{minutes}m")
+    }
+}
+
+/// The notice shown when a usage limit stopped a turn and no other account
+/// can take the task now: which account hit the limit, why each other
+/// account was passed over, and the earliest known reset.
+pub fn failover_unavailable_notice(input: &FailoverNoticeInput<'_>) -> String {
+    let FailoverNoticeInput {
+        view,
+        account,
+        model,
+        failure,
+        tried,
+        limited_accounts,
+        admitted,
+        credentialed,
+        required_provider,
+        run_limit,
+        now,
+    } = input;
+    let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut order: Vec<&'static str> = Vec::new();
+    let mut others = 0usize;
+    for row in view.accounts.iter().filter(|row| &row.id != *account) {
+        others += 1;
+        let models: Vec<_> = view
+            .models
+            .iter()
+            .filter(|choice| choice.provider == row.provider)
+            .collect();
+        let all_tried = !models.is_empty()
+            && models
+                .iter()
+                .all(|choice| tried.contains(&format!("{}/{}", row.id, choice.key())));
+        let reason = if !row.enabled {
+            "disabled"
+        } else if row.authentication_required || !credentialed.contains(&row.id) {
+            "signed out"
+        } else if !admitted.contains(&row.provider) {
+            "on a provider build xcb has not checked"
+        } else if required_provider.is_some_and(|provider| provider != row.provider) {
+            "outside the pinned provider"
+        } else if row.active_runs >= *run_limit {
+            "at its run limit"
+        } else if row.quota_blocked_until_ms.is_some()
+            || row
+                .remaining_percent
+                .is_some_and(|remaining| remaining <= 0.0)
+            || limited_accounts.contains(&row.id)
+        {
+            "at a usage limit"
+        } else if all_tried {
+            "already tried on this task"
+        } else if models.is_empty() {
+            "without a recently seen model"
+        } else {
+            "not able to take the task now"
+        };
+        if !counts.contains_key(reason) {
+            order.push(reason);
+        }
+        *counts.entry(reason).or_default() += 1;
+    }
+    let mut notice = usage_limit_label(view, account, model, *failure);
+    if others == 0 {
+        notice.push_str(" · no other account is signed in");
+    } else {
+        notice.push_str(" · no other account is able to take the task now");
+        for reason in order {
+            notice.push_str(&format!(" · {} {reason}", counts[reason]));
+        }
+    }
+    let reset = view
+        .accounts
+        .iter()
+        .filter_map(|row| row.quota_blocked_until_ms)
+        .filter(|until| until > now)
+        .min()
+        .or_else(|| {
+            view.accounts
+                .iter()
+                .find(|row| &row.id == *account)
+                .and_then(|row| row.resets_at_ms)
+                .filter(|until| until > now)
+        });
+    match reset {
+        Some(until) => notice.push_str(&format!(
+            " · earliest known reset in ~{}",
+            wait_label(until, *now)
+        )),
+        None => notice.push_str(" · no reset time is known"),
+    }
+    notice
 }
 
 fn eligible_failover_routes(
@@ -932,8 +1547,7 @@ fn eligible_failover_routes(
     tried: &BTreeSet<String>,
     outcome: &Outcome,
 ) -> Vec<usize> {
-    let checkpointed =
-        !outcome.text.is_empty() || outcome.facts.effects == xcb_core::policy::EffectState::None;
+    let checkpointed = self::checkpointed(outcome);
     candidates
         .iter()
         .enumerate()
@@ -956,6 +1570,7 @@ fn eligible_failover_routes(
 struct Activity {
     tools: Vec<String>,
     subagents: BTreeMap<Id, Subagent>,
+    phase: Option<String>,
 }
 struct Active {
     cancel: watch::Sender<bool>,
@@ -1045,7 +1660,8 @@ fn publish(
     active: &BTreeMap<Id, Active>,
     outbox: &Mutex<Outbox>,
 ) -> Result<()> {
-    let mut view = summary::snapshot(store, current, config, now_ms())?;
+    let now = now_ms();
+    let mut view = summary::snapshot(store, current, config, now)?;
     if let Some(active) = current.and_then(|id| active.get(id)) {
         view.state = State::Working;
         if let Ok(activity) = active.activity.lock() {
@@ -1062,6 +1678,24 @@ fn publish(
             view.state = State::Uncertain;
         }
     }
+    for row in &mut view.agents {
+        let xcb_core::ui::TranscriptContext::Session(id) = &row.context else {
+            continue;
+        };
+        if let Some(active) = active.get(id) {
+            row.state = State::Working;
+            row.activity = active
+                .activity
+                .lock()
+                .ok()
+                .and_then(|activity| activity.phase.clone())
+                .unwrap_or_else(|| "working".into());
+        } else if Some(id) == current {
+            row.state = view.state;
+            row.activity = view.state.label().into();
+        }
+    }
+    crate::agent_overview::sort(&mut view.agents, now);
     if current.is_none() {
         view.pending_route = usable_account(store, None, None, config)
             .ok()
@@ -1081,9 +1715,11 @@ fn publish(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start(
     store: Arc<Store>,
     id: Id,
+    submission: Option<Id>,
     text: String,
     attachments: Vec<xcb_core::session::Attachment>,
     pane: bool,
@@ -1094,8 +1730,19 @@ fn start(
     let activity = Arc::new(Mutex::new(Activity::default()));
     let activity_copy = activity.clone();
     let session_id = id.clone();
+    let submission_outbox = outbox.clone();
     let observer: Observer = Arc::new(move |event| match event {
         Progress::Text { thinking, text } if !pane => {
+            if let Ok(mut activity) = activity_copy.lock() {
+                activity.phase = Some(
+                    if thinking {
+                        "thinking"
+                    } else {
+                        "writing response"
+                    }
+                    .into(),
+                );
+            }
             if let Ok(mut outbox) = outbox.lock() {
                 let buffered = outbox
                     .deltas
@@ -1107,6 +1754,7 @@ fn start(
         }
         Progress::Tool(name) => {
             if let Ok(mut activity) = activity_copy.lock() {
+                activity.phase = Some(xcb_core::display_text(&format!("running tool {name}"), 320));
                 if activity.tools.len() >= 128 {
                     activity.tools.remove(0);
                 }
@@ -1126,22 +1774,48 @@ fn start(
                     }
                 }
                 activity.subagents.insert(agent.id.clone(), agent);
+                activity.phase = Some("running subagent".into());
             }
         }
         Progress::Notice(message) => queue(&outbox, Update::Notice(message)),
         _ => (),
     });
+    let submission = submission.map(|id| UiSubmission {
+        id,
+        outbox: submission_outbox,
+        accepted: std::sync::atomic::AtomicBool::new(false),
+    });
     let task = tokio::spawn(async move {
-        let result = execute(
+        let result = execute_mode(
             store,
             id.clone(),
-            text,
-            attachments,
-            pane,
+            text.clone(),
+            attachments.clone(),
+            if pane {
+                ExecutionMode::Pane
+            } else {
+                ExecutionMode::Direct
+            },
             cancelled,
             observer,
+            submission.as_ref(),
         )
         .await;
+        if let Some(submission) = &submission
+            && !submission.accepted()
+            && let Err(error) = &result
+        {
+            queue(
+                &submission.outbox,
+                Update::SubmitRejected {
+                    id: submission.id.clone(),
+                    context: Some(xcb_core::ui::TranscriptContext::Session(id.clone())),
+                    text,
+                    attachments,
+                    reason: error.to_string(),
+                },
+            );
+        }
         let _ = finished.send((id, result)).await;
     });
     Active {
@@ -1149,6 +1823,31 @@ fn start(
         task,
         activity,
         pane,
+    }
+}
+
+/// mtime probe for `config.json`: the kernel's own publish cadence picks up
+/// writes from sibling terminals, keeping it the single refresh path — no
+/// TUI-side `Intent::Refresh` timer is needed.
+fn config_modified(root: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(root.join("config.json"))
+        .and_then(|meta| meta.modified())
+        .ok()
+}
+
+fn reload_config(
+    root: &Path,
+    config: &mut Config,
+    stamp: &mut Option<std::time::SystemTime>,
+    outbox: &Mutex<Outbox>,
+) {
+    *stamp = config_modified(root);
+    match Config::load(root) {
+        Ok((fresh, _)) => *config = fresh,
+        Err(error) => queue(
+            outbox,
+            Update::Notice(format!("Configuration reload rejected: {error}")),
+        ),
     }
 }
 
@@ -1160,6 +1859,7 @@ pub async fn serve(
     output: SyncSender<Update>,
 ) -> Result<()> {
     let mut config = Config::load(store.root())?.0;
+    let mut config_stamp = config_modified(store.root());
     let mut active: BTreeMap<Id, Active> = BTreeMap::new();
     let outbox = Arc::new(Mutex::new(Outbox::default()));
     let (completed, mut completions) = mpsc::channel::<(Id, Result<Outcome>)>(16);
@@ -1183,11 +1883,12 @@ pub async fn serve(
                         match Pane::parse(text.as_bytes()) { Ok(pane) => queue(&outbox, Update::PaneCandidate(pane)), Err(error) => queue(&outbox, Update::Notice(format!("Generated pane rejected: {error}. The current pane is unchanged."))) }
                     }
                     Ok(outcome) if outcome.facts.terminal != Terminal::Completed => queue(&outbox, Update::Notice(format!("Turn stopped: {}", outcome.state.label()))),
+                    Ok(outcome) if !was_pane && xcb_core::policy::no_reply(&outcome.text, &outcome.facts) => queue(&outbox, Update::Notice(NO_REPLY_NOTICE.into())),
                     Err(error) => queue(&outbox, Update::Notice(error.to_string())),
                     _ => (),
                 }
                 if !quit && let Some((generated, prompt)) = pending_pane_at_boundary(&store, &id, &mut pending_pane, &config, &outbox) {
-                    let task = start(store.clone(), generated.clone(), prompt, vec![], true, outbox.clone(), completed.clone());
+                    let task = start(store.clone(), generated.clone(), None, prompt, vec![], true, outbox.clone(), completed.clone());
                     active.insert(generated, task);
                 }
                 publish(&store, current.as_ref(), &config, &active, &outbox)?;
@@ -1196,12 +1897,37 @@ pub async fn serve(
                 for _ in 0..16 {
                     let intent = match input.try_recv() { Ok(intent) => intent, Err(TryRecvError::Empty) => break, Err(TryRecvError::Disconnected) => Intent::Quit };
                     if matches!(intent, Intent::Quit) { quit = true; pending_pane = None; for task in active.values() { let _ = task.cancel.send(true); } break; }
+                    let submit_context = match &intent {
+                        Intent::SubmitTo { context, .. } => Some(context.clone()),
+                        _ => None,
+                    };
                     let handled: Result<()> = (|| {
                         match intent {
-                            Intent::Refresh => { match Config::load(store.root()) { Ok((fresh, _)) => config = fresh, Err(error) => queue(&outbox, Update::Notice(format!("Configuration reload rejected: {error}"))) } }
-                            Intent::Submit { text, attachments, .. } => {
+                            Intent::Rename { context, expected_title, title } => {
+                                let xcb_core::ui::TranscriptContext::Session(id) = context else {
+                                    return Err(Error::Unavailable("choose a direct session to rename"));
+                                };
+                                store.rename_session(&id, &expected_title, &title)?;
+                            }
+                            Intent::TranscriptPage { context, before_sequence, request } => {
+                                let result = match &context {
+                                    xcb_core::ui::TranscriptContext::Session(id) if current.as_ref() == Some(id) => store.transcript_page(id, Some(before_sequence), 128),
+                                    _ => Err(Error::Conflict("transcript context changed")),
+                                };
+                                match result {
+                                    Ok(page) => queue(&outbox, Update::TranscriptPage { request, page }),
+                                    Err(error) => queue(&outbox, Update::TranscriptPageRejected { context, request, reason: error.to_string() }),
+                                }
+                            }
+                            Intent::Refresh => reload_config(store.root(), &mut config, &mut config_stamp, &outbox),
+                            Intent::Submit { id: submission, text, attachments }
+                            | Intent::SubmitTo { id: submission, text, attachments, .. } => {
                                 let prepared: Result<Id> = (|| {
-                                    if current.is_none() { current = Some(new_session(&store, &workspace, &config, None, None)?.id); }
+                                    if let Some(expected) = &submit_context
+                                        && current.as_ref().map(|id| xcb_core::ui::TranscriptContext::Session(id.clone())).as_ref() != Some(expected) {
+                                        return Err(Error::Conflict("session changed before submission"));
+                                    }
+                                    if current.is_none() { current = Some(new_session(&store, &workspace, &config, None, None, None)?.id); }
                                     let id = current.clone().expect("selected session");
                                     if active.contains_key(&id) || active.len() >= 16 { return Err(Error::Conflict("a turn is still running; your draft was restored to the composer")); }
                                     let session = store.session(&id)?.ok_or(Error::Unavailable("session not found"))?;
@@ -1209,9 +1935,13 @@ pub async fn serve(
                                     Ok(id)
                                 })();
                                 match prepared {
-                                    Ok(id) => { active.insert(id.clone(), start(store.clone(), id, text, attachments, false, outbox.clone(), completed.clone())); }
+                                    Ok(id) => { active.insert(id.clone(), start(store.clone(), id, Some(submission), text, attachments, false, outbox.clone(), completed.clone())); }
                                     Err(error) => {
-                                        queue(&outbox, Update::Draft { text, attachments });
+                                        queue(&outbox, Update::SubmitRejected {
+                                            id: submission,
+                                            context: submit_context.or_else(|| current.clone().map(xcb_core::ui::TranscriptContext::Session)),
+                                            text, attachments, reason: error.to_string(),
+                                        });
                                         return Err(error);
                                     }
                                 }
@@ -1224,16 +1954,19 @@ pub async fn serve(
                                     queue(&outbox, Update::Notice("This turn is running in another terminal; cancel it there.".into()));
                                 }
                             }
-                            Intent::Conversation(_) => return Err(Error::Unavailable("managed conversations are available from plain xcb chat")),
+                            Intent::Conversation(_) => return Err(Error::Unavailable("managed conversations are available through the JSON protocol or SDK")),
+                            Intent::Habitat(_) | Intent::HabitatAt { .. } => return Err(Error::Unavailable("persistent backlog and schedules are available through the JSON protocol or SDK")),
+                            Intent::Focus(_) | Intent::MoveTask { .. } | Intent::ReleaseHold { .. } | Intent::AddWorkspace { .. } | Intent::NewProjectView { .. } => return Err(Error::Unavailable("projects are available through the JSON protocol or SDK")),
                             Intent::Resume(id) => { if store.session(&id)?.is_none() { return Err(Error::Unavailable("session not found")); } current = Some(id); }
-                            Intent::NewSession => current = Some(new_session(&store, &workspace, &config, None, None)?.id),
+                            Intent::NewSession => current = Some(new_session(&store, &workspace, &config, None, None, None)?.id),
                             Intent::Account(account) => {
                                 if current.as_ref().is_some_and(|id| active.contains_key(id)) { return Err(Error::Conflict("stop or finish the turn before changing accounts")); }
                                 store.require_quota_available(&account, now_ms())?;
+                                store.require_authenticated_account(&account)?;
                                 let provider = store.account(&account)?.provider;
                                 let model = choose_model(&store, provider, None, &config)?;
                                 if let Some(id) = &current { let session = store.session(id)?.ok_or(Error::Unavailable("session not found"))?; store.rebind(id, session.revision, &account, model)?; }
-                                else { current = Some(new_session(&store, &workspace, &config, Some(&account), None)?.id); }
+                                else { current = Some(new_session(&store, &workspace, &config, Some(&account), None, None)?.id); }
                             }
                             Intent::Model(key) => {
                                 let matches: Vec<_> = store.models()?.into_iter().filter(|model| model.key() == key || model.id.as_str() == key).collect();
@@ -1243,7 +1976,7 @@ pub async fn serve(
                                 let previous = current.as_ref().map(|id| store.session(id)).transpose()?.flatten();
                                 let account = model_account(&store, model.provider, previous.as_ref().map(|session| &session.account), &config)?;
                                 if let Some(id) = &current { let session = store.session(id)?.ok_or(Error::Unavailable("session not found"))?; store.rebind(id, session.revision, &account, model)?; }
-                                else { current = Some(new_session(&store, &workspace, &config, Some(&account), Some(&model.key()))?.id); }
+                                else { current = Some(new_session(&store, &workspace, &config, Some(&account), Some(&model.key()), None)?.id); }
                             }
                             Intent::SetDefault => {
                                 let session = current.as_ref().and_then(|id| store.session(id).ok().flatten()).ok_or(Error::Unavailable("select a session first"))?;
@@ -1259,13 +1992,13 @@ pub async fn serve(
                                 let session = current.as_ref().and_then(|id| store.session(id).ok().flatten()).ok_or(Error::Unavailable("select an account and session before generating a pane"))?;
                                 if active.values().any(|task| task.pane) || active.len() >= 16 { return Err(Error::Conflict("pane generation is already running")); }
                                 if active.contains_key(&session.id) { pending_pane = Some((session.id, request)); queue(&outbox, Update::Notice("Pane generation queued for the account's next idle boundary. Editing and hot reload remain available.".into())); }
-                                else { let generated = generation_session(&store, &session, &config)?; let task = start(store.clone(), generated.id.clone(), pane_prompt(&request)?, vec![], true, outbox.clone(), completed.clone()); active.insert(generated.id, task); }
+                                else { let generated = generation_session(&store, &session, &config)?; let task = start(store.clone(), generated.id.clone(), None, pane_prompt(&request)?, vec![], true, outbox.clone(), completed.clone()); active.insert(generated.id, task); }
                             }
                             Intent::AttachPath(path) => { let image = attachments::from_path(store.root(), Path::new(&path))?; queue(&outbox, Update::Attachment(image)); }
                             Intent::AttachRgba { width, height, bytes } => { let image = attachments::from_rgba(store.root(), width, height, bytes)?; queue(&outbox, Update::Attachment(image)); }
                             Intent::Extension { name, enabled } => {
                                 let (mut fresh, revision) = Config::load(store.root())?;
-                                match name.as_str() { "auto-continue" => fresh.extensions.auto_continue.enabled = enabled, "gobstopper" => fresh.extensions.gobstopper.enabled = enabled, "usage" => fresh.extensions.usage = enabled, "hooks" => fresh.extensions.hooks = enabled, "aicharts-export" => fresh.extensions.aicharts_export = enabled, "aicharts" | "aicharts-upload" => return Err(Error::Unavailable("automatic posting awaits a supported enrolled aiCharts ingress; local exports remain available")), _ => return Err(Error::Unavailable("unknown built-in extension")) }
+                                match name.as_str() { "auto-continue" => fresh.extensions.auto_continue.enabled = enabled, "gobstopper" => fresh.extensions.gobstopper.enabled = enabled, "usage" => fresh.extensions.usage = enabled, "hooks" => fresh.extensions.hooks = enabled, "aicharts-export" => fresh.extensions.aicharts_export = enabled, "aicharts" | "aicharts-upload" => return Err(Error::Unavailable("automatic posting awaits a supported enrolled aicharts ingress; local exports remain available")), _ => return Err(Error::Unavailable("unknown built-in extension")) }
                                 fresh.save(store.root(), revision.as_deref())?; config = fresh;
                             }
                             Intent::Quit => (),
@@ -1282,6 +2015,11 @@ pub async fn serve(
                 // reset drafts, scroll positions, notices or open pickers.
                 let refresh_after = if active.is_empty() { Duration::from_secs(1) } else { Duration::from_millis(250) };
                 if activity_published.elapsed() >= refresh_after {
+                    // A config written by a sibling terminal (xcb plugins, an
+                    // edited file) lands on this same cadence.
+                    if config_modified(store.root()) != config_stamp {
+                        reload_config(store.root(), &mut config, &mut config_stamp, &outbox);
+                    }
                     publish(&store, current.as_ref(), &config, &active, &outbox)?;
                     activity_published = tokio::time::Instant::now();
                 }
@@ -1345,6 +2083,7 @@ fn generation_session(store: &Store, source: &Session, config: &Config) -> Resul
         config,
         Some(&source.account),
         Some(&source.model.key()),
+        None,
     )
 }
 fn pane_prompt(request: &str) -> Result<String> {
@@ -1361,9 +2100,307 @@ mod tests {
     use std::sync::mpsc::sync_channel;
 
     #[test]
+    fn explicit_session_policy_preserves_aliases_and_rejects_conflicts_before_persistence() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = xcb_core::canonical(directory.path())
+            .unwrap()
+            .join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = Store::open(&workspace.parent().unwrap().join("state")).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Test", 2, None)
+            .unwrap();
+        auth::store_token(
+            &store,
+            &account.id,
+            b"sk-ant-oat01-syntheticToken000000000000",
+        )
+        .unwrap();
+        let model = route_candidate(0).1;
+        store
+            .set_models(Provider::Claude, std::slice::from_ref(&model))
+            .unwrap();
+        let config = Config::default();
+        for policy in [
+            SessionRoutePolicy {
+                requirements: xcb_core::session::TaskRequirements {
+                    signed_in_browser: true,
+                    ..Default::default()
+                },
+                required_provider: None,
+            },
+            SessionRoutePolicy {
+                requirements: Default::default(),
+                required_provider: Some(Provider::Codex),
+            },
+        ] {
+            assert!(
+                new_session_with_policy(
+                    &store,
+                    &workspace,
+                    &config,
+                    Some(&account.id),
+                    Some(model.id.as_str()),
+                    None,
+                    policy
+                )
+                .is_err()
+            );
+            assert!(store.sessions(16).unwrap().is_empty());
+            assert!(store.unsettled_runs().unwrap().is_empty());
+        }
+        let key = model.key();
+        for alias in [model.id.as_str(), model.label.as_str(), key.as_str()] {
+            let session = new_session_with_policy(
+                &store,
+                &workspace,
+                &config,
+                Some(&account.id),
+                Some(alias),
+                None,
+                SessionRoutePolicy {
+                    requirements: Default::default(),
+                    required_provider: Some(Provider::Claude),
+                },
+            )
+            .unwrap();
+            assert_eq!(session.model.key(), model.key());
+        }
+        assert!(store.unsettled_runs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn desktop_resume_accepts_safe_quota_checkpoint_but_never_other_failures() {
+        let mut outcome = quota_outcome(Failure::AccountQuota);
+        outcome.state = State::Limited;
+        assert!(computer_resume_permitted(&outcome, false, false));
+        assert!(!computer_resume_permitted(&outcome, false, true));
+        assert!(!computer_resume_permitted(&outcome, true, false));
+        for failure in [
+            Failure::Authentication,
+            Failure::Policy,
+            Failure::Transport,
+            Failure::Unknown,
+        ] {
+            outcome.facts.failure = Some(failure);
+            assert!(!computer_resume_permitted(&outcome, false, false));
+        }
+        outcome.facts.failure = Some(Failure::ModelQuota);
+        assert!(computer_resume_permitted(&outcome, false, false));
+        outcome.facts.effects = EffectState::Uncertain;
+        assert!(!computer_resume_permitted(&outcome, false, false));
+        outcome.facts.effects = EffectState::None;
+        outcome.facts.pending_attention = true;
+        assert!(!computer_resume_permitted(&outcome, false, false));
+        outcome.facts.pending_attention = false;
+        outcome.facts.joined = false;
+        assert!(!computer_resume_permitted(&outcome, false, false));
+    }
+
+    #[test]
+    fn signed_in_browser_handoff_requires_joined_known_effects_and_never_routes_a_policy_denial() {
+        let mut outcome = quota_outcome(Failure::Policy);
+        outcome.state = State::Idle;
+        outcome.facts.terminal = Terminal::Completed;
+        assert!(!computer_handoff_permitted(&outcome, false, false));
+        outcome.facts.failure = None;
+        assert!(computer_handoff_permitted(&outcome, false, false));
+        outcome.facts.terminal = Terminal::TurnLimit;
+        assert!(computer_handoff_permitted(&outcome, false, false));
+        outcome.facts.joined = false;
+        assert!(!computer_handoff_permitted(&outcome, false, false));
+        outcome.facts.joined = true;
+        outcome.facts.effects = EffectState::Uncertain;
+        assert!(!computer_handoff_permitted(&outcome, false, false));
+        outcome.facts.effects = EffectState::None;
+        assert!(computer_handoff_permitted(&outcome, false, false));
+        outcome.facts.pending_attention = true;
+        assert!(!computer_handoff_permitted(&outcome, false, false));
+        outcome.facts.pending_attention = false;
+        outcome.state = State::NeedsAnswer;
+        assert!(!computer_handoff_permitted(&outcome, false, false));
+        outcome.state = State::Idle;
+        assert!(!computer_handoff_permitted(&outcome, false, true));
+    }
+
+    #[test]
+    fn ui_submission_acknowledges_only_the_exact_durable_input() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let workspace = crate::private::directory(&base.join("work")).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Test", 1, None)
+            .unwrap();
+        let session = store
+            .create_session(&account.id, route_candidate(0).1, &workspace, 1)
+            .unwrap();
+        let previous = Message {
+            id: new_id("m"),
+            role: Role::User,
+            text: "Repeat this prompt".into(),
+            at_ms: 2,
+            attachments: vec![],
+            provenance: None,
+        };
+        let current = store
+            .append_message(&session.id, session.revision, &previous)
+            .unwrap();
+        let outbox = Arc::new(Mutex::new(Outbox::default()));
+        let submission = UiSubmission {
+            id: new_id("m"),
+            outbox: outbox.clone(),
+            accepted: std::sync::atomic::AtomicBool::new(false),
+        };
+        let message = Message {
+            id: submission.id.clone(),
+            at_ms: 3,
+            ..previous.clone()
+        };
+        assert!(append_input(&store, &session, &message, Some(&submission)).is_err());
+        assert!(!submission.accepted());
+        assert!(outbox.lock().unwrap().updates.is_empty());
+        let current = append_input(&store, &current, &message, Some(&submission)).unwrap();
+        assert!(submission.accepted());
+        let update = outbox.lock().unwrap().updates.pop_front().unwrap();
+        assert!(matches!(update, Update::Submitted { id, context }
+            if id == submission.id && context == xcb_core::ui::TranscriptContext::Session(session.id.clone())));
+        let reopened = Store::open(store.root()).unwrap();
+        let persisted = reopened.messages(&session.id, 128).unwrap();
+        assert_eq!(persisted.len(), 2);
+        assert_eq!(persisted[1].id, submission.id);
+        assert_eq!(persisted[0].text, persisted[1].text);
+        let continuation = Message {
+            id: new_id("m"),
+            role: Role::System,
+            text: "Continue".into(),
+            at_ms: 4,
+            attachments: vec![],
+            provenance: None,
+        };
+        append_input(&store, &current, &continuation, Some(&submission)).unwrap();
+        assert!(
+            outbox.lock().unwrap().updates.is_empty(),
+            "continuations cannot acknowledge another input"
+        );
+    }
+
+    #[tokio::test]
+    async fn ui_async_submission_failure_restores_exact_id_and_context() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
+        let store = Arc::new(Store::open(&base.join("state")).unwrap());
+        let session = new_id("missing_session");
+        let submission = new_id("input");
+        let outbox = Arc::new(Mutex::new(Outbox::default()));
+        let (finished, mut completion) = mpsc::channel(1);
+        let active = start(
+            store,
+            session.clone(),
+            Some(submission.clone()),
+            "Retain async draft".into(),
+            vec![],
+            false,
+            outbox.clone(),
+            finished,
+        );
+        active.task.await.unwrap();
+        assert!(completion.recv().await.unwrap().1.is_err());
+        let mut queue = outbox.lock().unwrap();
+        assert!(
+            matches!(queue.updates.pop_front().unwrap(), Update::SubmitRejected {
+            id, context: Some(xcb_core::ui::TranscriptContext::Session(context)), text, attachments, reason
+        } if id == submission && context == session && text == "Retain async draft" && attachments.is_empty() && reason.contains("session not found"))
+        );
+        assert!(queue.updates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ui_navigation_burst_rejects_stale_direct_submission_before_effects() {
+        use xcb_core::ui::TranscriptContext;
+        let directory = tempfile::tempdir().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
+        let store = Arc::new(Store::open(&base.join("state")).unwrap());
+        let workspace = crate::private::directory(&base.join("work")).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Test", 1, None)
+            .unwrap();
+        let first = store
+            .create_session(&account.id, route_candidate(0).1, &workspace, 1)
+            .unwrap();
+        let second = store
+            .create_session(&account.id, route_candidate(0).1, &workspace, 2)
+            .unwrap();
+        let submission = new_id("m");
+        let image = xcb_core::session::Attachment {
+            digest: "a".repeat(64),
+            media_type: "image/png".into(),
+            bytes: 512,
+            width: 16,
+            height: 16,
+        };
+        let (commands, input) = sync_channel(8);
+        let (output, updates) = sync_channel(1);
+        commands.send(Intent::Resume(second.id.clone())).unwrap();
+        commands
+            .send(Intent::SubmitTo {
+                context: TranscriptContext::Session(first.id.clone()),
+                id: submission.clone(),
+                text: "Keep this in the original session".into(),
+                attachments: vec![image.clone()],
+            })
+            .unwrap();
+        let task = tokio::spawn(serve(
+            store.clone(),
+            workspace,
+            Some(first.id.clone()),
+            input,
+            output,
+        ));
+        tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                while let Ok(update) = updates.try_recv() {
+                    if let Update::SubmitRejected {
+                        id,
+                        context,
+                        text,
+                        attachments,
+                        reason,
+                    } = update
+                    {
+                        assert_eq!(id, submission);
+                        assert_eq!(context, Some(TranscriptContext::Session(first.id.clone())));
+                        assert_eq!(text, "Keep this in the original session");
+                        assert_eq!(attachments, vec![image.clone()]);
+                        assert!(reason.contains("session changed"));
+                        return;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        commands.send(Intent::Quit).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        for session in [first, second] {
+            assert!(store.messages(&session.id, 128).unwrap().is_empty());
+            assert_eq!(
+                store.session(&session.id).unwrap().unwrap().revision,
+                session.revision
+            );
+        }
+        assert!(store.unsettled_runs().unwrap().is_empty());
+    }
+
+    #[test]
     fn workspace_lease_excludes_concurrent_and_unsettled_writers_across_accounts() {
         let directory = tempfile::tempdir().unwrap();
-        let base = directory.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let workspace = crate::private::directory(&base.join("work")).unwrap();
         let first = store
@@ -1435,7 +2472,7 @@ mod tests {
                 account,
                 model,
                 admitted: true,
-                quota_fresh: true,
+                quota_clear: true,
                 available: true,
             }
         };
@@ -1445,6 +2482,9 @@ mod tests {
         let candidates = vec![same_account, candidate(2)];
         let tried = BTreeSet::new();
         let mut outcome = Outcome {
+            tool_calls: Some(0),
+            text_attention: false,
+            diagnostic: None,
             text: "Saved the migration; remaining tests need to run".into(),
             state: State::Failed,
             facts: TurnFacts {
@@ -1478,10 +2518,289 @@ mod tests {
         assert!(eligible_failover_routes(&source, &candidates, &tried, &outcome).is_empty());
     }
 
+    fn account_row(index: usize, provider: Provider) -> AccountRow {
+        AccountRow {
+            id: Id::new(format!("a{index}")).unwrap(),
+            provider,
+            name: format!("{provider}/a{index}"),
+            email: None,
+            subscription: "Max".into(),
+            remaining_percent: None,
+            resets_at_ms: None,
+            quota_blocked_until_ms: None,
+            runway: xcb_core::usage::Estimate::unknown("quota_or_burn_unmeasured"),
+            busy: false,
+            active_runs: 0,
+            enabled: true,
+            authentication_required: false,
+        }
+    }
+
+    fn quota_outcome(failure: Failure) -> Outcome {
+        Outcome {
+            tool_calls: Some(0),
+            text_attention: false,
+            diagnostic: None,
+            text: "Saved the migration; remaining tests need to run".into(),
+            state: State::Failed,
+            facts: TurnFacts {
+                terminal: Terminal::Failed,
+                joined: true,
+                effects: EffectState::Settled,
+                pending_attention: false,
+                failure: Some(failure),
+            },
+        }
+    }
+
+    /// The gate reads the same facts as automatic routing: an account without
+    /// a meter (Devin) or with an aged-out reading has no known limit and is
+    /// a target; a recorded block, a zero reading, a held account, a
+    /// signed-out account or an unchecked provider build is not.
+    #[test]
+    fn failover_candidate_treats_unmeasured_accounts_as_clear() {
+        let model = route_candidate(0).1;
+        let devin = account_row(1, Provider::Devin);
+        let candidate = failover_candidate(&devin, model.clone(), true, 1);
+        assert!(candidate.admitted && candidate.quota_clear && candidate.available);
+        let stale = AccountRow {
+            remaining_percent: None,
+            resets_at_ms: None,
+            ..account_row(2, Provider::Claude)
+        };
+        assert!(failover_candidate(&stale, model.clone(), true, 1).quota_clear);
+        let measured = AccountRow {
+            remaining_percent: Some(12.5),
+            ..account_row(3, Provider::Claude)
+        };
+        assert!(failover_candidate(&measured, model.clone(), true, 1).quota_clear);
+        let blocked = AccountRow {
+            quota_blocked_until_ms: Some(u64::MAX),
+            ..account_row(4, Provider::Claude)
+        };
+        assert!(!failover_candidate(&blocked, model.clone(), true, 1).quota_clear);
+        let exhausted = AccountRow {
+            remaining_percent: Some(0.0),
+            ..account_row(5, Provider::Claude)
+        };
+        assert!(!failover_candidate(&exhausted, model.clone(), true, 1).quota_clear);
+        let busy = AccountRow {
+            busy: true,
+            active_runs: 1,
+            ..account_row(6, Provider::Claude)
+        };
+        assert!(!failover_candidate(&busy, model.clone(), true, 1).available);
+        let disabled = AccountRow {
+            enabled: false,
+            ..account_row(7, Provider::Claude)
+        };
+        assert!(!failover_candidate(&disabled, model.clone(), true, 1).available);
+        let signed_out = AccountRow {
+            authentication_required: true,
+            ..account_row(8, Provider::Claude)
+        };
+        assert!(!failover_candidate(&signed_out, model.clone(), true, 1).admitted);
+        assert!(!failover_candidate(&devin, model, false, 1).admitted);
+    }
+
+    /// Continuation keeps its elapsed budget; failover does not share it. A
+    /// settled usage limit after a long turn still moves, while an uncertain,
+    /// unjoined or attention-pending turn never reaches the router.
+    #[test]
+    fn failover_ignores_the_continuation_budget_but_not_the_safety_gates() {
+        let mut config = Config::default();
+        config.extensions.auto_continue.max_elapsed_ms = 60_000;
+        let limited = quota_outcome(Failure::AccountQuota);
+        assert_eq!(
+            supervision_step(&config, &limited, false, 3_600_000),
+            Supervision::Failover(Failure::AccountQuota)
+        );
+        assert_eq!(
+            supervision_step(&config, &quota_outcome(Failure::ModelQuota), false, 59_999),
+            Supervision::Failover(Failure::ModelQuota)
+        );
+        let mut token_limit = quota_outcome(Failure::AccountQuota);
+        token_limit.facts.terminal = Terminal::TokenLimit;
+        token_limit.facts.failure = None;
+        assert_eq!(
+            supervision_step(&config, &token_limit, true, 59_999),
+            Supervision::Continue
+        );
+        assert_eq!(
+            supervision_step(&config, &token_limit, true, 60_000),
+            Supervision::Stop,
+            "the continuation budget still bounds continuation"
+        );
+        let mut transport = quota_outcome(Failure::Transport);
+        transport.facts.failure = Some(Failure::Transport);
+        assert_eq!(
+            supervision_step(&config, &transport, false, 1),
+            Supervision::Stop
+        );
+        config.auto_failover = false;
+        assert_eq!(
+            supervision_step(&config, &limited, false, 1),
+            Supervision::Stop
+        );
+        // The gates before ranking: every refusal names its reason.
+        let tried = BTreeSet::new();
+        assert!(failover_blocked_reason(&limited.facts, &tried, true).is_none());
+        let uncertain = TurnFacts {
+            effects: EffectState::Uncertain,
+            ..limited.facts.clone()
+        };
+        assert!(
+            failover_blocked_reason(&uncertain, &tried, true)
+                .unwrap()
+                .contains("could not confirm")
+        );
+        let unjoined = TurnFacts {
+            joined: false,
+            ..limited.facts.clone()
+        };
+        assert!(
+            failover_blocked_reason(&unjoined, &tried, true)
+                .unwrap()
+                .contains("could not confirm")
+        );
+        let attention = TurnFacts {
+            pending_attention: true,
+            ..limited.facts.clone()
+        };
+        assert!(
+            failover_blocked_reason(&attention, &tried, true)
+                .unwrap()
+                .contains("waiting for an answer")
+        );
+        assert!(
+            failover_blocked_reason(&limited.facts, &tried, false)
+                .unwrap()
+                .contains("without a reply")
+        );
+        let sixteen: BTreeSet<_> = (0..16).map(|n| format!("a{n}/claude/m")).collect();
+        assert!(
+            failover_blocked_reason(&limited.facts, &sixteen, true)
+                .unwrap()
+                .contains("16 routes")
+        );
+    }
+
+    /// With no eligible route the terminal still learns which account hit the
+    /// limit, why each other account was passed over, and the earliest reset.
+    #[test]
+    fn no_target_notice_names_the_limit_the_reasons_and_the_earliest_reset() {
+        let now = 1_000_000_000;
+        let model = route_candidate(0).1;
+        let mut view = View {
+            models: vec![model.clone(), route_candidate(1).1],
+            accounts: vec![
+                AccountRow {
+                    remaining_percent: Some(0.0),
+                    resets_at_ms: Some(now + 3 * 3_600_000),
+                    quota_blocked_until_ms: Some(now + 3 * 3_600_000),
+                    ..account_row(0, Provider::Claude)
+                },
+                AccountRow {
+                    quota_blocked_until_ms: Some(now + 2 * 3_600_000 + 5 * 60_000),
+                    ..account_row(1, Provider::Claude)
+                },
+                AccountRow {
+                    authentication_required: true,
+                    ..account_row(2, Provider::Codex)
+                },
+                account_row(3, Provider::Devin),
+                AccountRow {
+                    busy: true,
+                    active_runs: 1,
+                    ..account_row(4, Provider::Claude)
+                },
+                account_row(5, Provider::Claude),
+            ],
+            ..View::default()
+        };
+        let tried: BTreeSet<_> = view
+            .models
+            .iter()
+            .map(|choice| format!("a5/{}", choice.key()))
+            .collect();
+        let limited_accounts = BTreeSet::from([Id::new("a0").unwrap()]);
+        let admitted = BTreeSet::from([Provider::Claude, Provider::Codex]);
+        let credentialed: BTreeSet<_> = view
+            .accounts
+            .iter()
+            .filter(|row| !row.authentication_required)
+            .map(|row| row.id.clone())
+            .collect();
+        let notice = failover_unavailable_notice(&FailoverNoticeInput {
+            view: &view,
+            account: &Id::new("a0").unwrap(),
+            model: &model,
+            failure: Failure::AccountQuota,
+            tried: &tried,
+            limited_accounts: &limited_accounts,
+            admitted: &admitted,
+            credentialed: &credentialed,
+            required_provider: None,
+            run_limit: 1,
+            now,
+        });
+        assert_eq!(
+            notice,
+            "Usage limit on claude · claude/a0 · no other account is able to take the task now · 1 at a usage limit · 1 signed out · 1 on a provider build xcb has not checked · 1 at its run limit · 1 already tried on this task · earliest known reset in ~2h 5m"
+        );
+        for internal in ["lease", "custody", "eligible", "admitted", "credential"] {
+            assert!(!notice.contains(internal), "{notice}");
+        }
+        // A model-specific limit names the model; a pinned provider explains
+        // the accounts outside it; a reset falls back to the account's own
+        // window; a single account says so.
+        let pinned = failover_unavailable_notice(&FailoverNoticeInput {
+            view: &view,
+            account: &Id::new("a0").unwrap(),
+            model: &model,
+            failure: Failure::ModelQuota,
+            tried: &BTreeSet::new(),
+            limited_accounts: &BTreeSet::new(),
+            admitted: &Provider::ALL.into_iter().collect(),
+            credentialed: &credentialed,
+            required_provider: Some(Provider::Devin),
+            run_limit: 1,
+            now,
+        });
+        assert!(pinned.starts_with("Usage limit for Model 0 on claude · claude/a0 · "));
+        assert!(
+            pinned.contains(" · 3 outside the pinned provider"),
+            "{pinned}"
+        );
+        assert!(
+            pinned.contains(" · 1 without a recently seen model"),
+            "{pinned}"
+        );
+        view.accounts.truncate(1);
+        view.accounts[0].quota_blocked_until_ms = None;
+        let alone = failover_unavailable_notice(&FailoverNoticeInput {
+            view: &view,
+            account: &Id::new("a0").unwrap(),
+            model: &model,
+            failure: Failure::AccountQuota,
+            tried: &BTreeSet::new(),
+            limited_accounts: &BTreeSet::new(),
+            admitted: &admitted,
+            credentialed: &credentialed,
+            required_provider: None,
+            run_limit: 1,
+            now,
+        });
+        assert_eq!(
+            alone,
+            "Usage limit on claude · claude/a0 · no other account is signed in · earliest known reset in ~3h 0m"
+        );
+    }
+
     #[test]
     fn quota_availability_preserves_affinity_and_never_reselects_blocked_onboarding_default() {
         let directory = tempfile::tempdir().unwrap();
-        let base = directory.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let workspace = crate::private::directory(&base.join("work")).unwrap();
         let blocked = store
@@ -1516,6 +2835,7 @@ mod tests {
             &config,
             Some(&blocked.id),
             Some(&model.key()),
+            None,
         )
         .unwrap();
         let now = now_ms();
@@ -1540,7 +2860,7 @@ mod tests {
             fallback.id
         );
         assert_eq!(
-            new_session(&store, &workspace, &config, None, Some(&model.key()))
+            new_session(&store, &workspace, &config, None, Some(&model.key()), None)
                 .unwrap()
                 .account,
             fallback.id
@@ -1551,7 +2871,8 @@ mod tests {
                 &workspace,
                 &config,
                 Some(&blocked.id),
-                Some(&model.key())
+                Some(&model.key()),
+                None
             )
             .unwrap_err()
             .to_string()
@@ -1569,7 +2890,7 @@ mod tests {
         );
         store.set_account_enabled(&fallback.id, false).unwrap();
         assert!(
-            new_session(&store, &workspace, &config, None, Some(&model.key()))
+            new_session(&store, &workspace, &config, None, Some(&model.key()), None)
                 .unwrap_err()
                 .to_string()
                 .contains("reported quota reset")
@@ -1590,12 +2911,12 @@ mod tests {
     #[test]
     fn queued_pane_waits_for_its_session_and_reports_start_failure_without_stopping_views() {
         let directory = tempfile::tempdir().unwrap();
-        let base = directory.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let workspace = crate::private::directory(&base.join("workspace")).unwrap();
         let model = ModelChoice {
             provider: Provider::Devin,
-            id: Id::new("swe-test").unwrap(),
+            id: Id::new("synthetic-test").unwrap(),
             label: "Synthetic".into(),
             mode: xcb_core::models::Mode::Fixed,
             resolved: None,
@@ -1639,7 +2960,7 @@ mod tests {
     #[test]
     fn publish_previews_the_pending_route_until_a_session_is_bound() {
         let directory = tempfile::tempdir().unwrap();
-        let base = directory.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let workspace = crate::private::directory(&base.join("workspace")).unwrap();
         let account = store
@@ -1695,7 +3016,7 @@ mod tests {
     async fn disabled_resumed_accounts_restore_drafts_before_any_turn_for_every_provider() {
         for provider in Provider::ALL {
             let directory = tempfile::tempdir().unwrap();
-            let base = directory.path().canonicalize().unwrap();
+            let base = xcb_core::canonical(directory.path()).unwrap();
             let store = Arc::new(Store::open(&base.join("state")).unwrap());
             let workspace = crate::private::directory(&base.join("workspace")).unwrap();
             let account = store.add_account(provider, "Test", 1, None).unwrap();
@@ -1752,7 +3073,21 @@ mod tests {
                 loop {
                     while let Ok(update) = updates.try_recv() {
                         match update {
-                            Update::Draft { text, attachments } => {
+                            Update::SubmitRejected {
+                                id,
+                                context,
+                                text,
+                                attachments,
+                                reason,
+                            } => {
+                                assert_eq!(id.as_str(), "m_retained");
+                                assert_eq!(
+                                    context,
+                                    Some(xcb_core::ui::TranscriptContext::Session(
+                                        session.id.clone()
+                                    ))
+                                );
+                                assert!(reason.contains("selected account is disabled"));
                                 assert_eq!(text, "retained task");
                                 assert_eq!(attachments, vec![image.clone()]);
                                 draft = true;
@@ -1789,7 +3124,7 @@ mod tests {
     #[test]
     fn model_account_prefers_usable_current_then_default_and_preserves_busy_custody() {
         let directory = tempfile::tempdir().unwrap();
-        let state = directory.path().canonicalize().unwrap().join("state");
+        let state = xcb_core::canonical(directory.path()).unwrap().join("state");
         let store = Store::open(&state).unwrap();
         let current = store
             .add_account(Provider::Devin, "Subscription", 1, None)
@@ -1854,7 +3189,7 @@ mod tests {
     #[test]
     fn usable_account_prefers_the_most_remaining_quota() {
         let directory = tempfile::tempdir().unwrap();
-        let state = directory.path().canonicalize().unwrap().join("state");
+        let state = xcb_core::canonical(directory.path()).unwrap().join("state");
         let store = Store::open(&state).unwrap();
         let spent = store
             .add_account(Provider::Claude, "Subscription", 1, None)
@@ -1920,7 +3255,7 @@ mod tests {
     #[test]
     fn choose_model_defaults_to_the_high_effort_non_premium_route() {
         let directory = tempfile::tempdir().unwrap();
-        let state = directory.path().canonicalize().unwrap().join("state");
+        let state = xcb_core::canonical(directory.path()).unwrap().join("state");
         let store = Store::open(&state).unwrap();
         let fixed = |provider: Provider, model: &str, effort: Option<&str>| ModelChoice {
             provider,
@@ -1976,6 +3311,19 @@ mod tests {
             choose_model(&store, Provider::Devin, None, &config)
                 .unwrap()
                 .key(),
+            "devin/gpt-6-astra-max"
+        );
+        // A pinned model that routing.never excludes is refused, not widened.
+        let refused = choose_model(&store, Provider::Devin, Some("devin/swe-2-high"), &config)
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("routing.never"), "{refused}");
+        let mut allowed = Config::default();
+        allowed.routing.never.clear();
+        assert_eq!(
+            choose_model(&store, Provider::Devin, Some("devin/swe-2-high"), &allowed)
+                .unwrap()
+                .key(),
             "devin/swe-2-high"
         );
     }
@@ -1983,7 +3331,7 @@ mod tests {
     #[test]
     fn new_session_prefers_usable_matching_accounts_before_onboarding_fallback() {
         let directory = tempfile::tempdir().unwrap();
-        let base = directory.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
         let workspace = crate::private::directory(&base.join("workspace")).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let unsigned = store
@@ -2001,7 +3349,7 @@ mod tests {
         };
         let model = ModelChoice {
             provider: Provider::Devin,
-            id: Id::new("swe-test").unwrap(),
+            id: Id::new("synthetic-test").unwrap(),
             label: "Synthetic".into(),
             mode: xcb_core::models::Mode::Fixed,
             resolved: None,
@@ -2012,21 +3360,29 @@ mod tests {
             .set_models(Provider::Devin, std::slice::from_ref(&model))
             .unwrap();
         crate::devin::auth::store_token(&store, &connected.id, b"synthetic-token").unwrap();
-        let chosen = new_session(&store, &workspace, &config, None, Some(&model.key())).unwrap();
+        let chosen =
+            new_session(&store, &workspace, &config, None, Some(&model.key()), None).unwrap();
         assert_eq!(chosen.account, connected.id);
         let other_default = Config {
             default_account: Some(claude.id),
             ..config.clone()
         };
         assert_eq!(
-            new_session(&store, &workspace, &other_default, None, Some(&model.key()))
-                .unwrap()
-                .account,
+            new_session(
+                &store,
+                &workspace,
+                &other_default,
+                None,
+                Some(&model.key()),
+                None
+            )
+            .unwrap()
+            .account,
             connected.id
         );
         let run = store.prepare_probe(&connected.id, None, 4).unwrap();
         assert_eq!(
-            new_session(&store, &workspace, &config, None, Some(&model.key()))
+            new_session(&store, &workspace, &config, None, Some(&model.key()), None)
                 .unwrap()
                 .account,
             unsigned.id
@@ -2035,7 +3391,7 @@ mod tests {
         store.settle(&run, State::Idle, 5).unwrap();
         crate::devin::auth::store_token(&store, &unsigned.id, b"synthetic-token").unwrap();
         assert_eq!(
-            new_session(&store, &workspace, &config, None, Some(&model.key()))
+            new_session(&store, &workspace, &config, None, Some(&model.key()), None)
                 .unwrap()
                 .account,
             unsigned.id
@@ -2065,7 +3421,7 @@ mod tests {
     #[tokio::test]
     async fn idle_terminal_observes_other_terminal_state_without_changing_sessions() {
         let directory = tempfile::tempdir().unwrap();
-        let state = directory.path().canonicalize().unwrap().join("state");
+        let state = xcb_core::canonical(directory.path()).unwrap().join("state");
         let store = Arc::new(Store::open(&state).unwrap());
         let other = Store::open(&state).unwrap();
         let account = store
@@ -2073,16 +3429,19 @@ mod tests {
             .unwrap();
         let model = ModelChoice {
             provider: Provider::Devin,
-            id: Id::new("swe-test").unwrap(),
+            id: Id::new("synthetic-test").unwrap(),
             label: "Synthetic".into(),
             mode: xcb_core::models::Mode::Fixed,
             resolved: None,
             effort: None,
             observed_at_ms: 1,
         };
-        let workspace =
-            crate::private::directory(&directory.path().canonicalize().unwrap().join("workspace"))
-                .unwrap();
+        let workspace = crate::private::directory(
+            &xcb_core::canonical(directory.path())
+                .unwrap()
+                .join("workspace"),
+        )
+        .unwrap();
         let session = store
             .create_session(&account.id, model.clone(), &workspace, 2)
             .unwrap();
@@ -2381,5 +3740,53 @@ mod tests {
             .await
             .unwrap()
         );
+    }
+
+    /// The kernel's own publish cadence is the single refresh path: a config
+    /// written by another terminal lands on it with no `Intent::Refresh` in
+    /// flight, and a quiet window never publishes twice on the same change.
+    #[tokio::test]
+    async fn the_kernel_republishes_config_writes_without_a_client_refresh() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = xcb_core::canonical(directory.path()).unwrap().join("state");
+        let store = Arc::new(Store::open(&state).unwrap());
+        let workspace = crate::private::directory(
+            &xcb_core::canonical(directory.path())
+                .unwrap()
+                .join("workspace"),
+        )
+        .unwrap();
+        let (commands, input) = sync_channel(8);
+        let (output, updates) = sync_channel(64);
+        let task = tokio::spawn(serve(store.clone(), workspace, None, input, output));
+        view_matching(&updates, |view| !view.reduced_motion).await;
+
+        // A sibling terminal writes config.json; no intent is sent.
+        let (mut fresh, revision) = Config::load(&state).unwrap();
+        fresh.reduced_motion = true;
+        fresh.save(&state, revision.as_deref()).unwrap();
+        view_matching(&updates, |view| view.reduced_motion).await;
+
+        // The quiet window that follows publishes only on the ~1s idle
+        // cadence: roughly once, never a duplicate burst.
+        tokio::time::sleep(Duration::from_millis(1_300)).await;
+        let mut views = 0usize;
+        while let Ok(update) = updates.try_recv() {
+            assert!(
+                matches!(update, Update::View(_)),
+                "idle polling publishes only full views"
+            );
+            views += 1;
+        }
+        assert!(
+            views <= 2,
+            "a quiet window must not duplicate publishes: {views}"
+        );
+        commands.send(Intent::Quit).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 }

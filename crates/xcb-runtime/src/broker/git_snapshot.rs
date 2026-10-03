@@ -1,21 +1,28 @@
 //! Raw Git inputs for the trusted guest projector, never for the command worker.
 //! The caller holds the workspace coordination lock. No Git process runs here.
+#[cfg(unix)]
 use super::io;
+#[cfg(unix)]
 use crate::{Error, Result, digest, private};
+#[cfg(unix)]
 use base64::{Engine, engine::general_purpose::STANDARD};
+#[cfg(unix)]
 use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+#[cfg(unix)]
 use std::{
     collections::BTreeMap,
     fs::File,
     io::Read,
     os::unix::fs::MetadataExt,
-    path::{Component, Path, PathBuf},
+    path::{Component, Path},
 };
 
 pub const GIT_BYTE_LIMIT: usize = 32 * 1024 * 1024;
 pub const GIT_FILE_LIMIT: usize = 2 * 1024 * 1024;
 pub const GIT_ENTRY_LIMIT: usize = 4096;
+#[cfg(unix)]
 const DEPTH_LIMIT: usize = 64;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -51,43 +58,31 @@ pub struct GitAssociation {
     pub common_dir: PathBuf,
 }
 
-type Stamp = (u64, u64, u64, u32, u32, u64, i64, i64, i64, i64);
+/// Inode identity guard for the source files a snapshot depends on; a change
+/// to any tracked field means the source moved under the read.
+#[cfg(unix)]
+type Stamp = xcb_core::FileIdentity;
+#[cfg(unix)]
 fn stamp(m: &std::fs::Metadata) -> Stamp {
-    (
-        m.dev(),
-        m.ino(),
-        m.len(),
-        m.mode(),
-        m.uid(),
-        m.nlink(),
-        m.mtime(),
-        m.mtime_nsec(),
-        m.ctime(),
-        m.ctime_nsec(),
-    )
+    Stamp::of(m)
 }
+#[cfg(unix)]
 fn unsupported() -> Error {
     Error::Unavailable(
         "Git inspection requires a bounded ordinary SHA-1 repository without split/sparse indexes, submodules, or alternate object stores",
     )
 }
+#[cfg(unix)]
 fn changed() -> Error {
     Error::Conflict("Git source changed during command snapshot; retry after Git finishes")
 }
+#[cfg(unix)]
 fn path_parts(path: &str) -> Result<Vec<&str>> {
-    let parts: Vec<_> = path.split('/').collect();
-    if path.is_empty()
-        || path.len() > 4096
-        || parts.len() > DEPTH_LIMIT
-        || parts
-            .iter()
-            .any(|p| p.is_empty() || *p == "." || *p == "..")
-        || path.chars().any(char::is_control)
-    {
-        return Err(unsupported());
-    }
-    Ok(parts)
+    xcb_core::relative_parts(path)
+        .filter(|parts| parts.len() <= DEPTH_LIMIT)
+        .ok_or_else(unsupported)
 }
+#[cfg(unix)]
 fn open_dir(parent: &File, name: &str) -> Result<File> {
     Ok(File::from(
         rustix::fs::openat(
@@ -99,17 +94,14 @@ fn open_dir(parent: &File, name: &str) -> Result<File> {
         .map_err(io)?,
     ))
 }
+#[cfg(unix)]
 fn physical(path: &Path) -> Result<()> {
-    if !path.is_absolute()
-        || path
-            .components()
-            .any(|p| !matches!(p, Component::RootDir | Component::Normal(_)))
-        || path.canonicalize()? != path
-    {
+    if !xcb_core::absolute_clean(path) || xcb_core::canonical(path)? != path {
         return Err(Error::PrivateState);
     }
     Ok(())
 }
+#[cfg(unix)]
 fn physical_dir(path: &Path) -> Result<File> {
     physical(path)?;
     let mut fd = File::open("/")?;
@@ -120,12 +112,14 @@ fn physical_dir(path: &Path) -> Result<File> {
     }
     Ok(fd)
 }
+#[cfg(unix)]
 struct Tree {
     root: File,
     path: PathBuf,
     owner: u32,
     guards: Vec<(String, Stamp, bool)>,
 }
+#[cfg(unix)]
 impl Tree {
     fn new(root: File, path: PathBuf, owner: u32) -> Result<Self> {
         let metadata = root.metadata()?;
@@ -251,11 +245,14 @@ impl Tree {
         Ok(())
     }
 }
+#[cfg(unix)]
 #[derive(Default)]
+#[cfg(unix)]
 struct Budget {
     entries: usize,
     bytes: usize,
 }
+#[cfg(unix)]
 impl Budget {
     fn visit(&mut self) -> Result<()> {
         self.entries += 1;
@@ -272,19 +269,15 @@ impl Budget {
         Ok(())
     }
 }
+#[cfg(unix)]
 fn hex40(value: &str) -> bool {
-    value.len() == 40
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        && value.bytes().any(|b| b != b'0')
+    value.len() == 40 && xcb_core::hex_lower(value) && value.bytes().any(|b| b != b'0')
 }
+#[cfg(unix)]
 fn hex_name(value: &str, length: usize) -> bool {
-    value.len() == length
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    value.len() == length && xcb_core::hex_lower(value)
 }
+#[cfg(unix)]
 fn reference(value: &str) -> Result<()> {
     let parts = path_parts(value)?;
     if !value.starts_with("refs/")
@@ -302,6 +295,7 @@ fn reference(value: &str) -> Result<()> {
     }
     Ok(())
 }
+#[cfg(unix)]
 fn line(bytes: &[u8]) -> Result<&str> {
     let value = std::str::from_utf8(bytes).map_err(|_| unsupported())?;
     let value = value.strip_suffix('\n').unwrap_or(value);
@@ -310,8 +304,9 @@ fn line(bytes: &[u8]) -> Result<&str> {
     }
     Ok(value)
 }
+#[cfg(unix)]
 fn lexical(base: &Path, value: &str) -> Result<PathBuf> {
-    if value.is_empty() || value.len() > 4096 || value.chars().any(char::is_control) {
+    if !xcb_core::bounded_path(value) {
         return Err(unsupported());
     }
     let mut path = if Path::new(value).is_absolute() {
@@ -333,6 +328,7 @@ fn lexical(base: &Path, value: &str) -> Result<PathBuf> {
     }
     Ok(path)
 }
+#[cfg(unix)]
 fn selected(
     tree: &mut Tree,
     path: &str,
@@ -346,6 +342,7 @@ fn selected(
     }
     Ok(())
 }
+#[cfg(unix)]
 fn refs(
     tree: &mut Tree,
     prefix: &str,
@@ -371,6 +368,7 @@ fn refs(
     }
     Ok(())
 }
+#[cfg(unix)]
 fn objects(
     tree: &mut Tree,
     budget: &mut Budget,
@@ -427,6 +425,7 @@ fn objects(
     }
     Ok(())
 }
+#[cfg(unix)]
 fn index(bytes: &[u8]) -> Result<()> {
     // Git verifies the SHA-1 checksum in the trusted projector. This parser
     // admits only layouts whose filtering preserves staged/unstaged semantics.
@@ -492,6 +491,7 @@ fn index(bytes: &[u8]) -> Result<()> {
     }
     Ok(())
 }
+#[cfg(unix)]
 fn head_id(data: &BTreeMap<String, Vec<u8>>) -> Result<Option<String>> {
     let head = line(data.get("HEAD").ok_or_else(unsupported)?)?;
     if hex40(head) {
@@ -537,6 +537,7 @@ fn head_id(data: &BTreeMap<String, Vec<u8>>) -> Result<Option<String>> {
 
 /// Called under the same coordination lock as the normal file snapshot.
 /// Never expose this result in tool output or mount it in the worker namespace.
+#[cfg(unix)]
 pub(crate) fn capture(
     directory: &File,
     workspace: &Path,
@@ -685,5 +686,5 @@ pub(crate) fn capture(
     }))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

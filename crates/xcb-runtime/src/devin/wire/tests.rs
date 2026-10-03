@@ -26,15 +26,19 @@ fn protocol() -> DevinProtocol {
     p.ready = true;
     p.prompt_id = Some(7);
     p.mcp_initialized = true;
-    p.listed = true;
     p
 }
 fn declaration(id: &str, name: &str, args: Value) -> Value {
     let qualified = format!("mcp__xcb__{name}");
     json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fixture-session","update":{"sessionUpdate":"tool_call","toolCallId":id,"rawInput":args,"_meta":{"cognition.ai/toolName":qualified,"cognition.ai/inferenceToolName":qualified,"cognition.ai/eventType":"mcp_tool_call"}}}})
 }
+/// The tool permission choices Devin offers: allow once, allow for the
+/// session, and reject once.
 fn permission(callback: &str, call: &str) -> Value {
-    json!({"jsonrpc":"2.0","id":callback,"method":"session/request_permission","params":{"sessionId":"fixture-session","toolCall":{"toolCallId":call},"options":[{"optionId":"allow_once","kind":"allow_once"},{"optionId":"allow_session","kind":"allow_always"}]}})
+    json!({"jsonrpc":"2.0","id":callback,"method":"session/request_permission","params":{"sessionId":"fixture-session","toolCall":{"toolCallId":call},"options":[{"optionId":"allow_once","kind":"allow_once"},{"optionId":"allow_session","kind":"allow_always"},{"optionId":"reject_once","kind":"reject_once"}]}})
+}
+fn rejected() -> Value {
+    json!({"outcome":"selected","optionId":"reject_once"})
 }
 fn mcp(id: u64, name: &str, args: Value) -> Request {
     let (reply, _) = oneshot::channel();
@@ -57,15 +61,18 @@ fn transition_state(p: &DevinProtocol) -> Value {
         "bridge": p.bridge.is_some(), "session": p.session,
         "nextId": p.next_id, "promptId": p.prompt_id, "instructions": p.instructions,
         "ready": p.ready, "announced": p.announced, "completed": p.completed,
+        "mode": p.mode, "modeConfirmed": p.mode_confirmed,
         "text": p.text, "outputTokens": p.output_tokens,
         "calls": p.calls.iter().map(|(id, c)| json!({"id": id, "name": c.name,
-            "arguments": c.arguments, "approved": c.approved, "bridged": c.bridged,
+            "arguments": c.arguments, "approved": c.approved, "denied": c.denied, "bridged": c.bridged,
             "replied": c.replied, "finished": c.finished})).collect::<Vec<_>>(),
         "pending": p.pending.iter().map(|(id, p)| json!({"id": id, "rpcId": p.rpc_id,
             "replyClosed": p.reply.is_closed()})).collect::<Vec<_>>(),
         "callbackIds": p.callback_ids, "mcpIds": p.mcp_ids, "brokerNames": p.broker_names,
         "mcpInitialized": p.mcp_initialized, "mcpProposedVersion": p.mcp_proposed_version,
-        "mcpMetadataSeen": p.mcp_metadata_seen, "listed": p.listed
+        "mcpMetadataSeen": p.mcp_metadata_seen,
+        "unexpectedNotification": p.unexpected_notification,
+        "compactionObservations": p.compaction_observations
     })
 }
 
@@ -196,8 +203,9 @@ fn extension_compatibility_retains_core_update_and_effect_guards() {
     )
     .unwrap();
     let (events, replies) = accept_frame(&mut p, permission("deny", "native")).unwrap();
-    assert!(matches!(events.as_slice(), [Event::Attention]));
-    assert_eq!(replies[0]["result"]["outcome"]["outcome"], "cancelled");
+    // The model hears the one-time reject and keeps going; no one is paged.
+    assert!(events.is_empty());
+    assert_eq!(replies[0]["result"]["outcome"], rejected());
     assert!(
         accept_frame(
             &mut p,
@@ -252,9 +260,9 @@ fn prompt_prefix_matches_the_enabled_tool_surface() {
             )
             .unwrap();
         let expected = if tools {
-            "Host instructions.\n\nUse only the xcb MCP server for workspace access. Native tools have no workspace authority. List the xcb tools before calling them.\n\nApplication prompt."
+            format!("Host instructions.\n\n{TOOL_GUIDE}\n\nApplication prompt.")
         } else {
-            "Host instructions.\n\nApplication prompt."
+            "Host instructions.\n\nApplication prompt.".into()
         };
         assert_eq!(
             wire,
@@ -268,10 +276,83 @@ fn prompt_prefix_matches_the_enabled_tool_surface() {
 }
 
 #[test]
+fn tool_guide_names_real_broker_tools_with_their_required_arguments() {
+    let guide = TOOL_GUIDE;
+    assert!(guide.contains("mcp_call_tool") && guide.contains("server_name \"xcb\""));
+    // Asking the model to list tools first led Devin to an overflow file.
+    assert!(!guide.contains("mcp_list_tools") && !guide.contains("List the xcb tools"));
+    assert!(guide.contains("Native file, shell and web tools are blocked"));
+    let descriptors = broker::descriptors();
+    let mut named = 0;
+    for entry in guide.split(';') {
+        let Some((head, rest)) = entry.split_once(" {") else {
+            continue;
+        };
+        let name = head.rsplit(' ').next().unwrap();
+        let arguments: Vec<&str> = rest.split('}').next().unwrap().split(", ").collect();
+        let descriptor = descriptors
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap_or_else(|| panic!("{name} is not a broker tool"));
+        assert_eq!(
+            descriptor["inputSchema"]["required"],
+            json!(arguments),
+            "{name} lists the wrong required arguments"
+        );
+        named += 1;
+    }
+    assert_eq!(named, 8, "the guide covers every workspace tool");
+    assert!(
+        descriptors
+            .iter()
+            .filter(|tool| tool["name"].as_str().unwrap().starts_with("workspace_"))
+            .all(|tool| guide.contains(&format!("{} {{", tool["name"].as_str().unwrap())))
+    );
+}
+
+#[test]
+fn recognized_compaction_retains_validation_before_extension_fallback() {
+    for tools in [false, true] {
+        let mut p = protocol();
+        p.options.tools = tools;
+        let before = transition_state(&p);
+        let (events, replies) = accept_frame(&mut p, compaction("started", None)).unwrap();
+        assert!(events.is_empty() && replies.is_empty());
+        let mut after = transition_state(&p);
+        assert_eq!(
+            after["compactionObservations"],
+            json!([{"status":"started","summary_bytes":null,"session_matched":true}])
+        );
+        after["compactionObservations"] = before["compactionObservations"].clone();
+        assert_eq!(after, before);
+        let mut foreign = compaction("started", None);
+        foreign["params"]["sessionId"] = json!("foreign-session");
+        for notification in [
+            compaction("future-status", None),
+            compaction("completed", None),
+            foreign,
+        ] {
+            let before = transition_state(&p);
+            assert!(accept_frame(&mut p, notification).is_err());
+            assert_eq!(transition_state(&p), before);
+        }
+    }
+}
+
+#[test]
+fn permission_before_declaration_stops_the_protocol() {
+    let mut p = protocol();
+    assert!(matches!(
+        p.accept(permission("unknown", "orphan")),
+        Err(Error::Protocol("Devin permission before declaration"))
+    ));
+    assert!(p.calls.is_empty());
+    assert!(p.pending.is_empty());
+}
+
+#[test]
 fn only_an_exact_preceding_broker_declaration_receives_one_approval() {
     let mut p = protocol();
-    let (_, reply) = p.accept(permission("unknown", "orphan")).unwrap();
-    assert_eq!(reply[0]["result"]["outcome"]["outcome"], "cancelled");
     p.accept(declaration("call-1", "workspace_read", json!({"path":"a"})))
         .unwrap();
     let (_, reply) = p.accept(permission("permission-1", "call-1")).unwrap();
@@ -280,8 +361,82 @@ fn only_an_exact_preceding_broker_declaration_receives_one_approval() {
         json!({"outcome":"selected","optionId":"allow_once"})
     );
     let (_, reply) = p.accept(permission("permission-2", "call-1")).unwrap();
-    assert_eq!(reply[0]["result"]["outcome"]["outcome"], "cancelled");
+    assert_eq!(reply[0]["result"]["outcome"], rejected());
     assert!(p.accept(permission("permission-2", "call-1")).is_err());
+}
+
+#[test]
+fn a_denied_call_selects_the_offered_one_time_reject_and_never_cancels_the_turn() {
+    let native = |id: &str, name: &str| {
+        let mut value = declaration(id, "workspace_read", json!({"file_path":"/private/secret"}));
+        value["params"]["update"]["_meta"] = json!({"cognition.ai/inferenceToolName":name});
+        value
+    };
+    let request = |callback: &str, call: &str, options: Value| {
+        let mut value = permission(callback, call);
+        value["params"]["options"] = options;
+        value
+    };
+    let mut p = protocol();
+    for (index, name) in ["read", "edit", "write", "exec", "webfetch"]
+        .iter()
+        .enumerate()
+    {
+        let call = format!("native-{index}");
+        p.accept(native(&call, name)).unwrap();
+        let (events, replies) = p
+            .accept(permission(&format!("deny-{index}"), &call))
+            .unwrap();
+        assert!(events.is_empty(), "{name}");
+        assert_eq!(replies[0]["result"]["outcome"], rejected(), "{name}");
+        assert!(!p.calls[&call].approved, "{name}");
+        assert!(!p.completed, "{name}");
+    }
+    // Devin's network prompt names its reject option differently; the kind,
+    // not the name, selects it.
+    p.accept(native("fetch", "webfetch")).unwrap();
+    let (_, replies) = p
+        .accept(request(
+            "network",
+            "fetch",
+            json!([{"optionId":"net_allow_once","kind":"allow_once"},{"optionId":"net_deny","kind":"reject_once"}]),
+        ))
+        .unwrap();
+    assert_eq!(
+        replies[0]["result"]["outcome"],
+        json!({"outcome":"selected","optionId":"net_deny"})
+    );
+    // A remembered rejection is never chosen, and without a one-time reject
+    // the request falls back to ACP's cancelled outcome.
+    p.accept(native("remembered", "exec")).unwrap();
+    let (events, replies) = p
+        .accept(request(
+            "no-reject",
+            "remembered",
+            json!([{"optionId":"allow_once","kind":"allow_once"},{"optionId":"reject_always","kind":"reject_always"}]),
+        ))
+        .unwrap();
+    assert!(matches!(events.as_slice(), [Event::Attention]));
+    assert_eq!(
+        replies[0]["result"]["outcome"],
+        json!({"outcome":"cancelled"})
+    );
+    // A broker call is still allowed only once, and a native tool that
+    // reports completion after its rejection is still a protocol failure.
+    p.accept(declaration("broker", "workspace_read", json!({"path":"a"})))
+        .unwrap();
+    let (events, replies) = p.accept(permission("allow", "broker")).unwrap();
+    assert!(events.is_empty());
+    assert_eq!(
+        replies[0]["result"]["outcome"],
+        json!({"outcome":"selected","optionId":"allow_once"})
+    );
+    let (_, replies) = p.accept(permission("again", "broker")).unwrap();
+    assert_eq!(replies[0]["result"]["outcome"], rejected());
+    assert!(
+        p.accept(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fixture-session","update":{"sessionUpdate":"tool_call_update","toolCallId":"native-3","status":"completed"}}}))
+            .is_err()
+    );
 }
 
 #[test]
@@ -336,6 +491,197 @@ fn bridge_requires_unique_permission_and_matching_arguments() {
 }
 
 #[test]
+fn production_mode_requires_callback_approval_and_keeps_rejection_sticky() {
+    let mut p = protocol();
+    assert_eq!(p.target_mode(), "accept-edits");
+    let args = json!({"path":"a"});
+    p.accept(declaration("call-1", "workspace_read", args.clone()))
+        .unwrap();
+    assert!(p.mcp(mcp(1, "workspace_read", args.clone())).is_err());
+    let mut callback = permission("denial", "call-1");
+    callback["params"]["options"] = json!([{"optionId":"reject_once","kind":"reject_once"}]);
+    let (_, reply) = p.accept(callback).unwrap();
+    assert_eq!(reply[0]["result"]["outcome"], rejected());
+    let (_, retry) = p.accept(permission("retry", "call-1")).unwrap();
+    assert_eq!(retry[0]["result"]["outcome"], rejected());
+    assert!(p.calls["call-1"].denied);
+    assert!(p.mcp(mcp(2, "workspace_read", args)).is_err());
+}
+
+#[test]
+fn bypass_bridge_requires_one_live_exact_declaration_and_consumes_it_once() {
+    let mut p = protocol();
+    p.candidate_bypass = true;
+    p.mode = "bypass";
+    p.mode_confirmed = true;
+    let args = json!({"path":"a"});
+    assert!(p.mcp(mcp(1, "workspace_read", args.clone())).is_err());
+    p.accept(declaration("call-1", "workspace_read", args.clone()))
+        .unwrap();
+    assert!(
+        p.mcp(mcp(2, "workspace_read", json!({"path":"b"})))
+            .is_err()
+    );
+    assert!(p.mcp(mcp(3, "workspace_remove", args.clone())).is_err());
+    let events = p.mcp(mcp(4, "workspace_read", args.clone())).unwrap();
+    assert!(matches!(&events[..], [Event::Tool { id, name, arguments }]
+        if id == "call-1" && name == "workspace_read" && arguments == &args));
+    assert!(p.calls["call-1"].approved && p.calls["call-1"].bridged);
+    assert!(p.mcp(mcp(5, "workspace_read", args)).is_err());
+}
+
+#[test]
+fn bypass_bridge_rejects_denied_ambiguous_finished_and_unconfirmed_calls() {
+    for case in ["denied", "ambiguous", "finished", "unconfirmed"] {
+        let mut p = protocol();
+        p.candidate_bypass = true;
+        p.mode = "bypass";
+        p.mode_confirmed = true;
+        let args = json!({"path":"a"});
+        p.accept(declaration("call-1", "workspace_read", args.clone()))
+            .unwrap();
+        match case {
+            "denied" => {
+                let mut callback = permission("denial", "call-1");
+                callback["params"]["options"] =
+                    json!([{"optionId":"reject_once","kind":"reject_once"}]);
+                let (_, reply) = p.accept(callback).unwrap();
+                assert_eq!(reply[0]["result"]["outcome"], rejected());
+                assert!(p.calls["call-1"].denied);
+                let (_, retry) = p.accept(permission("retry", "call-1")).unwrap();
+                assert_eq!(retry[0]["result"]["outcome"], rejected());
+            }
+            "ambiguous" => {
+                p.accept(declaration("call-2", "workspace_read", args.clone()))
+                    .unwrap();
+            }
+            "finished" => p.calls.get_mut("call-1").unwrap().finished = true,
+            "unconfirmed" => p.mode_confirmed = false,
+            _ => unreachable!(),
+        }
+        assert!(p.mcp(mcp(1, "workspace_read", args)).is_err(), "{case}");
+    }
+}
+
+#[test]
+fn bypass_rejects_completed_native_effects_and_mode_drift() {
+    let mut p = protocol();
+    p.candidate_bypass = true;
+    p.mode = "bypass";
+    p.mode_confirmed = true;
+    let mut native = declaration(
+        "native",
+        "workspace_read",
+        json!({"url":"https://example.invalid"}),
+    );
+    native["params"]["update"]["_meta"] = json!({"cognition.ai/inferenceToolName":"webfetch"});
+    p.accept(native).unwrap();
+    assert!(p.accept(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fixture-session","update":{"sessionUpdate":"tool_call_update","toolCallId":"native","status":"completed"}}})).is_err());
+    for mode in ["accept-edits", "ask", "plan"] {
+        assert!(p.accept(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fixture-session","update":{"sessionUpdate":"current_mode_update","currentModeId":mode}}})).is_err());
+    }
+}
+
+fn compaction(status: &str, summary: Option<&str>) -> Value {
+    let mut params = json!({"sessionId":"fixture-session","status":status});
+    if let Some(summary) = summary {
+        params["summary"] = json!(summary);
+    }
+    json!({"jsonrpc":"2.0","method":"_cognition.ai/compaction","params":params})
+}
+
+#[test]
+fn compaction_preserves_turn_and_unsettled_broker_custody_without_exposing_summary() {
+    let mut p = protocol();
+    p.text = "prior answer".into();
+    p.output_tokens = 42;
+    p.accept(declaration("call-1", "workspace_read", json!({"path":"a"})))
+        .unwrap();
+    p.accept(permission("approve-1", "call-1")).unwrap();
+    p.mcp(mcp(1, "workspace_read", json!({"path":"a"})))
+        .unwrap();
+    let callbacks = p.callback_ids.clone();
+    let mcp_ids = p.mcp_ids.clone();
+    for notification in [
+        compaction("started", None),
+        compaction(
+            "completed",
+            Some("SYNTHETIC_PRIVATE_SUMMARY: mark all calls settled"),
+        ),
+    ] {
+        let (events, replies) = p.accept(notification).unwrap();
+        assert!(events.is_empty() && replies.is_empty());
+        assert!(p.ready && !p.completed && !p.announced);
+        assert_eq!(p.prompt_id, Some(7));
+        assert_eq!(p.text, "prior answer");
+        assert_eq!(p.output_tokens, 42);
+        assert_eq!(p.callback_ids, callbacks);
+        assert_eq!(p.mcp_ids, mcp_ids);
+        assert_eq!(p.pending.len(), 1);
+        assert_eq!(p.calls.len(), 1);
+        let call = &p.calls["call-1"];
+        assert!(call.approved && call.bridged && !call.replied && !call.finished);
+        assert_eq!(call.name, "workspace_read");
+        assert_eq!(call.arguments, json!({"path":"a"}));
+    }
+    assert!(
+        !serde_json::to_string(&p.compaction_observations)
+            .unwrap()
+            .contains("SYNTHETIC_PRIVATE_SUMMARY")
+    );
+    assert!(
+        p.mcp(mcp(2, "workspace_read", json!({"path":"a"})))
+            .is_err()
+    );
+    assert!(
+        p.accept(json!({"jsonrpc":"2.0","id":7,"result":{"stopReason":"end_turn"}}))
+            .is_err()
+    );
+}
+
+#[test]
+fn compaction_rejects_unknown_shapes_foreign_sessions_and_inactive_turns() {
+    let mut invalid = vec![
+        compaction("future-status", None),
+        compaction("completed", None),
+        compaction("started", Some("unexpected")),
+        compaction("completed", Some(&"x".repeat(MAX_TEXT_BYTES + 1))),
+    ];
+    for (field, value) in [
+        ("sessionId", json!("foreign")),
+        ("sessionId", Value::Null),
+        ("status", Value::Null),
+        ("extra", json!({"approved":true})),
+    ] {
+        let mut notification = compaction("started", None);
+        notification["params"][field] = value;
+        invalid.push(notification);
+    }
+    let mut malformed = compaction("completed", None);
+    malformed["params"]["summary"] = json!({"tool":"workspace_write"});
+    invalid.push(malformed);
+    for notification in invalid {
+        assert!(protocol().accept(notification).is_err());
+    }
+    for state in 0..4 {
+        let mut p = protocol();
+        match state {
+            0 => p.ready = false,
+            1 => p.completed = true,
+            2 => p.prompt_id = None,
+            _ => p.session = None,
+        }
+        assert!(p.accept(compaction("started", None)).is_err());
+    }
+    let mut p = protocol();
+    let mut request = compaction("started", None);
+    request["id"] = json!(99);
+    let (_, replies) = p.accept(request).unwrap();
+    assert_eq!(replies[0]["error"]["code"], -32601);
+    assert!(p.compaction_observations.is_empty());
+}
+
+#[test]
 fn identical_concurrent_calls_are_ambiguous_and_cannot_execute() {
     let mut p = protocol();
     for i in 1..=2 {
@@ -361,7 +707,7 @@ fn completed_native_notebook_is_never_treated_as_brokered_work() {
     native["params"]["update"]["_meta"] = json!({"cognition.ai/inferenceToolName":"notebook_read"});
     p.accept(native).unwrap();
     let (_, reply) = p.accept(permission("deny", "native")).unwrap();
-    assert_eq!(reply[0]["result"]["outcome"]["outcome"], "cancelled");
+    assert_eq!(reply[0]["result"]["outcome"], rejected());
     assert!(p.accept(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fixture-session","update":{"sessionUpdate":"tool_call_update","toolCallId":"native","status":"completed"}}})).is_err());
 }
 
@@ -385,6 +731,106 @@ fn models_are_bounded_deduplicated_and_provider_scoped() {
         .unwrap()
         .push(row);
     assert!(parse_models(&duplicate, 1).is_err());
+}
+
+#[tokio::test]
+async fn fresh_catalog_precedes_model_setter_and_preserves_exact_selection() {
+    use std::time::Duration;
+    use tokio::process::Command;
+
+    for (offered, candidate_bypass, confirmed) in [
+        (false, false, false),
+        (true, false, false),
+        (true, true, true),
+        (true, true, false),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("requests.jsonl");
+        let script = root.path().join("fixture.sh");
+        std::fs::write(&script, "log=$1\nshift\nfor reply in \"$@\"; do\n IFS= read -r line || exit 1\n printf '%s\\n' \"$line\" >> \"$log\"\n printf '%s\\n' \"$reply\"\ndone\nwhile IFS= read -r line; do printf '%s\\n' \"$line\" >> \"$log\"; done\n").unwrap();
+        let options = |current: &str| {
+            json!({"configOptions":[
+                {"id":"model","type":"select","currentValue":current,"options":if offered {
+                    json!([{"value":"swe-2-medium","name":"Selected"},{"value":"swe-2-high","name":"Current"}])
+                } else { json!([{"value":"swe-2-high","name":"Current"}]) }},
+                {"id":"mode","type":"select","currentValue":"accept-edits"}
+            ]})
+        };
+        let mut initial = options("swe-2-high");
+        initial["sessionId"] = json!("fresh-session");
+        let mut command = Command::new("/bin/sh");
+        command.arg(&script).arg(&log)
+            .arg(json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentInfo":{"name":"affogato"}}}).to_string())
+            .arg(json!({"jsonrpc":"2.0","id":2,"result":initial}).to_string());
+        if offered {
+            let acknowledgement = json!({"jsonrpc":"2.0","id":4,"result":{}});
+            let reply = if confirmed {
+                format!(
+                    "{}\n{}",
+                    json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fresh-session","update":{"sessionUpdate":"current_mode_update","currentModeId":"bypass"}}}),
+                    acknowledgement
+                )
+            } else {
+                acknowledgement.to_string()
+            };
+            command
+                .arg(json!({"jsonrpc":"2.0","id":3,"result":options("swe-2-medium")}).to_string())
+                .arg(reply);
+        }
+        let mut process = StreamProcess::spawn(command).unwrap();
+        let mut selected = protocol().options;
+        selected.model.id = Id::new("swe-2-medium").unwrap();
+        selected.tools = false;
+        let mut codec = DevinProtocol::new(selected, None).unwrap();
+        codec.candidate_bypass = candidate_bypass;
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            codec.initialize(&mut process, "fixture"),
+        )
+        .await;
+        assert!(process.join().await);
+        let result = result.unwrap();
+        if offered && candidate_bypass && !confirmed {
+            assert!(matches!(
+                result,
+                Err(Error::Protocol("Devin mode acknowledgment"))
+            ));
+        } else {
+            let models = result.unwrap();
+            assert_eq!(
+                models
+                    .iter()
+                    .any(|model| model.id.as_str() == "swe-2-medium"),
+                offered
+            );
+        }
+        assert!(!codec.ready);
+        assert!(codec.prompt_id.is_none());
+        let requests: Vec<Value> = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(requests.len(), if offered { 4 } else { 2 });
+        assert_eq!(requests[1]["method"], "session/new");
+        if offered {
+            assert_eq!(requests[2]["method"], "session/set_config_option");
+            assert_eq!(
+                requests[2]["params"],
+                json!({"sessionId":"fresh-session","configId":"model","value":"swe-2-medium"})
+            );
+            assert_eq!(requests[3]["method"], "session/set_mode");
+            assert_eq!(
+                requests[3]["params"]["modeId"],
+                if candidate_bypass {
+                    "bypass"
+                } else {
+                    "accept-edits"
+                }
+            );
+            assert_eq!(codec.mode_confirmed, !candidate_bypass || confirmed);
+        }
+    }
 }
 
 #[test]
@@ -468,7 +914,6 @@ fn mcp_negotiates_only_supported_versions_and_retains_tool_authority() {
     ] {
         let mut p = protocol();
         p.mcp_initialized = false;
-        p.listed = false;
         let (reply, mut receive) = oneshot::channel();
         let events = p.mcp(Request {
             value: json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":proposed,"capabilities":{"sampling":{},"roots":{"listChanged":true}},"clientInfo":{"name":"fixture","version":"1"}}}),
@@ -744,4 +1189,156 @@ fn resource_limit_failures_keep_only_fixed_diagnostics_and_exact_identity() {
             })
         ));
     }
+}
+
+#[test]
+fn delta_bursts_beyond_legacy_frame_fixtures_are_streamed_load() {
+    // Streaming emits one frame per content chunk; the codec backstop sits
+    // far above a long turn, so 16,384+ deltas are ordinary load.
+    let mut p = protocol();
+    let frame = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fixture-session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"x"}}}});
+    let bytes = serde_json::to_vec(&frame).unwrap();
+    let mut deltas = 0usize;
+    for _ in 0..17_000 {
+        let value = p.envelope(&bytes).unwrap();
+        let (events, replies) = p.accept(value).unwrap();
+        assert!(replies.is_empty());
+        deltas += events
+            .iter()
+            .filter(|event| matches!(event, Event::Delta { .. }))
+            .count();
+    }
+    assert_eq!(deltas, 17_000);
+    assert!(p.frames > 16_384 && p.frames < MAX_FRAMES);
+}
+
+#[test]
+fn non_end_turn_results_abandon_unsettled_calls_and_keep_classification() {
+    // A cancelled or refused turn no longer hides behind a protocol error:
+    // approved-but-unsettled calls are abandoned and the real terminal lands.
+    for (reason, terminal) in [
+        ("cancelled", Terminal::Cancelled),
+        ("refusal", Terminal::Failed),
+        ("max_turn_requests", Terminal::TurnLimit),
+    ] {
+        let mut p = protocol();
+        p.accept(declaration("call-1", "workspace_read", json!({"path":"a"})))
+            .unwrap();
+        p.accept(permission("approve-1", "call-1")).unwrap();
+        let (events, replies) = p
+            .accept(json!({"jsonrpc":"2.0","id":7,"result":{"stopReason":reason}}))
+            .unwrap();
+        assert!(replies.is_empty());
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::Diagnostic(_))),
+            "{reason} reports the abandoned calls"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::Result { terminal: t, .. } if *t == terminal)),
+            "{reason} still emits its classified result"
+        );
+        assert!(p.completed && p.calls["call-1"].finished, "{reason}");
+    }
+    // A host-side pending reply is still never abandoned, and a completed
+    // turn still requires full broker settlement.
+    for reason in ["cancelled", "end_turn"] {
+        let mut p = protocol();
+        p.accept(declaration("call-1", "workspace_read", json!({"path":"a"})))
+            .unwrap();
+        p.accept(permission("approve-1", "call-1")).unwrap();
+        p.mcp(mcp(1, "workspace_read", json!({"path":"a"})))
+            .unwrap();
+        assert!(
+            p.accept(json!({"jsonrpc":"2.0","id":7,"result":{"stopReason":reason}}))
+                .is_err(),
+            "{reason} with a pending host reply stays a protocol error"
+        );
+    }
+}
+
+#[tokio::test]
+async fn stalled_initialization_fails_fast_inside_the_init_deadline() {
+    use std::time::{Duration, Instant};
+    use tokio::process::Command;
+
+    let root = tempfile::tempdir().unwrap();
+    let script = root.path().join("fixture.sh");
+    // Answer exactly the first request, then hold the session open silently.
+    std::fs::write(
+        &script,
+        "IFS= read -r line || exit 1\nprintf '%s\\n' \"$1\"\nwhile IFS= read -r line; do :; done\n",
+    )
+    .unwrap();
+    let mut command = Command::new("/bin/sh");
+    command.arg(&script).arg(
+        json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentInfo":{"name":"affogato"}}})
+            .to_string(),
+    );
+    let mut process = StreamProcess::spawn(command).unwrap();
+    let mut options = protocol().options;
+    options.tools = false;
+    let mut codec = DevinProtocol::new(options, None).unwrap();
+    codec.init_deadline = Duration::from_millis(250);
+    let started = Instant::now();
+    let result = codec.initialize(&mut process, "fixture").await;
+    assert!(matches!(
+        result,
+        Err(Error::Unavailable("Devin initialization timed out"))
+    ));
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert!(process.join().await);
+}
+
+#[test]
+fn session_cancel_names_only_a_live_prompt_session() {
+    let mut p = protocol();
+    let frame = p.interruption().unwrap();
+    assert_eq!(frame["method"], "session/cancel");
+    assert_eq!(frame["params"]["sessionId"], "fixture-session");
+    // ACP cancel is a notification: no request id to forge or await.
+    assert!(frame.get("id").is_none());
+    // Before prompt start and after turn completion there is nothing to cancel.
+    let mut p = protocol();
+    p.ready = false;
+    assert!(p.interruption().is_none());
+    let mut p = protocol();
+    p.completed = true;
+    assert!(p.interruption().is_none());
+}
+
+#[test]
+fn an_approved_broker_call_does_not_need_a_prior_tool_listing() {
+    // Devin lists MCP tools lazily. A model that learned a tool from the
+    // prompt's guide calls it without mcp_list_tools, and the approved
+    // declaration alone grants the call.
+    let mut p = protocol();
+    p.accept(declaration("call-1", "workspace_read", json!({"path":"a"})))
+        .unwrap();
+    let (_, replies) = p.accept(permission("allow", "call-1")).unwrap();
+    assert_eq!(
+        replies[0]["result"]["outcome"],
+        json!({"outcome":"selected","optionId":"allow_once"})
+    );
+    assert!(p.mcp(mcp(1, "workspace_read", json!({"path":"a"}))).is_ok());
+    // Without an approved declaration the same call is still refused.
+    assert!(
+        p.mcp(mcp(2, "workspace_read", json!({"path":"b"})))
+            .is_err()
+    );
+}
+
+#[test]
+fn answer_text_on_each_side_of_a_tool_call_stays_separate() {
+    let chunk = |text: &str| json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fixture-session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":text}}}});
+    let mut p = protocol();
+    p.accept(chunk("Fixing the operator.")).unwrap();
+    p.accept(declaration("call-1", "workspace_read", json!({"path":"a"})))
+        .unwrap();
+    p.accept(chunk("Fixed add.js.")).unwrap();
+    p.accept(chunk(" Done.")).unwrap();
+    assert_eq!(p.text, "Fixing the operator.\n\nFixed add.js. Done.");
 }

@@ -1,0 +1,30 @@
+name: Dependabot auto-merge
+
+# Dependabot pull requests merge themselves once the Required check passes.
+# The workflow only flips auto-merge on; branch policy still decides.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependabot-auto-merge-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  enable:
+    name: Enable auto-merge
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Enable squash auto-merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr merge --auto --squash "$PR_URL"

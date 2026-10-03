@@ -1,3 +1,6 @@
+// These tests drive Unix permission bits, symlinks, or /bin/sh fixtures;
+// the Windows custody rules are covered by the platform tests.
+#![cfg(unix)]
 use std::{fs, os::unix::fs::PermissionsExt};
 use xcb_core::{
     Id, Provider,
@@ -14,7 +17,7 @@ use xcb_runtime::{
 #[test]
 fn local_aicharts_session_export_is_deterministic_bounded_and_private() {
     let temp = tempfile::tempdir().unwrap();
-    let base = temp.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(temp.path()).unwrap();
     fs::create_dir(base.join("work")).unwrap();
     let store = Store::open(&base.join("state")).unwrap();
     let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
@@ -158,7 +161,7 @@ fn idle_export_predicate_rejects_pane_failed_and_uncertain_outcomes() {
 #[test]
 fn per_session_aicharts_export_is_stable_and_idempotent() {
     let temp = tempfile::tempdir().unwrap();
-    let base = temp.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(temp.path()).unwrap();
     fs::create_dir(base.join("work")).unwrap();
     let store = Store::open(&base.join("state")).unwrap();
     let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
@@ -238,7 +241,7 @@ fn per_session_aicharts_export_is_stable_and_idempotent() {
 #[test]
 fn idle_export_writes_no_file_when_session_has_no_usage() {
     let temp = tempfile::tempdir().unwrap();
-    let base = temp.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(temp.path()).unwrap();
     fs::create_dir(base.join("work")).unwrap();
     let store = Store::open(&base.join("state")).unwrap();
     let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();

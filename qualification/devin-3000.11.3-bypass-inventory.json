@@ -1,0 +1,128 @@
+{
+  "version": "3000.11.3",
+  "provider_sha256": "7ef3859e68d4eabc0115e51898fcd4eab1edde753c27a472349ef551180b38ff",
+  "tools": [
+    {
+      "name": "mcp_call_tool",
+      "inputSchema": {
+        "required": [
+          "server_name",
+          "tool_name"
+        ],
+        "properties": {
+          "server_name": {
+            "description": "Name of the MCP server to use (e.g., \"linear\", \"github\").",
+            "type": "string"
+          },
+          "tool_name": {
+            "description": "Name of the tool to execute.",
+            "type": "string"
+          },
+          "arguments": {
+            "description": "Input arguments for the tool as a JSON object.",
+            "type": "object",
+            "additionalProperties": true,
+            "default": {}
+          }
+        },
+        "type": "object",
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "mcp_list_servers",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "mcp_list_tools",
+      "inputSchema": {
+        "properties": {
+          "server_name": {
+            "description": "Name of the MCP server to list tools from (e.g., \"linear\", \"github\"). If not provided, lists tools from all configured servers.",
+            "type": "string"
+          }
+        },
+        "type": "object",
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "mcp_read_resource",
+      "inputSchema": {
+        "required": [
+          "server_name",
+          "resource_uri"
+        ],
+        "properties": {
+          "server_name": {
+            "description": "Name of the MCP server (e.g., \"linear\", \"github\").",
+            "type": "string"
+          },
+          "resource_uri": {
+            "description": "Resource URI to read (e.g., \"<file:///path/to/file>\", \"<linear://issue/123>\").",
+            "type": "string"
+          }
+        },
+        "type": "object",
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "skill",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "default": "invoke",
+            "description": "The skill operation to perform. Defaults to \"invoke\" if omitted.",
+            "type": "string",
+            "enum": [
+              "invoke",
+              "list",
+              "search"
+            ]
+          },
+          "skill": {
+            "description": "The name of the skill to invoke (required for 'invoke' command).\nUse one of the available skills listed in the system prompt.",
+            "type": "string",
+            "default": null
+          },
+          "path": {
+            "description": "Project path to discover skills in. Scans skill directories (e.g.\n.devin/skills/) at the project root; `list` does not recurse into\nsubdirectories, while `search` does. Relative paths are resolved\nagainst the session's working directory. Provide either `path` or\n`source` for list/search, not both.",
+            "type": "string",
+            "default": null
+          },
+          "source": {
+            "description": "Set to `plugins` to list or search active plugin skills instead of\nscanning a project path.",
+            "type": "string",
+            "enum": [
+              "plugins"
+            ]
+          },
+          "keywords": {
+            "description": "List of keywords to search for. Empty or omitted means include all skills.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": null
+          },
+          "keywords_mode": {
+            "type": "string",
+            "enum": [
+              "or",
+              "and"
+            ],
+            "description": "Controls whether all keywords or any keyword need to be present.",
+            "default": "or"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  ]
+}

@@ -177,7 +177,7 @@ type Active = {
 /**
  * Claude Code through the Agent SDK as an application-profile task adapter. The
  * model's entire tool surface is the capability broker; subscription auth uses
- * the managed CLAUDE_CONFIG_DIR written by `xcb auth claude`, while API
+ * the managed CLAUDE_CONFIG_DIR written by `xcb-compat auth claude`, while API
  * auth keeps the key-resolver seam. No native tools, hooks, plugins, skills or
  * inherited configuration reach the provider.
  */

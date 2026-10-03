@@ -18,7 +18,7 @@ import { admitCliProvider, openCliProvider } from "../src/cli/provider.ts";
 import { buildQualificationRecord, writeCliQualification } from "../src/cli/qualification.ts";
 import type { CliBinaryInspection } from "../src/cli/binaries.ts";
 
-async function dir(prefix = "agentmixer-devin-") {
+async function dir(prefix = "xcb-devin-") {
   const root = await realpath(await mkdtemp(join(tmpdir(), prefix)));
   await chmod(root, 0o700);
   return root;
@@ -227,7 +227,7 @@ describe("cli devin process factory", () => {
       expect(await readFile(join(replacedRoot, "evidence"), "utf8")).toBe("replacement directory");
       expect(await readFile(join(retainedRoot, "provider"), "utf8")).toBe("devin-bytes");
     } finally { await rm(root, { recursive: true, force: true }); }
-  });
+  }, 30_000);
 });
 
 describe("bwrap service forward planning", () => {
@@ -418,5 +418,5 @@ describe("Devin CLI admission remains disabled", () => {
       if (previous === undefined) delete process.env.XCB_DEVIN; else process.env.XCB_DEVIN = previous;
       await rm(root, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 });

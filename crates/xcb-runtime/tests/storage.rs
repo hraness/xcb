@@ -1,3 +1,6 @@
+// These tests drive Unix permission bits, symlinks, or /bin/sh fixtures;
+// the Windows custody rules are covered by the platform tests.
+#![cfg(unix)]
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use xcb_core::models::{Mode, ModelChoice};
@@ -25,7 +28,7 @@ fn choice() -> ModelChoice {
 #[test]
 fn accounts_are_separate_and_labels_cannot_override_a_credential_path() {
     let dir = root();
-    let path = dir.path().canonicalize().unwrap().join("state");
+    let path = xcb_core::canonical(dir.path()).unwrap().join("state");
     let store = Store::open(&path).unwrap();
     let a = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
     let b = store
@@ -51,7 +54,7 @@ fn accounts_are_separate_and_labels_cannot_override_a_credential_path() {
 #[test]
 fn private_state_rejects_symlinks_and_public_permissions() {
     let dir = root();
-    let base = dir.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(dir.path()).unwrap();
     let store = Store::open(&base.join("state")).unwrap();
     drop(store);
     symlink(base.join("state"), base.join("link")).unwrap();
@@ -63,7 +66,7 @@ fn private_state_rejects_symlinks_and_public_permissions() {
 #[test]
 fn a_vanished_or_planted_sidecar_is_handled_during_startup_scan() {
     let dir = root();
-    let base = dir.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(dir.path()).unwrap();
     let store = Store::open(&base.join("state")).unwrap();
     drop(store);
     let state = base.join("state");
@@ -97,7 +100,7 @@ fn a_vanished_or_planted_sidecar_is_handled_during_startup_scan() {
 #[test]
 fn revision_checked_messages_persist_across_reopen() {
     let dir = root();
-    let base = dir.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(dir.path()).unwrap();
     let path = base.join("state");
     let store = Store::open(&path).unwrap();
     let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
@@ -129,7 +132,7 @@ fn revision_checked_messages_persist_across_reopen() {
 #[test]
 fn a_prepared_run_keeps_exclusive_account_custody_after_restart() {
     let dir = root();
-    let base = dir.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(dir.path()).unwrap();
     let path = base.join("state");
     let store = Store::open(&path).unwrap();
     let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
@@ -150,9 +153,120 @@ fn a_prepared_run_keeps_exclusive_account_custody_after_restart() {
 }
 
 #[test]
+fn ui_session_rename_preserves_active_lease_and_transcript_revision() {
+    let dir = root();
+    let base = xcb_core::canonical(dir.path()).unwrap();
+    let path = base.join("state");
+    let store = Store::open(&path).unwrap();
+    let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
+    let session = store
+        .create_session(&account.id, choice(), &base.join("work"), 2)
+        .unwrap();
+    let run = store.prepare_run(&session.id, session.revision, 3).unwrap();
+    let before = store.session(&session.id).unwrap().unwrap();
+    let renamed = store
+        .rename_session(&session.id, &before.title, "  Running\n review  ")
+        .unwrap();
+    assert_eq!(renamed.title, "Running review");
+    assert_eq!(renamed.revision, before.revision);
+    assert_eq!(renamed.state, before.state);
+    assert_eq!(renamed.account, before.account);
+    assert_eq!(store.unsettled_runs().unwrap()[0].id, run.id);
+    assert!(store.prepare_run(&session.id, renamed.revision, 4).is_err());
+    assert!(
+        store
+            .rename_session(&session.id, &before.title, "Stale title")
+            .is_err()
+    );
+    assert!(
+        store
+            .rename_session(&session.id, &renamed.title, "\u{1b}[2J")
+            .is_err()
+    );
+    let message = Message {
+        id: Id::new("renamed_message").unwrap(),
+        role: Role::Assistant,
+        text: "Worker result".into(),
+        at_ms: 5,
+        attachments: vec![],
+        provenance: None,
+    };
+    // The active worker's previously observed transcript revision remains valid.
+    store
+        .append_message(&session.id, before.revision, &message)
+        .unwrap();
+    drop(store);
+    let reopened = Store::open(&path).unwrap();
+    assert_eq!(
+        reopened.session(&session.id).unwrap().unwrap().title,
+        "Running review"
+    );
+    assert_eq!(reopened.unsettled_runs().unwrap()[0].id, run.id);
+    assert_eq!(reopened.messages(&session.id, 128).unwrap().len(), 1);
+}
+
+#[test]
+fn ui_session_history_cursor_is_scoped_and_keeps_existing_page_limits() {
+    use xcb_core::ui::TranscriptContext;
+    let dir = root();
+    let base = xcb_core::canonical(dir.path()).unwrap();
+    let store = Store::open(&base.join("state")).unwrap();
+    let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
+    let mut session = store
+        .create_session(&account.id, choice(), &base.join("work"), 2)
+        .unwrap();
+    let other = store
+        .create_session(&account.id, choice(), &base.join("work"), 2)
+        .unwrap();
+    for index in 0..7 {
+        let message = Message {
+            id: Id::new(format!("history_{index}")).unwrap(),
+            role: Role::Assistant,
+            text: format!("message {index}"),
+            at_ms: 3 + index,
+            attachments: vec![],
+            provenance: None,
+        };
+        session = store
+            .append_message(&session.id, session.revision, &message)
+            .unwrap();
+    }
+    let latest = store.transcript_page(&session.id, None, 3).unwrap();
+    assert_eq!(latest.first_sequence, Some(5));
+    assert!(latest.has_older);
+    let older = store
+        .transcript_page(&session.id, latest.first_sequence, 3)
+        .unwrap();
+    assert_eq!(older.first_sequence, Some(2));
+    assert_eq!(older.messages[0].text, "message 1");
+    let first = store
+        .transcript_page(&session.id, older.first_sequence, 3)
+        .unwrap();
+    assert!(!first.has_older);
+    assert_eq!(
+        first.context,
+        TranscriptContext::Session(session.id.clone())
+    );
+    assert_eq!(first.messages[0].text, "message 0");
+    assert!(
+        store
+            .transcript_page(&other.id, latest.first_sequence, 3)
+            .unwrap()
+            .messages
+            .is_empty()
+    );
+    assert!(store.transcript_page(&session.id, None, 513).is_err());
+    assert!(store.transcript_page(&session.id, Some(0), 3).is_err());
+    assert_eq!(
+        store.messages(&session.id, 3).unwrap()[0].id,
+        latest.messages[0].id
+    );
+}
+
+#[test]
 fn pruning_never_erases_an_active_session() {
     let dir = root();
-    let base = dir.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(dir.path()).unwrap();
     let store = Store::open(&base.join("state")).unwrap();
     let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
     let idle = store
@@ -207,7 +321,7 @@ fn storage_process_worker() {
 #[test]
 fn twenty_processes_initialize_and_write_one_fresh_store() {
     let directory = root();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let executable = std::env::current_exe().unwrap();
     let children: Vec<_> = (0..20)
         .map(|_| {

@@ -20,6 +20,7 @@ export type { ClaudePriceCatalog, ClaudeModelDiscoveryOptions } from "./claude-a
 export { createCodexTaskAdapter } from "./codex-task-adapter.ts";
 export type { CodexTaskAdapterOptions } from "./codex-task-adapter.ts";
 export { canonicalJson } from "./codex-config.ts";
+export * from "./protocol.ts";
 export * from "./codex-account.ts";
 export { createCodexAccountStdioTransport } from "./codex-account-transport.ts";
 export type { CodexAccountTransportOptions, CodexAccountProcessPort, CodexAccountProcessCloseReceipt } from "./codex-account-transport.ts";

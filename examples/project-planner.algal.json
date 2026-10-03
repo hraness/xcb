@@ -1,0 +1,17 @@
+{
+  "contract": "algal.organism.v1",
+  "key": "organism:project-review",
+  "name": "Project review planner",
+  "cells": [
+    {"id": "source", "kind": "input", "outputs": {"value": "text"}},
+    {"id": "proposal", "kind": "const", "outputs": {"value": {"type": "text", "value": "Review recent work and the project backlog. Complete one useful next step within the project goal, record the checks and outcome, and propose further work only when needed."}}}
+  ],
+  "edges": [],
+  "interface": {
+    "inputs": {"message": {"cell": "source", "port": "value"}},
+    "outputs": {
+      "summary": {"cell": "source", "port": "value"},
+      "prompt": {"cell": "proposal", "port": "value"}
+    }
+  }
+}

@@ -19,7 +19,7 @@ fn useful_local_extensions_default_on_and_publishing_defaults_off() {
 #[test]
 fn config_changes_are_revision_guarded_and_unknown_keys_refuse() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().canonicalize().unwrap().join("state");
+    let path = xcb_core::canonical(dir.path()).unwrap().join("state");
     private::directory(&path).unwrap();
     let (mut config, revision) = Config::load(&path).unwrap();
     assert!(revision.is_none());
@@ -43,7 +43,8 @@ fn config_changes_are_revision_guarded_and_unknown_keys_refuse() {
 #[test]
 fn concurrent_config_writers_cannot_both_replace_the_same_revision() {
     let directory = tempfile::tempdir().unwrap();
-    let root = private::directory(&directory.path().canonicalize().unwrap().join("state")).unwrap();
+    let root =
+        private::directory(&xcb_core::canonical(directory.path()).unwrap().join("state")).unwrap();
     for round in 0..12 {
         let path = root.join(format!("settings-{round}.json"));
         private::create(&path, b"original").unwrap();
@@ -81,4 +82,23 @@ fn old_configuration_gets_a_bounded_turn_deadline_independent_of_continuation() 
     }
     config.turn_timeout_ms = 3_600_000;
     config.validate().unwrap();
+}
+
+#[test]
+fn usage_limit_cooldown_defaults_to_thirty_minutes_and_stays_bounded() {
+    let mut config: Config = serde_json::from_str(r#"{"version":1}"#).unwrap();
+    assert_eq!(
+        config.quota_limit_cooldown_ms,
+        xcb_runtime::config::DEFAULT_QUOTA_LIMIT_COOLDOWN_MS
+    );
+    assert_eq!(config.quota_limit_cooldown_ms, 1_800_000);
+    config.validate().unwrap();
+    for cooldown in [0, 59_999, 604_800_001, u64::MAX] {
+        config.quota_limit_cooldown_ms = cooldown;
+        assert!(config.validate().is_err());
+    }
+    for cooldown in [60_000, 604_800_000] {
+        config.quota_limit_cooldown_ms = cooldown;
+        config.validate().unwrap();
+    }
 }

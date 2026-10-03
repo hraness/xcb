@@ -32,7 +32,6 @@ const MAX_TRANSCRIPT_BYTES = 4 * 1024 * 1024;
 const MAX_SESSIONS = 512;
 const MAX_ENTRY_BYTES = 256 * 1024;
 const TABLE = "xcb_cli_sessions";
-const LEGACY_TABLE = "agentmixer_cli_sessions";
 
 const fail = (code: string): never => { throw new Error(code); };
 const provider = (value: unknown): CliProvider => (value === "codex" || value === "claude" || value === "devin" ? value : fail("SESSION_PROVIDER_INVALID"));
@@ -68,12 +67,6 @@ export class CliSessionStore {
     private readonly database: SqliteDatabase,
     private readonly directory: string,
   ) {
-    const tables = new Set(database.query<Readonly<{ name: string }>, []>(
-      "SELECT name FROM sqlite_master WHERE type='table'",
-    ).all().map((row) => row.name));
-    if (tables.has(LEGACY_TABLE) && !tables.has(TABLE)) {
-      database.exec(`ALTER TABLE ${LEGACY_TABLE} RENAME TO ${TABLE}`);
-    }
     database.exec(`CREATE TABLE IF NOT EXISTS ${TABLE} (
       id TEXT PRIMARY KEY, provider TEXT NOT NULL, account_id TEXT,
       workspace TEXT NOT NULL, model TEXT NOT NULL, title TEXT NOT NULL,

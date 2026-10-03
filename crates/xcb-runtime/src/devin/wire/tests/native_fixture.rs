@@ -17,18 +17,31 @@ struct Spec {
     /// remains unchanged until reviewed synthetic evidence passes.
     #[serde(default)]
     candidate_sha256: Option<String>,
+    #[serde(default)]
+    candidate_bypass: bool,
     port: u16,
     scenario: Scenario,
+    #[serde(default)]
+    native_call: Option<ExpectedCall>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExpectedCall {
+    name: String,
+    args: Value,
 }
 
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Scenario {
     Broker,
+    Compaction,
     Exec,
     Write,
     ConfigWrite,
     Webfetch,
+    Native,
 }
 
 #[tokio::test]
@@ -43,16 +56,15 @@ async fn installed_runtime_uses_native_broker_under_production_profile() {
     let spec: Spec =
         serde_json::from_slice(&private::read(Path::new(&spec_path), 8192).unwrap()).unwrap();
     assert_ne!(spec.port, 0);
+    assert!(
+        !spec.candidate_bypass || spec.candidate_sha256.is_some(),
+        "bypass requires an explicit candidate binding"
+    );
     let expected_provider = spec
         .candidate_sha256
         .as_deref()
         .unwrap_or(super::super::super::config::BINARY_SHA256);
-    assert!(
-        expected_provider.len() == 64
-            && expected_provider
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    );
+    assert!(xcb_core::hex64(expected_provider));
     assert_eq!(
         crate::process::executable_digest(&spec.provider).unwrap(),
         expected_provider
@@ -89,9 +101,14 @@ async fn installed_runtime_uses_native_broker_under_production_profile() {
         broker::Workspace::open_with_coordination(&workspace_dir, &coordination).unwrap();
     let socket = directory.join("mcp.sock");
     let bridge = DevinBridge::bind(&socket).unwrap();
+    let configuration = if spec.candidate_bypass {
+        super::super::super::config::bypass_candidate_configuration()
+    } else {
+        super::super::super::config::configuration()
+    };
     private::create(
         &config_dir.join("config.json"),
-        &serde_json::to_vec(&super::super::super::config::configuration()).unwrap(),
+        &serde_json::to_vec(&configuration).unwrap(),
     )
     .unwrap();
     private::create(
@@ -126,7 +143,15 @@ async fn installed_runtime_uses_native_broker_under_production_profile() {
         .arg(&spec.provider)
         .arg("--config")
         .arg(config_dir.join("config.json"))
-        .args(["--permission-mode", "auto", "acp"])
+        .args([
+            "--permission-mode",
+            if spec.candidate_bypass {
+                "dangerous"
+            } else {
+                "auto"
+            },
+            "acp",
+        ])
         .env_clear()
         .envs(crate::process::environment(&home))
         .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
@@ -138,7 +163,7 @@ async fn installed_runtime_uses_native_broker_under_production_profile() {
         .current_dir(&cwd);
     let model = ModelChoice {
         provider: Provider::Devin,
-        id: Id::new("swe-1-6-fast").unwrap(),
+        id: Id::new("xcb-fixture-model").unwrap(),
         label: "Synthetic fixture".into(),
         mode: Mode::Fixed,
         resolved: None,
@@ -155,13 +180,15 @@ async fn installed_runtime_uses_native_broker_under_production_profile() {
         Some(bridge),
     )
     .unwrap();
+    codec.candidate_bypass = spec.candidate_bypass;
     let mut process = StreamProcess::spawn(command).unwrap();
     let mut recorded = Vec::new();
     let mut denials = 0usize;
     let outcome = tokio::select! {
     result=tokio::time::timeout(Duration::from_secs(30),async {
         let models=codec.initialize(&mut process,"Offline synthetic qualification; only the xcb broker is available.").await?;
-        require(models.is_empty(),"fake backend catalogue")?;
+        require(models.len()==2 && models.iter().any(|model| model.id.as_str()=="xcb-fixture-model"),"explicit fake backend catalogue")?;
+        require(codec.next_id==4,"fixture must exercise model setter and mode acknowledgement")?;
         codec.start(&mut process,Prompt{text:"Perform the synthetic broker fixture.".into(),images:vec![crate::protocol::ImageInput {media_type:"image/png".into(),base64:"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=".into()}]}).await?;
         let mut admitted=false;
         for _ in 0..1024 {
@@ -197,7 +224,7 @@ async fn installed_runtime_uses_native_broker_under_production_profile() {
         .filter(|call| !codec.broker_names.contains(&call.name))
         .map(|call| json!({"name":call.name,"finished":call.finished,"approved":call.approved}))
         .collect();
-    let evidence = json!({"status":status,"process_joined":joined,"bridge_joined":bridge_joined,"provider_sha256":expected_provider,"helper_sha256":spec.helper_sha256,"production_policy_sha256":crate::digest(&production),"fixture_policy_sha256":crate::digest(&policy),"calls":recorded,"native_calls":native_calls,"denials":denials,"image_prompt":true,"mcp_proposed_version":codec.mcp_proposed_version,"mcp_metadata_seen":codec.mcp_metadata_seen});
+    let evidence = json!({"status":status,"process_joined":joined,"bridge_joined":bridge_joined,"provider_sha256":expected_provider,"helper_sha256":spec.helper_sha256,"production_policy_sha256":crate::digest(&production),"fixture_policy_sha256":crate::digest(&policy),"calls":recorded,"native_calls":native_calls,"denials":denials,"image_prompt":true,"mcp_proposed_version":codec.mcp_proposed_version,"mcp_metadata_seen":codec.mcp_metadata_seen,"unexpected_notification":codec.unexpected_notification,"compaction_observations":codec.compaction_observations,"permission_observations":codec.permission_observations,"mode_observations":codec.mode_observations,"tool_sequence":codec.tool_sequence,"candidate_bypass":spec.candidate_bypass,"effective_mode":codec.mode,"mode_confirmed":codec.mode_confirmed});
     private::create(
         &directory.join("native-evidence.json"),
         &serde_json::to_vec_pretty(&evidence).unwrap(),
@@ -210,7 +237,39 @@ async fn installed_runtime_uses_native_broker_under_production_profile() {
     let (terminal, text) = outcome
         .expect("fixture deadline")
         .expect("native fixture protocol");
-    if matches!(spec.scenario, Scenario::Broker) {
+    // A refused call selects Devin's offered one-time reject; ACP's
+    // cancelled outcome would claim the whole prompt turn was cancelled.
+    for observation in &codec.permission_observations {
+        let reject = observation["offered"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|option| option["kind"] == "reject_once")
+            .map(|option| option["optionId"].clone());
+        let selected = &observation["selected"]["optionId"];
+        assert!(
+            selected == "allow_once" || reject.as_ref().is_none_or(|reject| selected == reject),
+            "{observation}"
+        );
+    }
+    if matches!(spec.scenario, Scenario::Compaction) {
+        assert!(
+            !codec.compaction_observations.is_empty(),
+            "low-budget fixture must compact"
+        );
+        assert_eq!(codec.compaction_observations.len() % 2, 0);
+        for pair in codec.compaction_observations.chunks_exact(2) {
+            assert_eq!(pair[0]["status"], "started");
+            assert_eq!(pair[1]["status"], "completed");
+            assert_eq!(pair[0]["summary_bytes"], Value::Null);
+            assert!(
+                pair[1]["summary_bytes"]
+                    .as_u64()
+                    .is_some_and(|bytes| bytes > 0)
+            );
+        }
+    }
+    if matches!(spec.scenario, Scenario::Broker | Scenario::Compaction) {
         assert_eq!(terminal, Terminal::Completed);
         assert_eq!(text, "SYNTHETIC_COMPLETE");
         assert_eq!(
@@ -218,8 +277,8 @@ async fn installed_runtime_uses_native_broker_under_production_profile() {
             "SYNTHETIC_BROKER_WRITE"
         );
         assert_eq!(recorded.len(), 2);
-        assert_eq!(codec.calls.len(), 8);
-        for (index, (name, arguments)) in [
+        assert_eq!(codec.calls.len(), if spec.candidate_bypass { 3 } else { 8 });
+        let native_probes = [
             (
                 "notebook_read",
                 json!({"notebook_path":protected.join("secret.ipynb")}),
@@ -241,9 +300,11 @@ async fn installed_runtime_uses_native_broker_under_production_profile() {
                 json!({"file_path":workspace_dir.join("secret.ipynb")}),
             ),
             ("mcp_list_tools", json!({"server_name":"xcb"})),
-        ]
-        .into_iter()
-        .enumerate()
+        ];
+        for (index, (name, arguments)) in native_probes
+            .into_iter()
+            .enumerate()
+            .filter(|_| !spec.candidate_bypass)
         {
             let call = codec
                 .calls
@@ -280,7 +341,15 @@ async fn installed_runtime_uses_native_broker_under_production_profile() {
                 "webfetch",
                 json!({"url":format!("http://127.0.0.1:{}/should-not-fetch",spec.port)}),
             ),
-            Scenario::Broker => unreachable!(),
+            Scenario::Native => {
+                let call = spec
+                    .native_call
+                    .as_ref()
+                    .expect("explicit synthetic native call");
+                assert!(NATIVE_TOOLS.contains(&call.name.as_str()));
+                (call.name.as_str(), call.args.clone())
+            }
+            Scenario::Broker | Scenario::Compaction => unreachable!(),
         };
         assert_eq!(codec.calls.len(), 1);
         let call = codec.calls.get("synthetic-call-1").unwrap();
@@ -292,7 +361,7 @@ async fn installed_runtime_uses_native_broker_under_production_profile() {
     assert!(!home.join("exec-result.txt").exists());
     assert_eq!(
         private::read(&config_dir.join("config.json"), 8192).unwrap(),
-        serde_json::to_vec(&super::super::super::config::configuration()).unwrap()
+        serde_json::to_vec(&configuration).unwrap()
     );
     assert_eq!(
         std::fs::metadata(config_dir.join("config.json"))

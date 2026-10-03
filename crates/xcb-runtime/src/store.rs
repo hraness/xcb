@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     collections::BTreeMap,
     fs,
-    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
     time::Duration,
@@ -17,8 +16,110 @@ use xcb_core::{
 };
 
 const MAX_ACCOUNTS: i64 = 128;
+/// One provider catalog (fallback or one account's own) holds at most this many rows.
+const MAX_ACCOUNT_MODELS: usize = 4096;
+/// Every account's own catalog together holds at most this many rows.
+const MAX_CATALOG_ROWS: usize = 16_384;
+
+/// Observed models per account, with the provider-wide catalog as the
+/// fallback for accounts that have not reported their own list yet.
+#[derive(Debug, Clone, Default)]
+pub struct ModelCatalog {
+    accounts: BTreeMap<Id, Provider>,
+    fallback: Vec<ModelChoice>,
+    observed: BTreeMap<Id, Vec<ModelChoice>>,
+}
+
+impl ModelCatalog {
+    /// The models `account` can be routed with: its own observation, else
+    /// the provider-wide fallback for its provider.
+    pub fn for_account(&self, account: &Id, provider: Provider) -> &[ModelChoice] {
+        match self.observed.get(account) {
+            Some(own) if !own.is_empty() => own,
+            _ => {
+                let start = self.fallback.partition_point(|m| m.provider < provider);
+                let end = self.fallback.partition_point(|m| m.provider <= provider);
+                &self.fallback[start..end]
+            }
+        }
+    }
+    /// True when `account` of `provider` has `model` in its catalog.
+    pub fn offers(&self, account: &Id, provider: Provider, model: &ModelChoice) -> bool {
+        model.provider == provider
+            && self
+                .for_account(account, provider)
+                .iter()
+                .any(|choice| choice.key() == model.key())
+    }
+    /// Accounts whose catalog contains `model`, in id order.
+    pub fn accounts_offering(&self, model: &ModelChoice) -> Vec<Id> {
+        self.accounts
+            .iter()
+            .filter(|(id, provider)| self.offers(id, **provider, model))
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+    fn fallback_reachable(&self, provider: Provider) -> bool {
+        let mut accounts = self.accounts.iter().filter(|(_, p)| **p == provider);
+        let mut any = false;
+        let reachable = accounts.any(|(id, _)| {
+            any = true;
+            self.observed.get(id).is_none_or(Vec::is_empty)
+        });
+        reachable || !any
+    }
+    /// One row per model key across every reachable catalog, ordered by
+    /// provider then key. The provider-wide fallback is left out only when
+    /// every account of that provider reported its own list.
+    pub fn union(&self) -> Vec<ModelChoice> {
+        let mut rows: BTreeMap<(Provider, String), ModelChoice> = BTreeMap::new();
+        for choice in &self.fallback {
+            if self.fallback_reachable(choice.provider) {
+                rows.entry((choice.provider, choice.key()))
+                    .or_insert_with(|| choice.clone());
+            }
+        }
+        for (account, own) in &self.observed {
+            if !self.accounts.contains_key(account) {
+                continue;
+            }
+            for choice in own {
+                rows.entry((choice.provider, choice.key()))
+                    .or_insert_with(|| choice.clone());
+            }
+        }
+        rows.into_values().collect()
+    }
+}
 const MAX_SESSIONS: i64 = 10_000;
 const MAX_MESSAGES: i64 = 10_000;
+pub(crate) const AUTHENTICATION_REQUIRED: &str =
+    "account authentication failed; reconnect this account before running tasks";
+
+#[path = "store_overview.rs"]
+mod overview;
+
+#[path = "store_claude_recovery.rs"]
+mod claude_recovery;
+pub use claude_recovery::ClaudeAuthRecoveryInfo;
+
+#[path = "host_contract.rs"]
+pub mod host_contract;
+
+fn authentication_required_from(db: &Connection, account: &Id) -> Result<bool> {
+    let available: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='account_auth_failures')",
+        [], |row| row.get(0),
+    )?;
+    if !available {
+        return Ok(false);
+    }
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM account_auth_failures WHERE account=?1)",
+        [account.as_str()],
+        |row| row.get(0),
+    )?)
+}
 
 /// A terminal report is committed in the same transaction as custody release.
 /// Its transcript boundary prevents a later turn from being mistaken for the
@@ -33,6 +134,10 @@ struct SettledOutcome {
     input_sequence: u64,
     message_count: u64,
     session_revision: u64,
+    /// Some(true) after successful protocol submission; Some(false) only if
+    /// submission was never attempted. Failed attempts and legacy are unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prompt_submission: Option<bool>,
     outcome: crate::runner::Outcome,
 }
 
@@ -59,9 +164,18 @@ fn generation_pool(root: &Path, account: &Account) -> Result<Option<Id>> {
         .transpose()
 }
 
-fn quotas_from(db: &Connection, pool: &Id) -> Result<Vec<QuotaPoint>> {
-    let mut query =
-        db.prepare("SELECT payload FROM quotas WHERE pool=?1 ORDER BY observed_at LIMIT 2049")?;
+/// Provider-reported meters: the windows usage projections read.
+const QUOTAS: &str = "quotas";
+/// Cooldowns for usage limits without a reported reset, one synthetic
+/// [`xcb_core::usage::limit_window`] per provider. Kept apart from the meters
+/// so no percentage, reset, or runway projection reads a cooldown as
+/// telemetry; only admission consults both.
+const QUOTA_LIMITS: &str = "quota_limits";
+
+fn quota_points_from(db: &Connection, table: &str, pool: &Id) -> Result<Vec<QuotaPoint>> {
+    let mut query = db.prepare(&format!(
+        "SELECT payload FROM {table} WHERE pool=?1 ORDER BY observed_at LIMIT 2049"
+    ))?;
     let rows = query.query_map([pool.as_str()], |row| row.get::<_, String>(0))?;
     let mut points = Vec::new();
     for row in rows {
@@ -78,12 +192,29 @@ fn quotas_from(db: &Connection, pool: &Id) -> Result<Vec<QuotaPoint>> {
     Ok(points)
 }
 
-fn blocked_until_from(
+fn quotas_from(db: &Connection, pool: &Id) -> Result<Vec<QuotaPoint>> {
+    quota_points_from(db, QUOTAS, pool)
+}
+
+/// Additive table: a database written by an older xcb has none, and then
+/// carries no cooldowns.
+fn quota_limits_from(db: &Connection, pool: &Id) -> Result<Vec<QuotaPoint>> {
+    let available: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='quota_limits')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !available {
+        return Ok(Vec::new());
+    }
+    quota_points_from(db, QUOTA_LIMITS, pool)
+}
+
+fn current_quota_points_from(
     db: &Connection,
     root: &Path,
     account: &Account,
-    now: u64,
-) -> Result<Option<u64>> {
+) -> Result<Option<Vec<QuotaPoint>>> {
     // Claude binds quota to the live credential generation so a rotated
     // sign-in cannot inherit another identity's block; an absent generation
     // stays unbound. Other providers use the account's own stable pool.
@@ -98,26 +229,60 @@ fn blocked_until_from(
     if pool != account.quota_pool {
         return Ok(None);
     }
-    let points = quotas_from(db, &pool)?;
+    let mut points = quotas_from(db, &pool)?;
+    points.extend(quota_limits_from(db, &pool)?);
     if account.provider == Provider::Claude
         && generation_pool(root, account)?.as_ref() != Some(&pool)
     {
         return Err(Error::Conflict("account credential generation changed"));
     }
-    Ok(xcb_core::usage::quota_blocked_until(
-        &points,
-        &pool,
-        account.provider,
-        now,
-    ))
+    Ok(Some(points))
 }
 
-fn insert_quota(tx: &Transaction<'_>, point: &QuotaPoint) -> Result<()> {
+fn blocked_until_from(
+    db: &Connection,
+    root: &Path,
+    account: &Account,
+    now: u64,
+) -> Result<Option<u64>> {
+    Ok(
+        current_quota_points_from(db, root, account)?.and_then(|points| {
+            xcb_core::usage::quota_blocked_until(
+                &points,
+                &account.quota_pool,
+                account.provider,
+                now,
+            )
+        }),
+    )
+}
+
+/// A quota meter update buffered during streaming. The account's pool is
+/// bound inside the recording transaction, not at observation time.
+pub(crate) struct PendingQuota {
+    pub window: Id,
+    pub used_percent: f64,
+    pub observed_at_ms: u64,
+    pub resets_at_ms: u64,
+}
+
+fn insert_quota(tx: &Transaction<'_>, table: &str, point: &QuotaPoint) -> Result<()> {
+    if !store_quota(tx, table, point)? {
+        return Err(Error::Conflict("conflicting quota observation"));
+    }
+    Ok(())
+}
+
+/// Store one quota point unless a different payload already holds the same
+/// (pool, window, instant); returns false for that conflict and writes
+/// nothing. Stored history is never rewritten. `table` is one of the two
+/// constants above, never caller input.
+fn store_quota(tx: &Transaction<'_>, table: &str, point: &QuotaPoint) -> Result<bool> {
     point.validate()?;
     let json = serde_json::to_string(point)?;
     let prior: Option<String> = tx
         .query_row(
-            "SELECT payload FROM quotas WHERE pool=?1 AND window=?2 AND observed_at=?3",
+            &format!("SELECT payload FROM {table} WHERE pool=?1 AND window=?2 AND observed_at=?3"),
             params![
                 point.pool.as_str(),
                 point.window.as_str(),
@@ -127,10 +292,10 @@ fn insert_quota(tx: &Transaction<'_>, point: &QuotaPoint) -> Result<()> {
         )
         .optional()?;
     if prior.as_ref().is_some_and(|old| old != &json) {
-        return Err(Error::Conflict("conflicting quota observation"));
+        return Ok(false);
     }
     tx.execute(
-        "INSERT OR IGNORE INTO quotas VALUES(?1,?2,?3,?4)",
+        &format!("INSERT OR IGNORE INTO {table} VALUES(?1,?2,?3,?4)"),
         params![
             point.pool.as_str(),
             point.window.as_str(),
@@ -138,8 +303,8 @@ fn insert_quota(tx: &Transaction<'_>, point: &QuotaPoint) -> Result<()> {
             json
         ],
     )?;
-    tx.execute("DELETE FROM quotas WHERE pool=?1 AND window=?2 AND observed_at NOT IN (SELECT observed_at FROM quotas WHERE pool=?1 AND window=?2 ORDER BY observed_at DESC LIMIT 128)", params![point.pool.as_str(), point.window.as_str()])?;
-    Ok(())
+    tx.execute(&format!("DELETE FROM {table} WHERE pool=?1 AND window=?2 AND observed_at NOT IN (SELECT observed_at FROM {table} WHERE pool=?1 AND window=?2 ORDER BY observed_at DESC LIMIT 128)"), params![point.pool.as_str(), point.window.as_str()])?;
+    Ok(true)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -202,16 +367,10 @@ impl RunOwner {
     /// True while the recorded owning process still exists. A signal-permission
     /// failure also proves presence; only an absent or invalid pid does not.
     pub fn alive(&self) -> bool {
-        let Some(pid) = i32::try_from(self.pid)
-            .ok()
-            .and_then(rustix::process::Pid::from_raw)
-        else {
+        if self.pid == 0 || i32::try_from(self.pid).is_err() {
             return false;
-        };
-        matches!(
-            rustix::process::test_kill_process(pid),
-            Ok(()) | Err(rustix::io::Errno::PERM)
-        )
+        }
+        crate::os::process_exists(self.pid) == Some(true)
     }
 }
 
@@ -237,11 +396,17 @@ pub struct RunRecord {
     /// Present fields make older strict readers fail closed until reconciliation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_custody: Option<crate::command::CommandCustody>,
+    /// Host tool servers are independent process groups. The launch intent is
+    /// durable before spawning; older strict readers cannot release this run.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub capability_processes: BTreeMap<String, Option<u32>>,
 }
 
 impl RunRecord {
     /// Recovery is unavailable while the owning host could still be joining
     /// processes or persisting credentials. Unknown identities fail closed.
+    /// A refusal because a recorded process still exists names that process
+    /// and what to check; the account stays held either way.
     pub fn verify_recovery_stop(&self) -> Result<()> {
         if self.phase != "running" {
             return Err(Error::Conflict("run is not in running phase"));
@@ -249,21 +414,49 @@ impl RunRecord {
         let owner = self.owner.as_ref().ok_or(Error::Conflict(
             "run has no recorded owner; recovery custody cannot be proven",
         ))?;
-        let owner_pid = i32::try_from(owner.pid)
-            .ok()
-            .filter(|pid| *pid > 1)
-            .and_then(rustix::process::Pid::from_raw)
-            .ok_or(Error::Conflict("run owner identity is invalid"))?;
-        if rustix::process::test_kill_process(owner_pid) != Err(rustix::io::Errno::SRCH) {
-            return Err(Error::Conflict(
-                "run owner is still present or its stop is unproven",
-            ));
+        if owner.pid <= 1 || i32::try_from(owner.pid).is_err() {
+            return Err(Error::Conflict("run owner identity is invalid"));
+        }
+        match crate::os::process_exists(owner.pid) {
+            Some(false) => (),
+            // A number that exists is never proof that this run's owner
+            // exited, even if it now names another program: xcb cannot
+            // tell a reused process number from the owner itself.
+            Some(true) => {
+                return Err(Error::guided(
+                    format!(
+                        "process {}, which started this run, is still running, so xcb keeps the account held. Check it with `ps -p {}`: if it is xcb, let its turn finish or quit that xcb; if it is another program, the number was reused, so restart your computer to prove the run stopped",
+                        owner.pid, owner.pid
+                    ),
+                    format!("xcb recover {} --yes", self.id),
+                ));
+            }
+            None => {
+                return Err(Error::Conflict(
+                    "run owner is still present or its stop is unproven",
+                ));
+            }
         }
         let pid = self
             .pid
             .filter(|pid| *pid > 1)
             .ok_or(Error::Conflict("run has no valid recorded process group"))?;
-        crate::process::prove_process_group_absent(pid)
+        match crate::process::prove_process_group_absent(pid) {
+            Err(Error::Conflict(_)) => Err(Error::guided(
+                format!(
+                    "the provider's processes (process group {pid}) are still running, so xcb keeps the account held. Wait until `pgrep -g {pid}` prints nothing, or stop those processes yourself"
+                ),
+                format!("xcb recover {} --yes", self.id),
+            )),
+            proof => proof,
+        }?;
+        for pid in self.capability_processes.values() {
+            let pid = pid.ok_or(Error::Conflict(
+                "tool server launch has no recorded process group; stop cannot be proven",
+            ))?;
+            crate::process::prove_process_group_absent(pid)?;
+        }
+        Ok(())
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -275,6 +468,20 @@ impl RunRecord {
                 return Err(xcb_core::Error::Invalid("command run custody").into());
             }
             validate_command_custody(&self.id, custody)?;
+        }
+        if !self.capability_processes.is_empty() {
+            if self.custody_version != 1
+                || !matches!(self.phase.as_str(), "prepared" | "running")
+                || self.capability_processes.len() > 32
+            {
+                return Err(xcb_core::Error::Invalid("tool server custody").into());
+            }
+            for (server, pid) in &self.capability_processes {
+                Id::new(server.clone())?;
+                if pid.is_some_and(|pid| pid <= 1 || i32::try_from(pid).is_err()) {
+                    return Err(xcb_core::Error::Invalid("tool server process group").into());
+                }
+            }
         }
         if let Some(model) = &self.model {
             model.validate()?;
@@ -291,12 +498,7 @@ impl RunRecord {
 }
 
 fn validate_command_custody(run_id: &Id, custody: &crate::command::CommandCustody) -> Result<()> {
-    let hash = |value: &str| {
-        value.len() == 64
-            && value
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    };
+    let hash = xcb_core::hex64;
     let id = custody.command_id.as_str();
     if custody.version != 1
         || custody.run_id != *run_id
@@ -329,11 +531,26 @@ pub struct UsageObservation {
 
 pub struct Store {
     root: PathBuf,
+    /// Test-only count of fsync'd observability commits, proving a batch of
+    /// N stream events lands in one transaction rather than N.
+    #[cfg(test)]
+    pub(crate) observation_commits: std::sync::atomic::AtomicUsize,
     /// Unique identity of this open handle — one per terminal process — stamped
     /// on every run this store prepares so other terminals can recognise
     /// foreign-owned live runs.
     instance: String,
     connection: Mutex<Connection>,
+    /// Lazily opened managed store: session probes reuse one connection and
+    /// its migration probe instead of paying a fresh open on every call.
+    /// `None` means not opened yet — or the managed database absent at the
+    /// last check — so a later created managed root is still discovered.
+    managed: Mutex<Option<crate::managed::ManagedStore>>,
+    /// Opened by `open_read_only`: the managed store is read the same way,
+    /// never migrated, cleaned or waited on.
+    read_only: bool,
+    /// Telemetry observations the batched recorder dropped because their
+    /// clock or payload contradicted stored telemetry. Diagnostic only.
+    dropped_observations: std::sync::atomic::AtomicU64,
 }
 
 fn decode<T: DeserializeOwned>(text: &str) -> Result<T> {
@@ -361,6 +578,66 @@ fn sql(value: u64) -> Result<i64> {
     i64::try_from(value).map_err(|_| xcb_core::Error::Invalid("database integer").into())
 }
 
+fn settle_tool_in(tx: &Transaction<'_>, run: &RunRecord, call: &str) -> Result<()> {
+    if tx.execute(
+        "UPDATE tool_effects SET settled=1 WHERE run=?1 AND call=?2 AND settled=0",
+        params![run.id.as_str(), call],
+    )? != 1
+    {
+        return Err(Error::Conflict("tool receipt changed"));
+    }
+    Ok(())
+}
+fn append_message_in(
+    tx: &Transaction<'_>,
+    id: &Id,
+    expected_revision: Option<u64>,
+    message: &Message,
+) -> Result<Session> {
+    let mut session = session_from(tx, id)?.ok_or(Error::Unavailable("session not found"))?;
+    let expected = session.revision;
+    if expected_revision.is_some_and(|expected_revision| expected_revision != expected) {
+        return Err(Error::Conflict("session revision changed"));
+    }
+    let count: i64 = tx.query_row(
+        "SELECT count(*) FROM messages WHERE session=?1",
+        [id.as_str()],
+        |row| row.get(0),
+    )?;
+    if count >= MAX_MESSAGES {
+        return Err(xcb_core::Error::Limit("session messages").into());
+    }
+    tx.execute(
+        "INSERT INTO messages VALUES(?1,?2,?3,?4)",
+        params![
+            message.id.as_str(),
+            id.as_str(),
+            count + 1,
+            serde_json::to_string(message)?
+        ],
+    )?;
+    session.revision = session
+        .revision
+        .checked_add(1)
+        .ok_or(Error::Conflict("revision overflow"))?;
+    session.last_active_at_ms = session.last_active_at_ms.max(message.at_ms);
+    if session.title == "New session" && message.role == xcb_core::session::Role::User {
+        session.title = message
+            .text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(80)
+            .collect();
+        session.title = xcb_core::display_text(&session.title, 160);
+        if session.title.is_empty() {
+            session.title = "Image message".into();
+        }
+    }
+    update_session(tx, &session, expected)?;
+    Ok(session)
+}
 fn update_session(transaction: &Transaction<'_>, session: &Session, expected: u64) -> Result<()> {
     session.validate()?;
     if transaction.execute(
@@ -399,7 +676,9 @@ impl Store {
         connection.busy_timeout(Duration::from_secs(2))?;
         connection.pragma_update(None, "query_only", true)?;
         let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version != 1 {
+        // Versions one and two read identically: the lease rekey to
+        // (run, account) only changes which rows writers may insert.
+        if !(1..=2).contains(&version) {
             return Err(Error::Unavailable(
                 "existing xcb database schema is unavailable",
             ));
@@ -408,6 +687,11 @@ impl Store {
             root,
             instance: new_id("i").to_string(),
             connection: Mutex::new(connection),
+            managed: Mutex::new(None),
+            read_only: true,
+            dropped_observations: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            observation_commits: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -415,21 +699,20 @@ impl Store {
         crate::process::initialize_host()?;
         let root = private::directory(root)?;
         let lock_path = root.join(".initialize.lock");
-        let initialization = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(
-                (rustix::fs::OFlags::NOFOLLOW
-                    | rustix::fs::OFlags::NONBLOCK
-                    | rustix::fs::OFlags::CLOEXEC)
-                    .bits() as i32,
-            )
-            .open(&lock_path)?;
+        let initialization = crate::os::no_follow(
+            crate::os::owner_only(
+                fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(false),
+            ),
+            true,
+        )
+        .open(&lock_path)?;
         private::check_file(&initialization, 0)?;
         private::lock(&initialization)?;
+        let initialization = private::ExclusiveLock::held(initialization);
         private::same_file(&lock_path, &initialization)?;
         for name in [
             "accounts",
@@ -471,7 +754,7 @@ impl Store {
         }
         connection.pragma_update(None, "synchronous", "FULL")?;
         let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 1 {
+        if version > 2 {
             return Err(Error::Unavailable("database was written by a newer xcb"));
         }
         if version == 0 {
@@ -497,6 +780,24 @@ impl Store {
             }
             tx.commit()?;
         }
+        let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version == 1 {
+            let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            // Version two rekeys custody by run so one account may hold
+            // several concurrent unsettled runs (config
+            // `max_runs_per_account`). Every other lease read and write was
+            // already (account, run)-scoped, so only this primary key moved.
+            tx.execute_batch(
+                "CREATE TABLE leases_v2(
+                run TEXT PRIMARY KEY REFERENCES runs(id),
+                account TEXT NOT NULL REFERENCES accounts(id));
+                INSERT INTO leases_v2(run,account) SELECT run,account FROM leases;
+                DROP TABLE leases;
+                ALTER TABLE leases_v2 RENAME TO leases;
+                PRAGMA user_version=2;",
+            )?;
+            tx.commit()?;
+        }
         // Additive extension: older readers can still inspect version-one
         // state; missing terminal records never authorize inferred completion.
         connection.execute_batch(
@@ -507,10 +808,45 @@ impl Store {
             payload TEXT NOT NULL,
             UNIQUE(session,input_sequence));",
         )?;
+        // Independent of session/run pruning. Generation changes alone cannot
+        // clear this record: login rotates before credentials are published.
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS account_auth_failures(
+            account TEXT PRIMARY KEY REFERENCES accounts(id),
+            generation TEXT,
+            run TEXT NOT NULL);",
+        )?;
+        // Additive: each account's own observed catalog. The version-one
+        // `models` table stays the provider-wide catalog that account-less
+        // writers maintain and that older readers keep using; accounts with
+        // no rows here fall back to it (`ModelCatalog::for_account`).
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS account_models(
+            account TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+            id TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            PRIMARY KEY(account, id));",
+        )?;
+        // Additive: cooldowns for usage limits the provider refused without
+        // a reset time (see `QUOTA_LIMITS`). Older readers ignore it and
+        // simply do not see the cooldown.
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS quota_limits(
+            pool TEXT NOT NULL,
+            window TEXT NOT NULL,
+            observed_at INTEGER NOT NULL,
+            payload TEXT NOT NULL,
+            PRIMARY KEY(pool, window, observed_at));",
+        )?;
         Ok(Self {
             root,
             instance: new_id("i").to_string(),
             connection: Mutex::new(connection),
+            managed: Mutex::new(None),
+            read_only: false,
+            dropped_observations: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            observation_commits: std::sync::atomic::AtomicUsize::new(0),
         })
     }
     fn db(&self) -> Result<MutexGuard<'_, Connection>> {
@@ -607,10 +943,14 @@ impl Store {
             .find(|account| &account.id == id)
             .ok_or(Error::Unavailable("account not found"))
     }
+    /// Resolve what a person typed: an exact id, name or legacy label, else
+    /// a unique id prefix. The accounts table shortens ids with a trailing
+    /// `…`, so a pasted cell resolves too.
     pub fn resolve_account(&self, value: &str) -> Result<Account> {
-        let matches: Vec<_> = self
-            .accounts()?
-            .into_iter()
+        let accounts = self.accounts()?;
+        let shown = xcb_core::display_text(value, 64);
+        let exact: Vec<&Account> = accounts
+            .iter()
             .filter(|account| {
                 account.id.as_str() == value
                     || account.name() == value
@@ -618,12 +958,48 @@ impl Store {
                     || account.label == value
             })
             .collect();
-        if matches.len() != 1 {
-            return Err(Error::Unavailable(
-                "account not found or name is ambiguous; use its id",
-            ));
+        match exact.as_slice() {
+            [only] => return Ok((*only).clone()),
+            [] => {}
+            several => {
+                return Err(Error::guided(
+                    format!(
+                        "\"{shown}\" names {} accounts. Use the account id instead.",
+                        several.len()
+                    ),
+                    "xcb accounts --json",
+                ));
+            }
         }
-        Ok(matches.into_iter().next().expect("one account"))
+        let prefix = value.trim_end_matches('…');
+        let matches: Vec<&Account> = if prefix.is_empty() {
+            Vec::new()
+        } else {
+            accounts
+                .iter()
+                .filter(|account| account.id.as_str().starts_with(prefix))
+                .collect()
+        };
+        match matches.as_slice() {
+            [only] => Ok((*only).clone()),
+            [] => Err(Error::guided(
+                format!("No account matches \"{shown}\"."),
+                "xcb accounts",
+            )),
+            several => Err(Error::guided(
+                format!(
+                    "\"{shown}\" matches {} accounts: {}. Type more of the id.",
+                    several.len(),
+                    several
+                        .iter()
+                        .take(4)
+                        .map(|account| account.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                "xcb accounts",
+            )),
+        }
     }
     /// Record provider-observed identity: email and, when reported, the plan.
     /// Only fresh observations are written; a `None` email never clears a
@@ -666,6 +1042,71 @@ impl Store {
         self.account(id)?;
         private::check_directory(&self.root.join("accounts").join(id.as_str()))
     }
+
+    /// Permanently remove an account and every account-owned record.
+    ///
+    /// The lease and run checks happen under the same immediate database
+    /// transaction as the deletion. An account held by any unsettled run (or
+    /// by a lease whose run record is inconsistent) is refused before any
+    /// state or credential path is changed; removal never performs recovery or
+    /// releases custody as a side effect.
+    pub fn remove_account(&self, id: &Id) -> Result<Account> {
+        let account_path = self.root.join("accounts").join(id.as_str());
+        // Check the private credential directory before changing the database.
+        // A missing or foreign directory is a custody failure, not permission
+        // to delete only the database record and leave an unknown credential.
+        private::check_directory(&account_path)?;
+
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let json: String = tx.query_row(
+            "SELECT payload FROM accounts WHERE id=?1",
+            [id.as_str()],
+            |row| row.get(0),
+        )?;
+        let account: Account = decode(&json)?;
+        account.validate()?;
+        let held: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM leases WHERE account=?1)
+             OR EXISTS(SELECT 1 FROM runs WHERE account=?1 AND phase!='settled')",
+            [id.as_str()],
+            |row| row.get(0),
+        )?;
+        if held {
+            return Err(Error::Conflict(
+                "account has an unsettled run; exclusive custody remains held",
+            ));
+        }
+
+        // Account-bound history cannot outlive the account foreign key. The
+        // account removal is intentionally permanent, so remove those records
+        // in the same transaction rather than leaving an unusable account id
+        // behind in sessions, runs, usage, or quota history.
+        tx.execute("DELETE FROM runs WHERE account=?1", [id.as_str()])?;
+        tx.execute("DELETE FROM sessions WHERE account=?1", [id.as_str()])?;
+        tx.execute("DELETE FROM usage WHERE account=?1", [id.as_str()])?;
+        tx.execute(
+            "DELETE FROM quotas WHERE pool=?1",
+            [account.quota_pool.as_str()],
+        )?;
+        tx.execute(
+            "DELETE FROM quota_limits WHERE pool=?1",
+            [account.quota_pool.as_str()],
+        )?;
+        if tx.execute("DELETE FROM accounts WHERE id=?1", [id.as_str()])? != 1 {
+            return Err(Error::Unavailable("account not found"));
+        }
+        tx.commit()?;
+
+        // The database deletion is durable before removing the account tree;
+        // no provider credential remains in the state root when this returns
+        // successfully. A filesystem failure is reported rather than claimed
+        // as a successful removal.
+        fs::remove_dir_all(&account_path)?;
+        private::sync_directory(account_path.parent().ok_or(Error::PrivateState)?)?;
+        Ok(account)
+    }
+
     pub fn set_account_enabled(&self, id: &Id, enabled: bool) -> Result<()> {
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -699,9 +1140,33 @@ impl Store {
         workspace: &Path,
         now: u64,
     ) -> Result<Session> {
+        self.create_session_inner(account_id, model, workspace, now, None)
+    }
+    /// The same custody checks as `create_session`, with the owning managed
+    /// task recorded on the session atomically. The marker lets startup
+    /// reconciliation prove custody of an orphan if the supervisor dies
+    /// between session creation and managed `prepare`.
+    pub fn create_managed_session(
+        &self,
+        account_id: &Id,
+        model: ModelChoice,
+        workspace: &Path,
+        now: u64,
+        task: &Id,
+    ) -> Result<Session> {
+        self.create_session_inner(account_id, model, workspace, now, Some(task))
+    }
+    fn create_session_inner(
+        &self,
+        account_id: &Id,
+        model: ModelChoice,
+        workspace: &Path,
+        now: u64,
+        managed_task: Option<&Id>,
+    ) -> Result<Session> {
         let account = self.account(account_id)?;
         model.validate()?;
-        let workspace = workspace.canonicalize()?;
+        let workspace = xcb_core::canonical(workspace)?;
         if !workspace.is_dir()
             || workspace.starts_with(&self.root)
             || self.root.starts_with(&workspace)
@@ -711,6 +1176,8 @@ impl Store {
             return Err(Error::Conflict("account or workspace unavailable"));
         }
         let session = Session {
+            route_pins: Default::default(),
+            requirements: Default::default(),
             id: new_id("s"),
             account: account_id.clone(),
             model,
@@ -718,6 +1185,7 @@ impl Store {
             title: "New session".into(),
             pane: Id::new("focus")?,
             state: State::Idle,
+            managed_task: managed_task.cloned(),
             revision: 0,
             created_at_ms: now,
             last_active_at_ms: now,
@@ -746,6 +1214,9 @@ impl Store {
         let db = self.db()?;
         session_from(&db, id)
     }
+    /// List readers tolerate one corrupt session row: it is skipped so the
+    /// summary and routing snapshot keep working. Single-row reads and every
+    /// run boundary stay strict (`session`, `session_from`).
     pub fn sessions(&self, limit: usize) -> Result<Vec<Session>> {
         if !(1..=256).contains(&limit) {
             return Err(xcb_core::Error::Invalid("session page limit").into());
@@ -756,9 +1227,36 @@ impl Store {
         let rows = query.query_map([limit as i64], |row| row.get::<_, String>(0))?;
         let mut sessions = Vec::new();
         for row in rows {
-            let session: Session = decode(&row?)?;
-            session.validate()?;
+            let Ok(session) = decode::<Session>(&row?).and_then(|session| {
+                session.validate()?;
+                Ok(session)
+            }) else {
+                continue;
+            };
             sessions.push(session);
+        }
+        Ok(sessions)
+    }
+    /// Sessions carrying a managed-task ownership marker, decoded tolerantly
+    /// like `sessions`: a row that cannot be proven marked is skipped rather
+    /// than reported, so the orphan sweep never acts on unproven custody.
+    pub fn managed_marked_sessions(&self) -> Result<Vec<Session>> {
+        let db = self.db()?;
+        let mut query = db.prepare(
+            "SELECT payload FROM sessions WHERE payload LIKE '%\"managed_task\":%' ORDER BY last_active,id LIMIT ?1",
+        )?;
+        let rows = query.query_map([MAX_SESSIONS + 1], |row| row.get::<_, String>(0))?;
+        let mut sessions = Vec::new();
+        for row in rows {
+            let Ok(session) = decode::<Session>(&row?).and_then(|session| {
+                session.validate()?;
+                Ok(session)
+            }) else {
+                continue;
+            };
+            if session.managed_task.is_some() {
+                sessions.push(session);
+            }
         }
         Ok(sessions)
     }
@@ -771,46 +1269,36 @@ impl Store {
         message.validate()?;
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut session = session_from(&tx, id)?.ok_or(Error::Unavailable("session not found"))?;
-        if session.revision != expected_revision {
-            return Err(Error::Conflict("session revision changed"));
-        }
-        let count: i64 = tx.query_row(
-            "SELECT count(*) FROM messages WHERE session=?1",
-            [id.as_str()],
-            |row| row.get(0),
-        )?;
-        if count >= MAX_MESSAGES {
-            return Err(xcb_core::Error::Limit("session messages").into());
-        }
-        tx.execute(
-            "INSERT INTO messages VALUES(?1,?2,?3,?4)",
-            params![
-                message.id.as_str(),
-                id.as_str(),
-                count + 1,
-                serde_json::to_string(message)?
-            ],
-        )?;
-        session.revision = session
-            .revision
-            .checked_add(1)
-            .ok_or(Error::Conflict("revision overflow"))?;
-        session.last_active_at_ms = session.last_active_at_ms.max(message.at_ms);
-        if session.title == "New session" && message.role == xcb_core::session::Role::User {
-            session.title = message
-                .text
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-                .chars()
-                .take(80)
-                .collect();
-            if session.title.is_empty() {
-                session.title = "Image message".into();
-            }
-        }
-        update_session(&tx, &session, expected_revision)?;
+        let session = append_message_in(&tx, id, Some(expected_revision), message)?;
+        tx.commit()?;
+        Ok(session)
+    }
+    /// Append a tool transcript message at the session's current revision.
+    /// Tool results are appended by the run owner, so the revision read and
+    /// the append share one transaction instead of two fsync'd commits.
+    pub(crate) fn append_tool_message(&self, id: &Id, message: &Message) -> Result<Session> {
+        message.validate()?;
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let session = append_message_in(&tx, id, None, message)?;
+        tx.commit()?;
+        Ok(session)
+    }
+    /// Settle a tool receipt and append its transcript message in one
+    /// durable transaction. Either both land or neither does, so a settled
+    /// receipt is never separated from its recorded result.
+    pub(crate) fn settle_tool_and_append(
+        &self,
+        run: &RunRecord,
+        call: &str,
+        id: &Id,
+        message: &Message,
+    ) -> Result<Session> {
+        message.validate()?;
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        settle_tool_in(&tx, run, call)?;
+        let session = append_message_in(&tx, id, None, message)?;
         tx.commit()?;
         Ok(session)
     }
@@ -822,35 +1310,169 @@ impl Store {
         )?;
         usize::try_from(count).map_err(|_| xcb_core::Error::Invalid("message count").into())
     }
-    pub fn messages(&self, id: &Id, limit: usize) -> Result<Vec<Message>> {
-        if !(1..=512).contains(&limit) {
-            return Err(xcb_core::Error::Invalid("message page limit").into());
-        }
-        let db = self.db()?;
-        let mut query = db.prepare("SELECT payload FROM (SELECT sequence,payload FROM messages WHERE session=?1 ORDER BY sequence DESC LIMIT ?2) ORDER BY sequence")?;
-        let rows = query.query_map(params![id.as_str(), limit as i64], |row| {
-            row.get::<_, String>(0)
-        })?;
-        let mut messages = Vec::new();
-        let mut bytes = 0usize;
-        for row in rows {
-            let row = row?;
-            bytes += row.len();
-            if bytes > 8 * 1024 * 1024 {
-                return Err(xcb_core::Error::Limit("transcript page").into());
-            }
-            let message: Message = decode(&row)?;
-            message.validate()?;
-            messages.push(message);
-        }
-        Ok(messages)
+    /// Prove the exact managed dispatch prompt at its durable transcript
+    /// boundary. Message counts alone do not identify the inserted input.
+    pub(crate) fn input_matches_digest(
+        &self,
+        session: &Id,
+        before: usize,
+        expected: &str,
+    ) -> Result<bool> {
+        let sequence = before
+            .checked_add(1)
+            .ok_or(xcb_core::Error::Limit("input sequence"))?;
+        let payload: Option<(String, String)> = self
+            .db()?
+            .query_row(
+                "SELECT id,payload FROM messages WHERE session=?1 AND sequence=?2",
+                params![session.as_str(), sequence as i64],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((id, payload)) = payload else {
+            return Ok(false);
+        };
+        let message: Message = decode(&payload)?;
+        message.validate()?;
+        Ok(message.id.as_str() == id
+            && message.role == xcb_core::session::Role::User
+            && crate::digest(&message.text) == expected)
     }
+    pub fn messages(&self, id: &Id, limit: usize) -> Result<Vec<Message>> {
+        Ok(self.transcript_page(id, None, limit)?.messages)
+    }
+
+    pub fn transcript_page(
+        &self,
+        id: &Id,
+        before: Option<u64>,
+        limit: usize,
+    ) -> Result<xcb_core::ui::TranscriptPage> {
+        crate::transcript::page(
+            &*self.db()?,
+            xcb_core::ui::TranscriptContext::Session(id.clone()),
+            before,
+            limit,
+        )
+    }
+
+    /// Compare the observed title, then change metadata without advancing the
+    /// transcript revision or invalidating an active worker's custody.
+    pub fn rename_session(&self, id: &Id, expected_title: &str, title: &str) -> Result<Session> {
+        let title = crate::transcript::title(title)?;
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut session = session_from(&tx, id)?.ok_or(Error::Unavailable("session not found"))?;
+        if session.id != *id || session.title != expected_title {
+            return Err(Error::Conflict("session title changed"));
+        }
+        session.title = title;
+        update_session(&tx, &session, session.revision)?;
+        tx.commit()?;
+        Ok(session)
+    }
+    pub fn set_session_route_pins(
+        &self,
+        id: &Id,
+        mut pins: xcb_core::session::RoutePins,
+    ) -> Result<()> {
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut session = session_from(&tx, id)?.ok_or(Error::Unavailable("session not found"))?;
+        if pins
+            .model
+            .as_deref()
+            .is_some_and(|model| model == session.model.id.as_str() || model == session.model.label)
+        {
+            pins.model = Some(session.model.key());
+        }
+        session.route_pins = pins;
+        update_session(&tx, &session, session.revision)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Monotonic metadata update; preserves transcript revision and run custody.
+    pub fn require_session_capabilities(
+        &self,
+        id: &Id,
+        requirements: xcb_core::session::TaskRequirements,
+    ) -> Result<Session> {
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut session = session_from(&tx, id)?.ok_or(Error::Unavailable("session not found"))?;
+        session.requirements = session.requirements.merge(requirements);
+        update_session(&tx, &session, session.revision)?;
+        tx.commit()?;
+        Ok(session)
+    }
+
+    pub fn authentication_required(&self, account: &Id) -> Result<bool> {
+        let db = self.db()?;
+        authentication_required_from(&db, account)
+    }
+
+    pub fn require_authenticated_account(&self, account: &Id) -> Result<()> {
+        if self.authentication_required(account)? {
+            return Err(Error::Unavailable(AUTHENTICATION_REQUIRED));
+        }
+        Ok(())
+    }
+
+    /// Prompting probes recheck health under their exclusive account lease.
+    /// Reconnect and metadata probes remain available without this admission.
+    pub(crate) fn require_authenticated_run(&self, run: &RunRecord) -> Result<()> {
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (current, _) = self.owned_run_from(&tx, run)?;
+        if authentication_required_from(&tx, &current.account)? {
+            return Err(Error::Unavailable(AUTHENTICATION_REQUIRED));
+        }
+        Ok(())
+    }
+
+    /// A never-started provider/bridge may still have changed credentials.
+    /// Callers releasing such a lease must prove its receipts are settled;
+    /// generic turn settlement intentionally has different effect semantics.
+    pub(crate) fn require_settled_tools(&self, run: &RunRecord) -> Result<()> {
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        self.owned_run_from(&tx, run)?;
+        let pending: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tool_effects WHERE run=?1 AND settled=0)",
+            [run.id.as_str()],
+            |row| row.get(0),
+        )?;
+        if pending {
+            return Err(Error::CleanupUnproven);
+        }
+        Ok(())
+    }
+
+    /// Only successful explicit credential replacement or supervised reauth
+    /// calls this, after publication while still holding exclusive custody.
+    /// Metadata presence, generation rotation, and routine refresh do not.
+    pub(crate) fn clear_authentication_failure(&self, run: &RunRecord) -> Result<()> {
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (current, _) = self.owned_run_from(&tx, run)?;
+        tx.execute(
+            "DELETE FROM account_auth_failures WHERE account=?1",
+            [current.account.as_str()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn prepare_run(
         &self,
         session_id: &Id,
         expected_revision: u64,
         now: u64,
     ) -> Result<RunRecord> {
+        let capacity = crate::config::Config::load(&self.root)?
+            .0
+            .max_runs_per_account;
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut session =
@@ -858,14 +1480,23 @@ impl Store {
         if session.revision != expected_revision {
             return Err(Error::Conflict("session revision changed"));
         }
-        let held: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM leases WHERE account=?1)",
+        // Sessions keep independent leases up to the configured account
+        // capacity. Probe runs (runs with no session) hold the account alone:
+        // they may rotate credentials or rewrite provider state that live
+        // workers depend on.
+        let (held, probes): (u32, u32) = tx.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(r.session IS NULL),0)
+            FROM leases l JOIN runs r ON r.id=l.run AND r.account=l.account
+            WHERE l.account=?1",
             [session.account.as_str()],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
-        if held {
+        if probes > 0 {
+            return Err(Error::Conflict("account has an unsettled probe"));
+        }
+        if held >= capacity {
             return Err(Error::Conflict(
-                "account has an unsettled run; time alone cannot release custody",
+                "account is at its configured concurrent run limit",
             ));
         }
         let account_json: String = tx.query_row(
@@ -876,6 +1507,9 @@ impl Store {
         let account: Account = decode(&account_json)?;
         if !account.enabled {
             return Err(Error::Conflict("account is disabled"));
+        }
+        if authentication_required_from(&tx, &account.id)? {
+            return Err(Error::Unavailable(AUTHENTICATION_REQUIRED));
         }
         if blocked_until_from(&tx, &self.root, &account, now)?.is_some() {
             return Err(Error::Unavailable(
@@ -900,6 +1534,7 @@ impl Store {
             model: Some(session.model.clone()),
             owner: Some(self.owner()),
             command_custody: None,
+            capability_processes: BTreeMap::new(),
         };
         tx.execute(
             "INSERT INTO runs VALUES(?1,?2,?3,?4,?5)",
@@ -912,8 +1547,8 @@ impl Store {
             ],
         )?;
         tx.execute(
-            "INSERT INTO leases VALUES(?1,?2)",
-            params![session.account.as_str(), run.id.as_str()],
+            "INSERT INTO leases(run,account) VALUES(?1,?2)",
+            params![run.id.as_str(), session.account.as_str()],
         )?;
         update_session(&tx, &session, expected_revision)?;
         tx.commit()?;
@@ -937,6 +1572,9 @@ impl Store {
         }
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Probes keep exclusive custody at any configured run capacity: a
+        // sign-in or health check may rewrite the credential and provider
+        // state that live runs read.
         let held: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM leases WHERE account=?1)",
             [account.as_str()],
@@ -957,6 +1595,7 @@ impl Store {
             model,
             owner: Some(self.owner()),
             command_custody: None,
+            capability_processes: BTreeMap::new(),
         };
         tx.execute(
             "INSERT INTO runs VALUES(?1,NULL,?2,'prepared',?3)",
@@ -967,8 +1606,8 @@ impl Store {
             ],
         )?;
         tx.execute(
-            "INSERT INTO leases VALUES(?1,?2)",
-            params![account.as_str(), run.id.as_str()],
+            "INSERT INTO leases(run,account) VALUES(?1,?2)",
+            params![run.id.as_str(), account.as_str()],
         )?;
         tx.commit()?;
         Ok(run)
@@ -1034,6 +1673,64 @@ impl Store {
     pub(crate) fn verify_owned_run(&self, run: &RunRecord) -> Result<()> {
         let db = self.db()?;
         self.owned_run_from(&db, run).map(|_| ())
+    }
+
+    fn update_capability_custody(
+        &self,
+        run: &RunRecord,
+        server: &str,
+        update: impl FnOnce(&mut BTreeMap<String, Option<u32>>) -> Result<()>,
+    ) -> Result<()> {
+        Id::new(server)?;
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (mut current, payload) = self.owned_run_from(&tx, run)?;
+        update(&mut current.capability_processes)?;
+        current.validate()?;
+        if tx.execute(
+            "UPDATE runs SET payload=?1 WHERE id=?2 AND payload=?3",
+            params![serde_json::to_string(&current)?, run.id.as_str(), payload],
+        )? != 1
+        {
+            return Err(Error::Conflict("run authority changed"));
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn mark_capability_starting(&self, run: &RunRecord, server: &str) -> Result<()> {
+        self.update_capability_custody(run, server, |servers| {
+            if servers.contains_key(server) {
+                return Err(Error::Conflict("tool server already has custody"));
+            }
+            servers.insert(server.to_owned(), None);
+            Ok(())
+        })
+    }
+
+    pub(crate) fn mark_capability_spawned(
+        &self,
+        run: &RunRecord,
+        server: &str,
+        pid: u32,
+    ) -> Result<()> {
+        self.update_capability_custody(run, server, |servers| {
+            if servers.get(server) != Some(&None) {
+                return Err(Error::Conflict("tool server launch intent changed"));
+            }
+            servers.insert(server.to_owned(), Some(pid));
+            Ok(())
+        })
+    }
+
+    /// Only the owning manager calls this after its independent group join.
+    pub(crate) fn clear_capability_custody(&self, run: &RunRecord, server: &str) -> Result<()> {
+        self.update_capability_custody(run, server, |servers| {
+            if servers.remove(server).is_none() {
+                return Err(Error::Conflict("tool server custody is absent"));
+            }
+            Ok(())
+        })
     }
 
     /// Persist before launching any guest command. A second pending command,
@@ -1122,9 +1819,10 @@ impl Store {
     }
 
     pub(crate) fn settle(&self, run: &RunRecord, state: State, now: u64) -> Result<()> {
-        self.settle_inner(run, state, now, None)
+        self.settle_inner(run, state, now, None, None)
     }
 
+    #[cfg(test)]
     pub(crate) fn settle_outcome(
         &self,
         run: &RunRecord,
@@ -1132,8 +1830,51 @@ impl Store {
         outcome: &crate::runner::Outcome,
         now: u64,
     ) -> Result<()> {
+        self.settle_outcome_submitted(run, input, outcome, None, now)
+    }
+
+    pub(crate) fn settle_outcome_submitted(
+        &self,
+        run: &RunRecord,
+        input: &Id,
+        outcome: &crate::runner::Outcome,
+        prompt_submission: Option<bool>,
+        now: u64,
+    ) -> Result<()> {
         validate_outcome(outcome)?;
-        self.settle_inner(run, outcome.state, now, Some((input, outcome)))
+        self.settle_inner(
+            run,
+            outcome.state,
+            now,
+            Some((input, outcome, prompt_submission)),
+            None,
+        )
+    }
+
+    /// Application inference persists no prompt, output, or diagnostic payload.
+    /// Only joined sessionless terminal facts can affect account health.
+    pub(crate) fn settle_application(
+        &self,
+        run: &RunRecord,
+        facts: &xcb_core::policy::TurnFacts,
+        now: u64,
+    ) -> Result<()> {
+        use xcb_core::policy::{EffectState, Terminal};
+        if run.session.is_some()
+            || !facts.joined
+            || facts.effects != EffectState::None
+            || facts.pending_attention
+            || !matches!(facts.terminal, Terminal::Completed | Terminal::Failed)
+            || (facts.terminal == Terminal::Completed && facts.failure.is_some())
+        {
+            return Err(Error::Conflict("application settlement is unproven"));
+        }
+        let state = if facts.terminal == Terminal::Completed {
+            State::Idle
+        } else {
+            State::Failed
+        };
+        self.settle_inner(run, state, now, None, Some(facts))
     }
 
     fn settle_inner(
@@ -1141,15 +1882,48 @@ impl Store {
         run: &RunRecord,
         state: State,
         now: u64,
-        outcome: Option<(&Id, &crate::runner::Outcome)>,
+        outcome: Option<(&Id, &crate::runner::Outcome, Option<bool>)>,
+        application: Option<&xcb_core::policy::TurnFacts>,
     ) -> Result<()> {
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (current, payload) = self.owned_run_from(&tx, run)?;
+        if !current.capability_processes.is_empty() {
+            return Err(Error::Conflict(
+                "tool server stop is unproven; account custody retained",
+            ));
+        }
         if current.command_custody.is_some() {
             return Err(Error::Conflict(
                 "command guest stop is unproven; reconcile command custody before settling",
             ));
+        }
+        if let Some(facts) = outcome
+            .map(|(_, outcome, _)| &outcome.facts)
+            .or(application)
+        {
+            use xcb_core::policy::{Failure, Terminal};
+            if facts.terminal == Terminal::Failed && facts.failure == Some(Failure::Authentication)
+            {
+                let generation = crate::application_qualification::read_generation(
+                    &self.root,
+                    &current.account,
+                )?;
+                tx.execute(
+                    "INSERT INTO account_auth_failures(account,generation,run) VALUES(?1,?2,?3)
+                    ON CONFLICT(account) DO UPDATE SET generation=excluded.generation,run=excluded.run",
+                    params![current.account.as_str(), generation, current.id.as_str()],
+                )?;
+            } else if facts.terminal == Terminal::Completed
+                && facts.failure.is_none()
+                && !facts.pending_attention
+                && state == State::Idle
+            {
+                tx.execute(
+                    "DELETE FROM account_auth_failures WHERE account=?1",
+                    [current.account.as_str()],
+                )?;
+            }
         }
         if let Some(id) = &current.session {
             let mut session =
@@ -1160,7 +1934,7 @@ impl Store {
                 .ok_or(Error::Conflict("revision overflow"))?;
             session.state = state;
             session.last_active_at_ms = session.last_active_at_ms.max(now);
-            if let Some((input, outcome)) = outcome {
+            if let Some((input, outcome, prompt_submission)) = outcome {
                 let input_sequence: u32 = tx.query_row(
                     "SELECT sequence FROM messages WHERE id=?1 AND session=?2",
                     params![input.as_str(), id.as_str()],
@@ -1179,6 +1953,7 @@ impl Store {
                     input_sequence: input_sequence.into(),
                     message_count: message_count.into(),
                     session_revision: session.revision,
+                    prompt_submission,
                     outcome: outcome.clone(),
                 };
                 tx.execute(
@@ -1219,6 +1994,50 @@ impl Store {
         session_id: &Id,
         message_count_before: usize,
     ) -> Result<Option<crate::runner::Outcome>> {
+        Ok(self
+            .settled_record(session_id, message_count_before)?
+            .map(|record| record.outcome))
+    }
+
+    /// Reuse only the current, identity-checked terminal receipt. A later
+    /// message, rebind, unfinished run, or revision invalidates this proof.
+    pub(crate) fn latest_settled_outcome(
+        &self,
+        session_id: &Id,
+    ) -> Result<Option<crate::runner::Outcome>> {
+        let sequence: Option<i64> = self.db()?.query_row(
+            "SELECT max(input_sequence) FROM run_outcomes WHERE session=?1",
+            [session_id.as_str()],
+            |row| row.get(0),
+        )?;
+        let Some(sequence) = sequence else {
+            return Ok(None);
+        };
+        let before = sequence
+            .checked_sub(1)
+            .and_then(|before| usize::try_from(before).ok())
+            .ok_or(Error::Protocol("terminal outcome sequence"))?;
+        self.settled_outcome(session_id, before)
+    }
+
+    /// Prompt submission is proven only by an exact current terminal receipt.
+    /// Legacy receipts and superseded turns cannot prove either submission
+    /// or its absence. A failed submission attempt is likewise unknown.
+    pub(crate) fn settled_input_submission(
+        &self,
+        session_id: &Id,
+        message_count_before: usize,
+    ) -> Result<Option<bool>> {
+        Ok(self
+            .settled_record(session_id, message_count_before)?
+            .and_then(|record| record.prompt_submission))
+    }
+
+    fn settled_record(
+        &self,
+        session_id: &Id,
+        message_count_before: usize,
+    ) -> Result<Option<SettledOutcome>> {
         let before = u64::try_from(message_count_before)
             .map_err(|_| xcb_core::Error::Invalid("message count"))?;
         if before >= MAX_MESSAGES as u64 {
@@ -1283,7 +2102,7 @@ impl Store {
         {
             return Ok(None);
         }
-        Ok(Some(record.outcome))
+        Ok(Some(record))
     }
     pub fn unsettled_runs(&self) -> Result<Vec<RunRecord>> {
         let db = self.db()?;
@@ -1408,6 +2227,7 @@ impl Store {
         }
         let settled = RunRecord {
             phase: "settled".into(),
+            capability_processes: BTreeMap::new(),
             ..run.clone()
         };
         if tx.execute(
@@ -1432,132 +2252,14 @@ impl Store {
         tx.commit()?;
         Ok(settled)
     }
-    /// Settles a run that took an account lease but never recorded a process
-    /// group, releasing the lease.
-    ///
-    /// `prepare_run` takes the lease before the provider is spawned, and
-    /// `mark_spawned` records the process group immediately after. A process
-    /// killed inside that window leaves `phase = "prepared"` with `pid = None`:
-    /// a lease with nothing to signal, nothing to prove absent, and no way to
-    /// release it. Every other command then refuses — a new run, a probe,
-    /// enabling the account, even removing the session — so the account
-    /// becomes permanently unusable. `recover_run` is right to refuse this
-    /// case, because the record genuinely cannot prove whether a provider
-    /// process exists; what was missing is any way for the operator to answer
-    /// what the record cannot.
-    ///
-    /// This is that answer and nothing more. It settles ONLY a `prepared` run
-    /// with no recorded process group, under the same payload compare-and-swap
-    /// `recover_run` uses, and it refuses outright if the run carries command
-    /// custody or an unsettled credential receipt — those have real effects to
-    /// reconcile and are not the operator's to wave through. A run that
-    /// recorded a process group keeps going through `recover_run`, which proves
-    /// the stop instead of asserting it.
-    pub fn discard_unspawned_run(
-        &self,
-        run_id: &Id,
-        expected_digest: &str,
-        now: u64,
-    ) -> Result<RunRecord> {
-        let mut db = self.db()?;
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let payload: String = tx
-            .query_row(
-                "SELECT payload FROM runs WHERE id=?1",
-                [run_id.as_str()],
-                |row| row.get(0),
-            )
-            .optional()?
-            .ok_or(Error::Unavailable("run not found"))?;
-        let run: RunRecord = decode(&payload)?;
-        run.validate()?;
-        if run.phase != "prepared" {
-            return Err(Error::Conflict(
-                "run reached the provider; recover it by proving its process group stopped",
-            ));
-        }
-        // `mark_spawned` moves phase and pid in one statement, so a `prepared`
-        // row never carries a process group through the normal path. This
-        // guards the abnormal one: a payload that has been corrupted or edited
-        // on disk. Discarding is only ever for a run with nothing to signal,
-        // and a recorded process group means there is something to signal.
-        if run.pid.is_some() {
-            return Err(Error::Conflict(
-                "run recorded a process group; recover it by proving that group stopped",
-            ));
-        }
-        if digest(payload.as_bytes()) != expected_digest {
-            return Err(Error::Conflict("run changed since it was inspected"));
-        }
-        if run.command_custody.is_some() {
-            return Err(Error::Conflict(
-                "command guest stop is unproven; reconcile command custody before discarding",
-            ));
-        }
-        let unsettled: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM tool_effects WHERE run=?1 AND settled=0)",
-            [run_id.as_str()],
-            |row| row.get(0),
-        )?;
-        if unsettled {
-            return Err(Error::Conflict(
-                "run has unsettled effect receipts; reconcile them before discarding",
-            ));
-        }
-        let held: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM leases WHERE account=?1 AND run=?2)",
-            params![run.account.as_str(), run_id.as_str()],
-            |row| row.get(0),
-        )?;
-        if !held {
-            return Err(Error::Conflict("run lease is absent"));
-        }
-        if let Some(session_id) = &run.session {
-            let mut session =
-                session_from(&tx, session_id)?.ok_or(Error::Unavailable("session not found"))?;
-            let expected_revision = session.revision;
-            session.revision = expected_revision
-                .checked_add(1)
-                .ok_or(Error::Conflict("revision overflow"))?;
-            // The turn never reached the provider, so the session did not
-            // become uncertain: nothing was sent and nothing came back.
-            session.state = State::Idle;
-            session.last_active_at_ms = session.last_active_at_ms.max(now);
-            update_session(&tx, &session, expected_revision)?;
-        }
-        let settled = RunRecord {
-            phase: "settled".into(),
-            ..run.clone()
-        };
-        if tx.execute(
-            "UPDATE runs SET phase='settled', payload=?1 WHERE id=?2 AND account=?3 AND phase='prepared' AND payload=?4",
-            params![
-                serde_json::to_string(&settled)?,
-                run_id.as_str(),
-                run.account.as_str(),
-                payload
-            ],
-        )? != 1
-        {
-            return Err(Error::Conflict("run changed while it was being discarded"));
-        }
-        if tx.execute(
-            "DELETE FROM leases WHERE account=?1 AND run=?2",
-            params![run.account.as_str(), run_id.as_str()],
-        )? != 1
-        {
-            return Err(Error::Conflict(
-                "lease changed while it was being discarded",
-            ));
-        }
-        tx.commit()?;
-        Ok(settled)
-    }
     pub fn remove_session(&self, id: &Id) -> Result<bool> {
-        if let Some(managed) = self.existing_managed_store()?
-            && managed.has_active_session(id)?
         {
-            return Err(Error::Conflict("session belongs to an active managed task"));
+            let managed = self.managed_guard()?;
+            if let Some(managed) = managed.as_ref()
+                && managed.has_active_session(id)?
+            {
+                return Err(Error::Conflict("session belongs to an active managed task"));
+            }
         }
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1589,25 +2291,48 @@ impl Store {
         drop(db);
         // Do not hold native database custody while inspecting the managed
         // store. Paused questions and between-turn queues still need history.
-        if let Some(managed) = self.existing_managed_store()? {
-            let mut eligible = Vec::new();
-            for id in candidates {
-                if !managed.has_active_session(&id)? {
-                    eligible.push(id);
-                }
+        // One managed handle and one active-task scan serve the whole pass.
+        let managed = self.managed_guard()?;
+        match managed.as_ref() {
+            Some(managed) => {
+                let active = managed.active_session_ids()?;
+                Ok(candidates
+                    .into_iter()
+                    .filter(|id| !active.contains(id))
+                    .collect())
             }
-            Ok(eligible)
-        } else {
-            Ok(candidates)
+            None => Ok(candidates),
         }
     }
 
-    fn existing_managed_store(&self) -> Result<Option<crate::managed::ManagedStore>> {
-        if self.root.join("managed/managed.sqlite").try_exists()? {
-            Ok(Some(crate::managed::ManagedStore::open(&self.root)?))
-        } else {
-            Ok(None)
+    /// The cached managed handle, opened on first use when
+    /// `managed/managed.sqlite` exists. A failed open is retried on the next
+    /// call rather than remembered; a still-missing database leaves `None`
+    /// and is re-probed cheaply each call. A read-only store opens a
+    /// read-only reader: no migration, cleanup or wait on the supervisor
+    /// lock, and an unreadable or older schema fails at once.
+    fn managed_guard(&self) -> Result<MutexGuard<'_, Option<crate::managed::ManagedStore>>> {
+        let mut managed = self
+            .managed
+            .lock()
+            .map_err(|_| Error::Conflict("managed store lock poisoned"))?;
+        if managed.is_none() && self.root.join("managed/managed.sqlite").try_exists()? {
+            *managed = if self.read_only {
+                crate::managed::ManagedStore::open_read_only(&self.root)?
+            } else {
+                Some(crate::managed::ManagedStore::open(&self.root)?)
+            };
         }
+        Ok(managed)
+    }
+
+    /// The cached handle's active-task scan count, for churn regression tests.
+    #[cfg(test)]
+    pub(crate) fn managed_active_scans(&self) -> Option<u64> {
+        self.managed
+            .lock()
+            .ok()
+            .and_then(|managed| managed.as_ref().map(|m| m.active_scan_count()))
     }
     pub fn set_models(&self, provider: Provider, choices: &[ModelChoice]) -> Result<()> {
         if choices.len() > 4096 {
@@ -1633,20 +2358,108 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+    /// Replace one account's own catalog. Other accounts' catalogs and the
+    /// provider-wide fallback are untouched. An empty list removes the
+    /// account's observation, so it falls back to the provider-wide catalog.
+    pub fn set_account_models(&self, account: &Id, choices: &[ModelChoice]) -> Result<()> {
+        if choices.len() > MAX_ACCOUNT_MODELS {
+            return Err(xcb_core::Error::Limit("models").into());
+        }
+        let provider = self.account(account)?.provider;
+        for choice in choices {
+            choice.validate()?;
+            if choice.provider != provider {
+                return Err(Error::Conflict("model provider mismatch"));
+            }
+        }
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "DELETE FROM account_models WHERE account=?1",
+            [account.as_str()],
+        )?;
+        let others: i64 =
+            tx.query_row("SELECT count(*) FROM account_models", [], |row| row.get(0))?;
+        if others as usize + choices.len() > MAX_CATALOG_ROWS {
+            return Err(xcb_core::Error::Limit("models").into());
+        }
+        for choice in choices {
+            tx.execute(
+                "INSERT OR REPLACE INTO account_models VALUES(?1,?2,?3)",
+                params![
+                    account.as_str(),
+                    choice.key(),
+                    serde_json::to_string(choice)?
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+    /// Every model some account can use: each account's own catalog, plus
+    /// the provider-wide fallback for any provider with an account (or no
+    /// account at all) that still relies on it. One row per model key.
     pub fn models(&self) -> Result<Vec<ModelChoice>> {
+        Ok(self.model_catalog()?.union())
+    }
+    /// The catalog `account` routes with: its own observation, else the
+    /// provider-wide fallback.
+    pub fn account_models(&self, account: &Id) -> Result<Vec<ModelChoice>> {
+        let account = self.account(account)?;
+        Ok(self
+            .model_catalog()?
+            .for_account(&account.id, account.provider)
+            .to_vec())
+    }
+    pub fn model_catalog(&self) -> Result<ModelCatalog> {
+        let accounts = self
+            .accounts()?
+            .into_iter()
+            .map(|account| (account.id, account.provider))
+            .collect();
         let db = self.db()?;
         let mut query = db.prepare("SELECT payload FROM models ORDER BY provider,id LIMIT 4097")?;
         let rows = query.query_map([], |row| row.get::<_, String>(0))?;
-        let mut choices = Vec::new();
+        let mut fallback = Vec::new();
         for row in rows {
             let choice: ModelChoice = decode(&row?)?;
             choice.validate()?;
-            choices.push(choice);
+            fallback.push(choice);
         }
-        if choices.len() > 4096 {
+        if fallback.len() > MAX_ACCOUNT_MODELS {
             return Err(xcb_core::Error::Limit("models").into());
         }
-        Ok(choices)
+        let mut observed: BTreeMap<Id, Vec<ModelChoice>> = BTreeMap::new();
+        // A read-only handle on an older database may predate the table.
+        let available: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='account_models')",
+            [],
+            |row| row.get(0),
+        )?;
+        if available {
+            let mut query = db.prepare(
+                "SELECT account, payload FROM account_models ORDER BY account,id LIMIT ?1",
+            )?;
+            let rows = query.query_map([MAX_CATALOG_ROWS as i64 + 1], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            let mut count = 0;
+            for row in rows {
+                let (account, payload) = row?;
+                count += 1;
+                if count > MAX_CATALOG_ROWS {
+                    return Err(xcb_core::Error::Limit("models").into());
+                }
+                let choice: ModelChoice = decode(&payload)?;
+                choice.validate()?;
+                observed.entry(Id::new(account)?).or_default().push(choice);
+            }
+        }
+        Ok(ModelCatalog {
+            accounts,
+            fallback,
+            observed,
+        })
     }
     pub fn record_usage(&self, observation: &UsageObservation) -> Result<()> {
         observation.counters.total()?;
@@ -1706,7 +2519,7 @@ impl Store {
     pub fn record_quota(&self, point: &QuotaPoint) -> Result<()> {
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        insert_quota(&tx, point)?;
+        insert_quota(&tx, QUOTAS, point)?;
         tx.commit()?;
         Ok(())
     }
@@ -1716,7 +2529,51 @@ impl Store {
     /// pools and their observations are preserved, not relabeled or copied.
     pub(crate) fn record_account_quota(&self, run: &RunRecord, point: &QuotaPoint) -> Result<()> {
         point.validate()?;
-        if point.observed_at_ms < run.created_at_ms {
+        self.record_bound_quota(run, QUOTAS, point.observed_at_ms, |_| Ok(point.clone()))
+    }
+
+    /// Record a usage-limit cooldown for the account the run holds: the
+    /// provider refused a turn for this account's quota and reported no
+    /// reset, so the account stays at a known limit until `until_ms` unless
+    /// a provider-reported window observed later supersedes it (see
+    /// `xcb_core::usage::quota_blocked_until`). The same hold, pool, and
+    /// credential-generation rules apply as to a provider-reported meter.
+    /// Model-scoped limits are not recorded here: admission is per account,
+    /// and a model-specific window never implies account scope.
+    pub(crate) fn record_quota_limit(
+        &self,
+        run: &RunRecord,
+        observed_at_ms: u64,
+        until_ms: u64,
+    ) -> Result<()> {
+        if until_ms <= observed_at_ms {
+            return Err(xcb_core::Error::Invalid("quota cooldown").into());
+        }
+        self.record_bound_quota(run, QUOTA_LIMITS, observed_at_ms, |account| {
+            Ok(QuotaPoint {
+                pool: account.quota_pool.clone(),
+                window: Id::new(xcb_core::usage::limit_window(account.provider))?,
+                used_percent: 100.0,
+                resets_at_ms: until_ms,
+                observed_at_ms,
+            })
+        })
+    }
+
+    /// The cooldowns recorded for a pool, oldest first.
+    pub fn quota_limits(&self, pool: &Id) -> Result<Vec<QuotaPoint>> {
+        let db = self.db()?;
+        quota_limits_from(&db, pool)
+    }
+
+    fn record_bound_quota(
+        &self,
+        run: &RunRecord,
+        table: &str,
+        observed_at_ms: u64,
+        point_for: impl FnOnce(&Account) -> Result<QuotaPoint>,
+    ) -> Result<()> {
+        if observed_at_ms < run.created_at_ms {
             return Err(Error::Conflict(
                 "quota observation predates its account lease",
             ));
@@ -1738,9 +2595,9 @@ impl Store {
         if let Some(pool) = &pool {
             account.quota_pool = pool.clone();
         }
-        let mut point = point.clone();
+        let mut point = point_for(&account)?;
         point.pool = account.quota_pool.clone();
-        insert_quota(&tx, &point)?;
+        insert_quota(&tx, table, &point)?;
         if generation_pool(&self.root, &account)? != pool {
             return Err(Error::Conflict("account credential generation changed"));
         }
@@ -1760,6 +2617,121 @@ impl Store {
         Ok(())
     }
 
+    /// Batched observability checkpoint for the streaming path: pending
+    /// velocity samples and quota observations land in ONE immediate
+    /// transaction instead of a commit per event. Run custody and credential
+    /// generation checks fail the batch exactly as the per-event recorders
+    /// do. Telemetry that contradicts what is stored — a sample that would
+    /// regress the velocity meter or an observation stamped before its run
+    /// began (a backward clock step), or a different quota payload at an
+    /// instant already recorded — is dropped and counted instead: stored
+    /// rows stay monotonic and are never rewritten, and a meter disagreement
+    /// never decides the outcome of the turn that reported it.
+    pub(crate) fn record_observations(
+        &self,
+        run: &RunRecord,
+        session: &Id,
+        samples: &[xcb_core::usage::VelocitySample],
+        observations: &[PendingQuota],
+    ) -> Result<()> {
+        for sample in samples {
+            if sample.output_tokens > xcb_core::usage::COUNTER_LIMIT {
+                return Err(xcb_core::Error::Limit("velocity counter").into());
+            }
+        }
+        if samples.is_empty() && observations.is_empty() {
+            return Ok(());
+        }
+        let mut dropped = 0u64;
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if !samples.is_empty() {
+            let mut previous: Option<(i64, i64)> = tx.query_row("SELECT at_ms,output_total FROM velocity WHERE session=?1 ORDER BY at_ms DESC LIMIT 1", [session.as_str()], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
+            for sample in samples {
+                if previous.is_some_and(|(at, count)| {
+                    at > sample.at_ms as i64 || count > sample.output_tokens as i64
+                }) {
+                    dropped += 1;
+                    continue;
+                }
+                tx.execute("INSERT INTO velocity VALUES(?1,?2,?3) ON CONFLICT(session,at_ms) DO UPDATE SET output_total=excluded.output_total", params![session.as_str(), sql(sample.at_ms)?, sql(sample.output_tokens)?])?;
+                previous = Some((sample.at_ms as i64, sample.output_tokens as i64));
+            }
+            tx.execute("DELETE FROM velocity WHERE session=?1 AND at_ms NOT IN (SELECT at_ms FROM velocity WHERE session=?1 ORDER BY at_ms DESC LIMIT 2048)", [session.as_str()])?;
+        }
+        if !observations.is_empty() {
+            self.owned_run_from(&tx, run)?;
+            let payload: String = tx.query_row(
+                "SELECT payload FROM accounts WHERE id=?1",
+                [run.account.as_str()],
+                |row| row.get(0),
+            )?;
+            let mut account: Account = decode(&payload)?;
+            account.validate()?;
+            if account.id != run.account {
+                return Err(Error::Conflict("account identity changed"));
+            }
+            let pool = generation_pool(&self.root, &account)?;
+            if let Some(pool) = &pool {
+                account.quota_pool = pool.clone();
+            }
+            for observation in observations {
+                let point = QuotaPoint {
+                    pool: account.quota_pool.clone(),
+                    window: observation.window.clone(),
+                    used_percent: observation.used_percent,
+                    observed_at_ms: observation.observed_at_ms,
+                    resets_at_ms: observation.resets_at_ms,
+                };
+                // Malformed meter updates are dropped like the per-event path
+                // drops them; they never reach the table.
+                if point.validate().is_err() {
+                    continue;
+                }
+                // Stamped before this lease began: freshness for this
+                // account cannot be shown, so it is never attributed to it.
+                // The first payload stored at an instant stays; a different
+                // one at the same instant is dropped.
+                if observation.observed_at_ms < run.created_at_ms
+                    || !store_quota(&tx, QUOTAS, &point)?
+                {
+                    dropped += 1;
+                }
+            }
+            if generation_pool(&self.root, &account)? != pool {
+                return Err(Error::Conflict("account credential generation changed"));
+            }
+            self.owned_run_from(&tx, run)?;
+            if tx.execute(
+                "UPDATE accounts SET payload=?1 WHERE id=?2 AND payload=?3",
+                params![
+                    serde_json::to_string(&account)?,
+                    account.id.as_str(),
+                    payload
+                ],
+            )? != 1
+            {
+                return Err(Error::Conflict("account identity changed"));
+            }
+        }
+        tx.commit()?;
+        if dropped > 0 {
+            self.dropped_observations
+                .fetch_add(dropped, std::sync::atomic::Ordering::Relaxed);
+        }
+        #[cfg(test)]
+        self.observation_commits
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Telemetry observations the batched recorder dropped since this handle
+    /// opened (see `record_observations`).
+    pub fn dropped_observations(&self) -> u64 {
+        self.dropped_observations
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub fn quota_blocked_until(&self, id: &Id, now: u64) -> Result<Option<u64>> {
         let db = self.db()?;
         let payload: String = db.query_row(
@@ -1773,6 +2745,36 @@ impl Store {
             return Err(Error::Conflict("account identity changed"));
         }
         blocked_until_from(&db, &self.root, &account, now)
+    }
+
+    /// Fresh spending pressure follows the same account/credential binding
+    /// as quota admission. Old identity telemetry cannot improve a route.
+    pub fn quota_spending_pressure(
+        &self,
+        id: &Id,
+        now: u64,
+    ) -> Result<Option<xcb_core::usage::QuotaSpendingPressure>> {
+        let db = self.db()?;
+        let payload: String = db.query_row(
+            "SELECT payload FROM accounts WHERE id=?1",
+            [id.as_str()],
+            |row| row.get(0),
+        )?;
+        let account: Account = decode(&payload)?;
+        account.validate()?;
+        if &account.id != id {
+            return Err(Error::Conflict("account identity changed"));
+        }
+        Ok(
+            current_quota_points_from(&db, &self.root, &account)?.and_then(|points| {
+                xcb_core::usage::quota_spending_pressure(
+                    &points,
+                    &account.quota_pool,
+                    account.provider,
+                    now,
+                )
+            }),
+        )
     }
 
     pub(crate) fn require_quota_available(&self, id: &Id, now: u64) -> Result<()> {
@@ -1812,6 +2814,11 @@ impl Store {
         )?;
         if held || session.revision != expected {
             return Err(Error::Conflict("session is busy or changed"));
+        }
+        if !session.requirements.allows(model.provider) {
+            return Err(Error::Conflict(
+                "this task requires Codex; this session cannot move to another provider",
+            ));
         }
         session.account = account.clone();
         session.model = model;
@@ -1880,13 +2887,10 @@ impl Store {
         Ok(())
     }
     pub(crate) fn settle_tool(&self, run: &RunRecord, call: &str) -> Result<()> {
-        if self.db()?.execute(
-            "UPDATE tool_effects SET settled=1 WHERE run=?1 AND call=?2 AND settled=0",
-            params![run.id.as_str(), call],
-        )? != 1
-        {
-            return Err(Error::Conflict("tool receipt changed"));
-        }
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        settle_tool_in(&tx, run, call)?;
+        tx.commit()?;
         Ok(())
     }
     pub fn record_velocity(
@@ -1958,6 +2962,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
     use std::fs;
     use xcb_core::{
         Provider,
@@ -1996,6 +3001,215 @@ mod tests {
         run
     }
 
+    fn recovery_codex_auth(account: &str, access: &str) -> Vec<u8> {
+        let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&serde_json::json!({
+                "sub": "synthetic-user",
+                "https://api.openai.com/auth": {"chatgpt_account_id": account}
+            }))
+            .unwrap(),
+        );
+        serde_json::to_vec(&serde_json::json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "id_token": format!("synthetic.{claims}.signature"),
+                "access_token": access,
+                "refresh_token": "synthetic-refresh",
+                "account_id": account,
+            },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn remove_account_deletes_record_and_credentials() {
+        let directory = root();
+        let state = xcb_core::canonical(directory.path()).unwrap().join("state");
+        let store = Store::open(&state).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Subscription", 1, None)
+            .unwrap();
+        let credential = store
+            .account_root(&account.id)
+            .unwrap()
+            .join("subscription-token");
+        crate::private::create(&credential, b"stored-credential").unwrap();
+        let account_path = state.join("accounts").join(account.id.as_str());
+
+        let removed = store.remove_account(&account.id).unwrap();
+
+        assert_eq!(removed.id, account.id);
+        assert!(store.accounts().unwrap().is_empty());
+        assert!(!account_path.exists());
+        assert!(store.unsettled_runs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn remove_account_refuses_held_custody_without_releasing_it() {
+        let directory = root();
+        let state = xcb_core::canonical(directory.path()).unwrap().join("state");
+        let store = Store::open(&state).unwrap();
+        let account = store
+            .add_account(Provider::Codex, "Subscription", 1, None)
+            .unwrap();
+        let account_path = state.join("accounts").join(account.id.as_str());
+        let run = store.prepare_probe(&account.id, None, 2).unwrap();
+
+        let error = store.remove_account(&account.id).unwrap_err();
+
+        assert!(error.to_string().contains("unsettled run"));
+        assert_eq!(store.accounts().unwrap().len(), 1);
+        assert!(account_path.exists());
+        assert_eq!(store.unsettled_runs().unwrap()[0].id, run.id);
+        let held: bool = store
+            .db()
+            .unwrap()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM leases WHERE account=?1)",
+                [account.id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(held);
+    }
+
+    #[test]
+    fn codex_login_recovery_child_fixture() {
+        let Ok(state) = std::env::var("XCB_SYNTHETIC_CODEX_RECOVERY_CHILD_STATE") else {
+            return;
+        };
+        let store = Store::open(Path::new(&state)).unwrap();
+        let account = store
+            .add_account(Provider::Codex, "ChatGPT", 1, None)
+            .unwrap();
+        let original = recovery_codex_auth("original-account", "original-access");
+        let persistent = store
+            .account_root(&account.id)
+            .unwrap()
+            .join("profile/auth.json");
+        crate::private::create(&persistent, &original).unwrap();
+        crate::authentication_tests::fail_authentication(&store, &account.id);
+        let run = store.prepare_probe(&account.id, None, 2).unwrap();
+        let profile = store.root().join("runs/synthetic-other-account-login");
+        let (executable, sha256) = crate::process::host_identity().unwrap();
+        let pin = crate::process::Pin {
+            provider: Provider::Codex,
+            executable,
+            sha256: sha256.clone(),
+            version: "synthetic".into(),
+            host_sha256: sha256,
+            observed_at_ms: 2,
+        };
+        let plan = crate::auth::prepare_codex_login(&store, &run, &pin, &profile).unwrap();
+        crate::private::create(
+            &plan.credentials.profile().join("auth.json"),
+            &recovery_codex_auth("different-account", "new-access"),
+        )
+        .unwrap();
+        let started = store.mark_spawned(&run, i32::MAX as u32).unwrap();
+        let (_, run_digest) = store.recovery_candidate(&started.id).unwrap().unwrap();
+        assert!(store.recover_run(&started.id, &run_digest, 3).is_err());
+        // Exiting this helper leaves the owned run and isolated credential
+        // snapshot exactly as an interrupted interactive sign-in would.
+    }
+
+    #[test]
+    fn ordinary_sessions_keep_legacy_json_until_a_route_requirement_is_set() {
+        let dir = root();
+        let base = xcb_core::canonical(dir.path()).unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
+        let session = store
+            .create_session(&account.id, choice(), &base.join("work"), 2)
+            .unwrap();
+        let legacy = serde_json::to_value(&session).unwrap();
+        assert!(legacy.get("requirements").is_none());
+        assert!(legacy.get("route_pins").is_none());
+        store
+            .require_session_capabilities(
+                &session.id,
+                xcb_core::session::TaskRequirements {
+                    signed_in_browser: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        store
+            .set_session_route_pins(
+                &session.id,
+                xcb_core::session::RoutePins {
+                    provider: Some(Provider::Claude),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let updated = store.session(&session.id).unwrap().unwrap();
+        let encoded = serde_json::to_value(&updated).unwrap();
+        assert_eq!(encoded["requirements"]["signed_in_browser"], true);
+        assert_eq!(encoded["route_pins"]["provider"], "claude");
+        assert_eq!(updated.revision, session.revision);
+    }
+
+    // Codex sign-in recovery; provider sign-in is refused on Windows.
+
+    #[cfg(unix)]
+    #[test]
+    fn stopped_login_with_another_identity_releases_lease_without_replacing_auth() {
+        let dir = root();
+        let state = xcb_core::canonical(dir.path()).unwrap().join("state");
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "store::tests::codex_login_recovery_child_fixture",
+            ])
+            .env("XCB_SYNTHETIC_CODEX_RECOVERY_CHILD_STATE", &state)
+            .output()
+            .unwrap();
+        assert!(child.status.success());
+        let store = Store::open(&state).unwrap();
+        let account = store.accounts().unwrap().pop().unwrap();
+        let original = recovery_codex_auth("original-account", "original-access");
+        let persistent = store
+            .account_root(&account.id)
+            .unwrap()
+            .join("profile/auth.json");
+        let (run, run_digest) = store
+            .recovery_candidate(&store.unsettled_runs().unwrap()[0].id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.phase, "running");
+        assert!(store.authentication_required(&account.id).unwrap());
+
+        store.recover_run(&run.id, &run_digest, 4).unwrap();
+        assert!(store.unsettled_runs().unwrap().is_empty());
+        assert_eq!(
+            store
+                .db()
+                .unwrap()
+                .query_row(
+                    "SELECT count(*) FROM leases WHERE account=?1",
+                    [account.id.as_str()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0,
+        );
+        assert_eq!(
+            store
+                .db()
+                .unwrap()
+                .query_row(
+                    "SELECT count(*) FROM tool_effects WHERE run=? AND settled=0",
+                    [run.id.as_str()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0,
+        );
+        assert_eq!(crate::private::read(&persistent, 65536).unwrap(), original);
+        assert!(store.authentication_required(&account.id).unwrap());
+    }
+
     fn quota_point(pool: &Id, window: &str, used: f64, observed: u64, reset: u64) -> QuotaPoint {
         QuotaPoint {
             pool: pool.clone(),
@@ -2013,7 +3227,7 @@ mod tests {
             session::Role,
         };
         let directory = root();
-        let base = directory.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
         let state = base.join("state");
         let workspace = base.join("work");
         let store = Store::open(&state).unwrap();
@@ -2036,6 +3250,9 @@ mod tests {
             .unwrap();
         let run = store.prepare_run(&session.id, session.revision, 4).unwrap();
         let mut outcome = crate::runner::Outcome {
+            tool_calls: Some(0),
+            text_attention: false,
+            diagnostic: None,
             text: "The turn limit interrupted the remaining work".into(),
             facts: TurnFacts {
                 terminal: Terminal::TurnLimit,
@@ -2063,6 +3280,18 @@ mod tests {
 
         let reader = Store::open_read_only(&state).unwrap();
         let recovered = reader.settled_outcome(&session.id, 0).unwrap().unwrap();
+        assert_eq!(
+            reader
+                .latest_settled_outcome(&session.id)
+                .unwrap()
+                .unwrap()
+                .text,
+            recovered.text
+        );
+        assert_eq!(
+            reader.settled_input_submission(&session.id, 0).unwrap(),
+            None
+        );
         assert_eq!(recovered.facts.terminal, Terminal::TurnLimit);
         assert_eq!(recovered.state, State::Idle);
         assert_eq!(recovered.text, outcome.text);
@@ -2083,6 +3312,7 @@ mod tests {
             store.settled_outcome(&session.id, 0).unwrap().is_none(),
             "a newer turn invalidates the old dispatch boundary"
         );
+        assert!(store.latest_settled_outcome(&session.id).unwrap().is_none());
         let run = store.prepare_run(&session.id, current.revision, 8).unwrap();
         store.settle(&run, State::Idle, 9).unwrap();
         assert!(
@@ -2105,7 +3335,7 @@ mod tests {
     #[test]
     fn quota_availability_adopts_only_new_observations_and_preserves_legacy_pool() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store
             .add_account(Provider::Claude, "Test", 1, None)
@@ -2164,7 +3394,7 @@ mod tests {
     #[test]
     fn quota_availability_rechecks_at_lease_acquisition_and_summary_keeps_stale_block() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store
             .add_account(Provider::Claude, "Test", 1, None)
@@ -2225,7 +3455,7 @@ mod tests {
     #[test]
     fn quota_availability_recording_requires_exact_owned_live_lease() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store
             .add_account(Provider::Claude, "Test", 1, None)
@@ -2266,9 +3496,54 @@ mod tests {
     }
 
     #[test]
+    fn quota_spending_pressure_follows_generation_and_provider_scope() {
+        let dir = root();
+        let store = Store::open(&xcb_core::canonical(dir.path()).unwrap().join("state")).unwrap();
+        let claude = store
+            .add_account(Provider::Claude, "Test", 1, None)
+            .unwrap();
+        let point = quota_point(&claude.quota_pool, "seven_day", 70.0, 3, 10_800_003);
+        store.record_quota(&point).unwrap();
+        assert_eq!(store.quota_spending_pressure(&claude.id, 3).unwrap(), None);
+        let run = store.prepare_probe(&claude.id, None, 2).unwrap();
+        crate::application_qualification::ensure_generation(&store, &run).unwrap();
+        store.record_account_quota(&run, &point).unwrap();
+        assert_eq!(
+            store
+                .quota_spending_pressure(&claude.id, 3)
+                .unwrap()
+                .unwrap()
+                .percent_per_hour,
+            10.0
+        );
+        store.settle(&run, State::Idle, 4).unwrap();
+        let run = store.prepare_probe(&claude.id, None, 4).unwrap();
+        crate::application_qualification::rotate_generation(&store, &run).unwrap();
+        assert_eq!(store.quota_spending_pressure(&claude.id, 4).unwrap(), None);
+        store.settle(&run, State::Idle, 5).unwrap();
+        for provider in [Provider::Codex, Provider::Devin] {
+            let account = store.add_account(provider, "Test", 1, None).unwrap();
+            store
+                .record_quota(&quota_point(
+                    &account.quota_pool,
+                    "codex.secondary",
+                    70.0,
+                    3,
+                    10_800_003,
+                ))
+                .unwrap();
+            let pressure = store.quota_spending_pressure(&account.id, 3).unwrap();
+            assert_eq!(pressure.is_some(), provider == Provider::Codex);
+            if let Some(pressure) = pressure {
+                assert_eq!(pressure.percent_per_hour, 10.0);
+            }
+        }
+    }
+
+    #[test]
     fn quota_availability_generation_rotation_invalidates_without_copying_history() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store
             .add_account(Provider::Claude, "Test", 1, None)
@@ -2309,7 +3584,7 @@ mod tests {
     #[test]
     fn quota_availability_rejects_bad_generation_and_does_not_infer_other_scopes() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         for provider in Provider::ALL {
             let account = store.add_account(provider, "Test", 1, None).unwrap();
@@ -2351,9 +3626,140 @@ mod tests {
     }
 
     #[test]
+    fn usage_limit_cooldown_blocks_until_it_ends_and_needs_the_held_account() {
+        let dir = root();
+        let base = xcb_core::canonical(dir.path()).unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        for provider in Provider::ALL {
+            let account = store.add_account(provider, "Test", 1, None).unwrap();
+            let run = store.prepare_probe(&account.id, None, 2).unwrap();
+            crate::application_qualification::ensure_generation(&store, &run).unwrap();
+            // A cooldown needs the exact owned live hold, a positive span,
+            // and an instant inside the hold, like a provider-reported meter.
+            assert!(store.record_quota_limit(&run, 1, 1_801).is_err());
+            assert!(store.record_quota_limit(&run, 3, 3).is_err());
+            let foreign = Store::open(store.root()).unwrap();
+            assert!(foreign.record_quota_limit(&run, 3, 1_803).is_err());
+            let mut forged = run.clone();
+            forged.revision += 1;
+            assert!(store.record_quota_limit(&forged, 3, 1_803).is_err());
+            assert_eq!(store.quota_blocked_until(&account.id, 4).unwrap(), None);
+            store.record_quota_limit(&run, 3, 1_803).unwrap();
+            let pool = store.account(&account.id).unwrap().quota_pool;
+            assert_eq!(pool != account.quota_pool, provider == Provider::Claude);
+            // The cooldown is admission state, never a meter: percentage,
+            // reset, and runway projections do not see it.
+            assert!(store.quotas(&pool).unwrap().is_empty());
+            let limits = store.quota_limits(&pool).unwrap();
+            assert_eq!(limits.len(), 1);
+            assert_eq!(
+                limits[0].window.as_str(),
+                xcb_core::usage::limit_window(provider)
+            );
+            assert_eq!(store.remaining_percent(&pool, 4).unwrap(), None);
+            assert_eq!(store.quota_blocked_until(&account.id, 2).unwrap(), None);
+            assert_eq!(
+                store.quota_blocked_until(&account.id, 3).unwrap(),
+                Some(1_803)
+            );
+            assert_eq!(
+                store.quota_blocked_until(&account.id, 1_802).unwrap(),
+                Some(1_803)
+            );
+            assert_eq!(store.quota_blocked_until(&account.id, 1_803).unwrap(), None);
+            assert_eq!(store.quota_spending_pressure(&account.id, 4).unwrap(), None);
+            store.settle(&run, State::Idle, 5).unwrap();
+            assert!(store.record_quota_limit(&run, 6, 1_806).is_err());
+            let view = crate::summary::snapshot(&store, None, &crate::config::Config::default(), 4)
+                .unwrap();
+            let row = view
+                .accounts
+                .iter()
+                .find(|row| row.id == account.id)
+                .unwrap();
+            assert_eq!(row.quota_blocked_until_ms, Some(1_803));
+            assert_eq!(row.remaining_percent, None);
+            assert_eq!(row.resets_at_ms, None);
+        }
+    }
+
+    #[test]
+    fn usage_limit_cooldown_yields_to_later_reported_windows_and_credential_rotation() {
+        let dir = root();
+        let base = xcb_core::canonical(dir.path()).unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let account = store.add_account(Provider::Codex, "Test", 1, None).unwrap();
+        let run = store.prepare_probe(&account.id, None, 2).unwrap();
+        store.record_quota_limit(&run, 3, 1_803).unwrap();
+        assert_eq!(
+            store.quota_blocked_until(&account.id, 4).unwrap(),
+            Some(1_803)
+        );
+        // A provider-reported reset observed later wins even when shorter.
+        store
+            .record_account_quota(
+                &run,
+                &quota_point(&account.quota_pool, "codex.primary", 100.0, 5, 500),
+            )
+            .unwrap();
+        assert_eq!(
+            store.quota_blocked_until(&account.id, 6).unwrap(),
+            Some(500)
+        );
+        assert_eq!(store.quota_blocked_until(&account.id, 500).unwrap(), None);
+        // A newer cooldown after that report applies again until a meter
+        // observed later shows capacity.
+        store.record_quota_limit(&run, 600, 2_400).unwrap();
+        assert_eq!(
+            store.quota_blocked_until(&account.id, 601).unwrap(),
+            Some(2_400)
+        );
+        store
+            .record_account_quota(
+                &run,
+                &quota_point(&account.quota_pool, "codex.primary", 20.0, 700, 5_000),
+            )
+            .unwrap();
+        assert_eq!(store.quota_blocked_until(&account.id, 701).unwrap(), None);
+        // An exhausted window with a later reset still combines with a
+        // cooldown recorded after it: the later reset wins.
+        store
+            .record_account_quota(
+                &run,
+                &quota_point(&account.quota_pool, "codex.secondary", 100.0, 800, 9_000),
+            )
+            .unwrap();
+        store.record_quota_limit(&run, 900, 2_700).unwrap();
+        assert_eq!(
+            store.quota_blocked_until(&account.id, 901).unwrap(),
+            Some(9_000)
+        );
+        store.settle(&run, State::Idle, 1_000).unwrap();
+
+        // Claude cooldowns follow the credential generation like meters do.
+        let claude = store
+            .add_account(Provider::Claude, "Test", 1, None)
+            .unwrap();
+        let run = store.prepare_probe(&claude.id, None, 2).unwrap();
+        crate::application_qualification::ensure_generation(&store, &run).unwrap();
+        store.record_quota_limit(&run, 3, 1_803).unwrap();
+        let bound = store.account(&claude.id).unwrap().quota_pool;
+        assert_eq!(
+            store.quota_blocked_until(&claude.id, 4).unwrap(),
+            Some(1_803)
+        );
+        store.settle(&run, State::Idle, 4).unwrap();
+        let run = store.prepare_probe(&claude.id, None, 5).unwrap();
+        crate::application_qualification::rotate_generation(&store, &run).unwrap();
+        assert_eq!(store.quota_blocked_until(&claude.id, 6).unwrap(), None);
+        assert_eq!(store.quota_limits(&bound).unwrap().len(), 1);
+        store.settle(&run, State::Idle, 7).unwrap();
+    }
+
+    #[test]
     fn read_only_discovery_reads_live_wal_without_initializing_or_writing() {
         let dir = root();
-        let path = dir.path().canonicalize().unwrap().join("state");
+        let path = xcb_core::canonical(dir.path()).unwrap().join("state");
         let writer = Store::open(&path).unwrap();
         let account = writer
             .add_account(Provider::Claude, "Max", 1, None)
@@ -2381,12 +3787,83 @@ mod tests {
     }
 
     #[test]
+    fn account_catalogs_are_kept_apart_and_fall_back_to_the_provider_list() {
+        let dir = root();
+        let path = xcb_core::canonical(dir.path()).unwrap().join("state");
+        let store = Store::open(&path).unwrap();
+        let first = store.add_account(Provider::Devin, "Pro", 1, None).unwrap();
+        let second = store.add_account(Provider::Devin, "Pro", 1, None).unwrap();
+        let choice = |id: &str| ModelChoice {
+            provider: Provider::Devin,
+            id: Id::new(id).unwrap(),
+            label: id.into(),
+            mode: Mode::Fixed,
+            resolved: None,
+            effort: None,
+            observed_at_ms: 1,
+        };
+        // Rows written before this change stay usable by every account.
+        store
+            .set_models(Provider::Devin, &[choice("legacy")])
+            .unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        for account in [&first.id, &second.id] {
+            assert_eq!(
+                store.account_models(account).unwrap(),
+                vec![choice("legacy")]
+            );
+        }
+        store
+            .set_account_models(&first.id, &[choice("shared"), choice("first-only")])
+            .unwrap();
+        store
+            .set_account_models(&second.id, &[choice("shared"), choice("second-only")])
+            .unwrap();
+        // The first account's next refresh keeps the second account's list.
+        store
+            .set_account_models(&first.id, &[choice("shared"), choice("first-only")])
+            .unwrap();
+        assert_eq!(
+            store.account_models(&second.id).unwrap(),
+            vec![choice("second-only"), choice("shared")]
+        );
+        let catalog = store.model_catalog().unwrap();
+        assert!(!catalog.offers(&second.id, Provider::Devin, &choice("first-only")));
+        let mut both = vec![first.id.clone(), second.id.clone()];
+        both.sort();
+        assert_eq!(catalog.accounts_offering(&choice("shared")), both);
+        // Every account reported its own list, so the provider-wide list is
+        // no longer offered.
+        let keys: Vec<_> = store
+            .models()
+            .unwrap()
+            .into_iter()
+            .map(|model| model.id.to_string())
+            .collect();
+        assert_eq!(keys, ["first-only", "second-only", "shared"]);
+        // A mismatched provider is refused and changes nothing.
+        let mut codex = choice("codex-model");
+        codex.provider = Provider::Codex;
+        assert!(store.set_account_models(&first.id, &[codex]).is_err());
+        assert_eq!(store.account_models(&first.id).unwrap().len(), 2);
+        // Clearing an account's list returns it to the provider-wide list.
+        store.set_account_models(&second.id, &[]).unwrap();
+        assert_eq!(
+            store.account_models(&second.id).unwrap(),
+            vec![choice("legacy")]
+        );
+        let reader = Store::open_read_only(&path).unwrap();
+        assert_eq!(reader.models().unwrap().len(), 3);
+    }
+
+    #[test]
     fn read_only_discovery_does_not_create_or_migrate_state() {
         let dir = root();
-        let missing = dir.path().canonicalize().unwrap().join("missing");
+        let missing = xcb_core::canonical(dir.path()).unwrap().join("missing");
         assert!(Store::open_read_only(&missing).is_err());
         assert!(!missing.exists());
-        let path = dir.path().canonicalize().unwrap().join("state");
+        let path = xcb_core::canonical(dir.path()).unwrap().join("state");
         let writer = Store::open(&path).unwrap();
         writer
             .db()
@@ -2405,7 +3882,7 @@ mod tests {
     #[test]
     fn recovery_rejects_live_original_owner_and_preserves_receipts() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let prepared = store.prepare_probe(&account.id, None, 2).unwrap();
@@ -2447,10 +3924,55 @@ mod tests {
         );
     }
 
+    /// A refusal because a recorded process still exists says which
+    /// process and what to check, and releases nothing.
+    #[cfg(unix)]
+    #[test]
+    fn recovery_refusals_name_the_live_process_and_what_to_check() {
+        use std::os::unix::process::CommandExt;
+        let dir = root();
+        let base = xcb_core::canonical(dir.path()).unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
+        let mut provider = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let group = provider.id();
+        let prepared = store.prepare_probe(&account.id, None, 2).unwrap();
+        let running = store.mark_spawned(&prepared, group).unwrap();
+        // The owner (this process) is alive: the error names it.
+        let owner = std::process::id();
+        let text = running.verify_recovery_stop().unwrap_err().to_string();
+        assert!(text.contains(&format!("process {owner}")), "{text}");
+        assert!(text.contains(&format!("ps -p {owner}")), "{text}");
+        assert!(text.contains("restart your computer"), "{text}");
+        assert!(
+            text.contains(&format!("xcb recover {} --yes", running.id)),
+            "{text}"
+        );
+        // Owner gone, provider group still running: the group is named.
+        let running = orphaned(&store, &running);
+        let text = running.verify_recovery_stop().unwrap_err().to_string();
+        assert!(text.contains(&format!("process group {group}")), "{text}");
+        assert!(text.contains(&format!("pgrep -g {group}")), "{text}");
+        let digest = crate::digest(serde_json::to_string(&running).unwrap());
+        assert!(store.recover_run(&running.id, &digest, 3).is_err());
+        assert_eq!(store.unsettled_runs().unwrap().len(), 1);
+        provider.kill().unwrap();
+        provider.wait().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while running.verify_recovery_stop().is_err() {
+            assert!(std::time::Instant::now() < deadline, "group never left");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn recovery_settles_running_run_and_marks_session_uncertain() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let session = store
@@ -2479,7 +4001,7 @@ mod tests {
     #[test]
     fn recovery_digest_binds_the_stored_serialization() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let session = store
@@ -2506,176 +4028,64 @@ mod tests {
         assert!(store.recover_run(&running.id, &payload_digest, 4).is_ok());
     }
 
-    /// The defect this pairs with: a run that took the account lease but was
-    /// killed before the provider started leaves the account permanently
-    /// unusable. `recover_run` refuses it — correctly, since there is no
-    /// process group to prove stopped — and every other command refuses too,
-    /// so nothing could ever release the lease.
+    #[cfg(unix)]
     #[test]
-    fn an_unspawned_run_blocks_the_account_until_it_is_explicitly_discarded() {
-        let dir = root();
-        let base = dir.path().canonicalize().unwrap();
-        let store = Store::open(&base.join("state")).unwrap();
-        let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
-        let session = store
-            .create_session(&account.id, choice(), &base.join("work"), 2)
-            .unwrap();
-        let prepared = store.prepare_run(&session.id, session.revision, 3).unwrap();
-        let run_digest = digest(serde_json::to_string(&prepared).unwrap().as_bytes());
-
-        // Everything the operator could reach is refused while the lease is held.
-        assert!(store.recover_run(&prepared.id, &run_digest, 4).is_err());
-        assert!(store.prepare_probe(&account.id, None, 4).is_err());
-        assert!(store.set_account_enabled(&account.id, false).is_err());
-        assert!(store.remove_session(&session.id).is_err());
-        assert_eq!(store.unsettled_runs().unwrap().len(), 1);
-
-        let discarded = store
-            .discard_unspawned_run(&prepared.id, &run_digest, 5)
-            .unwrap();
-        assert_eq!(discarded.phase, "settled");
-        assert!(store.unsettled_runs().unwrap().is_empty());
-        // The account works again, which is the whole point.
-        store.prepare_probe(&account.id, None, 6).unwrap();
-        // Nothing reached the provider, so the session is idle rather than
-        // uncertain: no turn was sent and no answer came back.
-        let session = store.session(&session.id).unwrap().unwrap();
-        assert_eq!(session.state, State::Idle);
-    }
-
-    /// Discarding is only for the case the record cannot prove. A run that DID
-    /// record a process group keeps going through `recover_run`, which proves
-    /// the stop rather than asserting it, and a stale view of the run is
-    /// refused by the same compare-and-swap recovery uses.
-    #[test]
-    fn discarding_refuses_anything_it_is_not_for() {
-        let dir = root();
-        let base = dir.path().canonicalize().unwrap();
-        let store = Store::open(&base.join("state")).unwrap();
-        let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
-        let session = store
-            .create_session(&account.id, choice(), &base.join("work"), 2)
-            .unwrap();
-
-        let spawned = store.prepare_run(&session.id, session.revision, 3).unwrap();
-        store.mark_spawned(&spawned, i32::MAX as u32).unwrap();
-        let (spawned, spawned_digest) = store.recovery_candidate(&spawned.id).unwrap().unwrap();
-        assert!(spawned.pid.is_some());
-        assert!(
+    fn prepared_recovery_retains_lease_without_independent_child_proof() {
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        for owner_kind in ["live", "missing", "absent"] {
+            let dir = root();
+            let base = xcb_core::canonical(dir.path()).unwrap();
+            let store = Store::open(&base.join("state")).unwrap();
+            let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
+            let session = store
+                .create_session(&account.id, choice(), &base.join("work"), 2)
+                .unwrap();
+            let mut prepared = store.prepare_run(&session.id, session.revision, 3).unwrap();
+            let prior_session = store.session(&session.id).unwrap().unwrap();
+            // A child can exist before mark_spawned records its PID. Missing
+            // owner metadata or an absent owner does not settle that child.
+            let mut child = Child(
+                std::process::Command::new("/bin/cat")
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            );
+            match owner_kind {
+                "missing" => prepared.owner = None,
+                "absent" => prepared.owner.as_mut().unwrap().pid = i32::MAX as u32,
+                _ => assert_eq!(prepared.owner.as_ref().unwrap().pid, std::process::id()),
+            }
+            let payload = serde_json::to_string(&prepared).unwrap();
             store
-                .discard_unspawned_run(&spawned.id, &spawned_digest, 4)
-                .is_err()
-        );
-        store.settle(&spawned, State::Failed, 5).unwrap();
-
-        let current = store.session(&session.id).unwrap().unwrap();
-        let prepared = store.prepare_run(&session.id, current.revision, 6).unwrap();
-        let run_digest = digest(serde_json::to_string(&prepared).unwrap().as_bytes());
-        // A digest that does not match the stored payload is refused.
-        assert!(
-            store
-                .discard_unspawned_run(&prepared.id, "not the stored digest", 7)
-                .is_err()
-        );
-        // An unknown run is refused rather than silently succeeding.
-        assert!(
-            store
-                .discard_unspawned_run(&Id::new("r_missing").unwrap(), &run_digest, 7)
-                .is_err()
-        );
-        // A row whose phase says it reached the provider but which records no
-        // process group. Like the case below, the API cannot produce this;
-        // a corrupted payload can, and it must not be waved through, because
-        // "reached the provider" means effects may exist.
-        let mismatched = RunRecord {
-            phase: "running".into(),
-            ..prepared.clone()
-        };
-        let mismatched_payload = serde_json::to_string(&mismatched).unwrap();
-        store
-            .db()
-            .unwrap()
-            .execute(
-                "UPDATE runs SET payload=?1 WHERE id=?2",
-                params![mismatched_payload, prepared.id.as_str()],
-            )
-            .unwrap();
-        assert!(
-            store
-                .discard_unspawned_run(&prepared.id, &digest(mismatched_payload.as_bytes()), 8)
-                .is_err()
-        );
-
-        // A `prepared` row that nonetheless carries a process group is not
-        // reachable through the API — `mark_spawned` moves both fields in one
-        // statement — but it is exactly what a corrupted or hand-edited
-        // payload looks like, and there would be something to signal.
-        let tampered = RunRecord {
-            pid: Some(4_242),
-            ..prepared.clone()
-        };
-        let tampered_payload = serde_json::to_string(&tampered).unwrap();
-        store
-            .db()
-            .unwrap()
-            .execute(
-                "UPDATE runs SET payload=?1 WHERE id=?2",
-                params![tampered_payload, prepared.id.as_str()],
-            )
-            .unwrap();
-        assert!(
-            store
-                .discard_unspawned_run(&prepared.id, &digest(tampered_payload.as_bytes()), 8)
-                .is_err()
-        );
-        store
-            .db()
-            .unwrap()
-            .execute(
-                "UPDATE runs SET payload=?1 WHERE id=?2",
-                params![
-                    serde_json::to_string(&prepared).unwrap(),
-                    prepared.id.as_str()
-                ],
-            )
-            .unwrap();
-
-        store
-            .discard_unspawned_run(&prepared.id, &run_digest, 8)
-            .unwrap();
-        // A second discard of the same run finds nothing left to release —
-        // checked against the run's CURRENT payload, so the refusal comes from
-        // the phase rather than from a stale digest. This run never recorded a
-        // process group, so the phase is the only thing that can refuse it.
-        let (settled, settled_digest) = store.recovery_candidate(&prepared.id).unwrap().unwrap();
-        assert_eq!(settled.phase, "settled");
-        assert!(settled.pid.is_none());
-        assert!(
-            store
-                .discard_unspawned_run(&prepared.id, &settled_digest, 9)
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn recovery_rejects_prepared_run_with_no_recorded_pid() {
-        let dir = root();
-        let base = dir.path().canonicalize().unwrap();
-        let store = Store::open(&base.join("state")).unwrap();
-        let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
-        let session = store
-            .create_session(&account.id, choice(), &base.join("work"), 2)
-            .unwrap();
-        let prepared = store.prepare_run(&session.id, session.revision, 3).unwrap();
-        let digest = digest(serde_json::to_string(&prepared).unwrap());
-        assert!(store.recover_run(&prepared.id, &digest, 4).is_err());
-        assert_eq!(store.unsettled_runs().unwrap().len(), 1);
+                .db()
+                .unwrap()
+                .execute(
+                    "UPDATE runs SET payload=?1 WHERE id=?2",
+                    params![payload, prepared.id.as_str()],
+                )
+                .unwrap();
+            let run_digest = digest(payload.as_bytes());
+            assert!(store.recover_run(&prepared.id, &run_digest, 4).is_err());
+            assert!(child.0.try_wait().unwrap().is_none());
+            assert_eq!(store.unsettled_runs().unwrap().len(), 1);
+            assert!(store.prepare_probe(&account.id, None, 5).is_err());
+            let unchanged = store.session(&session.id).unwrap().unwrap();
+            assert_eq!(unchanged.state, prior_session.state);
+            assert_eq!(unchanged.revision, prior_session.revision);
+        }
     }
 
     #[test]
     fn recovery_rejects_already_settled_run() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let session = store
@@ -2693,7 +4103,7 @@ mod tests {
     #[test]
     fn recovery_rejects_run_that_changed_since_proof() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let session = store
@@ -2708,7 +4118,7 @@ mod tests {
     #[test]
     fn recovery_rejects_run_when_lease_is_absent() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let session = store
@@ -2729,7 +4139,7 @@ mod tests {
     #[test]
     fn run_record_roundtrip_persists_session_model() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let session = store
@@ -2751,7 +4161,7 @@ mod tests {
     #[test]
     fn rebind_after_settlement_preserves_run_record_model() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let personal = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let work = store
@@ -2787,7 +4197,7 @@ mod tests {
     #[test]
     fn custody_version_defaults_legacy_records_and_is_always_serialized() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let session = store
@@ -2842,7 +4252,7 @@ mod tests {
         }
 
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let session = store
@@ -2879,7 +4289,7 @@ mod tests {
     #[test]
     fn custody_version_unknown_rejects_reads_and_recovery_without_releasing_lease() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let prepared = store.prepare_probe(&account.id, None, 2).unwrap();
@@ -2922,7 +4332,7 @@ mod tests {
     #[test]
     fn probe_run_records_model_or_none() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let model = choice();
@@ -2950,7 +4360,7 @@ mod tests {
     #[test]
     fn recovery_digest_matches_stored_payload_for_new_record() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let session = store
@@ -2973,7 +4383,7 @@ mod tests {
     #[test]
     fn recovery_digest_matches_stored_payload_for_legacy_record() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let session = store
@@ -3016,7 +4426,7 @@ mod tests {
     #[test]
     fn run_owner_distinguishes_a_live_foreign_run_from_an_unsettled_one() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let path = base.join("state");
         // Two handles on one state root stand in for two terminals.
         let owner = Store::open(&path).unwrap();
@@ -3103,9 +4513,60 @@ mod tests {
     }
 
     #[test]
+    fn capability_processes_block_settlement_and_preserve_exact_owner() {
+        let dir = root();
+        let path = xcb_core::canonical(dir.path()).unwrap().join("state");
+        let store = Store::open(&path).unwrap();
+        let sibling = Store::open(&path).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Test", 1, None)
+            .unwrap();
+        let run = store.prepare_probe(&account.id, None, 2).unwrap();
+        assert!(sibling.mark_capability_starting(&run, "browser").is_err());
+        store.mark_capability_starting(&run, "browser").unwrap();
+        assert!(store.mark_capability_starting(&run, "browser").is_err());
+        assert!(store.mark_capability_spawned(&run, "browser", 0).is_err());
+        assert!(store.settle(&run, State::Idle, 3).is_err());
+        let marked = store.run(&run.id).unwrap().unwrap();
+        assert!(
+            serde_json::from_value::<CommandlessRunRecord>(serde_json::to_value(&marked).unwrap())
+                .is_err()
+        );
+        store
+            .mark_capability_spawned(&run, "browser", i32::MAX as u32)
+            .unwrap();
+        let started = store.mark_spawned(&run, i32::MAX as u32).unwrap();
+        assert_eq!(
+            started.capability_processes.get("browser"),
+            Some(&Some(i32::MAX as u32))
+        );
+        assert!(sibling.clear_capability_custody(&run, "browser").is_err());
+        store.clear_capability_custody(&run, "browser").unwrap();
+        assert!(store.clear_capability_custody(&run, "browser").is_err());
+        store.settle(&run, State::Idle, 4).unwrap();
+    }
+
+    #[test]
+    fn capability_recovery_requires_each_process_group_to_have_exited() {
+        let dir = root();
+        let store = Store::open(&xcb_core::canonical(dir.path()).unwrap().join("state")).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Test", 1, None)
+            .unwrap();
+        let run = store.prepare_probe(&account.id, None, 2).unwrap();
+        store.mark_capability_starting(&run, "browser").unwrap();
+        let running = store.mark_spawned(&run, i32::MAX as u32).unwrap();
+        let mut dead = orphaned(&store, &running);
+        assert!(dead.verify_recovery_stop().is_err());
+        dead.capability_processes
+            .insert("browser".into(), Some(i32::MAX as u32));
+        dead.verify_recovery_stop().unwrap();
+    }
+
+    #[test]
     fn command_marker_survives_stale_spawn_and_blocks_older_readers_and_settle() {
         let dir = root();
-        let store = Store::open(&dir.path().canonicalize().unwrap().join("state")).unwrap();
+        let store = Store::open(&xcb_core::canonical(dir.path()).unwrap().join("state")).unwrap();
         let account = store
             .add_account(Provider::Claude, "Test", 1, None)
             .unwrap();
@@ -3147,7 +4608,7 @@ mod tests {
     #[test]
     fn command_custody_requires_exact_lease_owner_and_all_bound_fields() {
         let dir = root();
-        let path = dir.path().canonicalize().unwrap().join("state");
+        let path = xcb_core::canonical(dir.path()).unwrap().join("state");
         let store = Store::open(&path).unwrap();
         let sibling = Store::open(&path).unwrap();
         let account = store
@@ -3197,7 +4658,7 @@ mod tests {
     #[test]
     fn command_reconciliation_rechecks_stop_digest_and_custody_without_releasing_account() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store
             .add_account(Provider::Claude, "Test", 1, None)
@@ -3268,7 +4729,7 @@ mod tests {
     #[test]
     fn command_custody_rejects_malformed_records_and_absent_lease() {
         let dir = root();
-        let store = Store::open(&dir.path().canonicalize().unwrap().join("state")).unwrap();
+        let store = Store::open(&xcb_core::canonical(dir.path()).unwrap().join("state")).unwrap();
         let account = store
             .add_account(Provider::Claude, "Test", 1, None)
             .unwrap();
@@ -3314,5 +4775,394 @@ mod tests {
                 .as_ref(),
             Some(&custody)
         );
+    }
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+    use xcb_core::{
+        Provider,
+        models::{Mode, ModelChoice},
+        usage::VelocitySample,
+    };
+
+    fn fixture() -> (tempfile::TempDir, Store, RunRecord, Session) {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("work")).unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let account = store
+            .add_account(Provider::Codex, "Fixture", 1, None)
+            .unwrap();
+        let session = store
+            .create_session(
+                &account.id,
+                ModelChoice {
+                    provider: Provider::Codex,
+                    id: Id::new("gpt-6-astra").unwrap(),
+                    label: "Astra".into(),
+                    mode: Mode::Fixed,
+                    resolved: None,
+                    effort: None,
+                    observed_at_ms: 1,
+                },
+                &base.join("work"),
+                2,
+            )
+            .unwrap();
+        let run = store.prepare_run(&session.id, session.revision, 4).unwrap();
+        (directory, store, run, session)
+    }
+
+    #[test]
+    fn a_turns_observations_commit_once_not_once_per_event() {
+        let (_dir, store, run, session) = fixture();
+        // One streamed turn's worth of meters: a baseline, four decimated
+        // velocity samples and two quota updates all land in one commit.
+        let samples: Vec<VelocitySample> = (0..5)
+            .map(|i| VelocitySample {
+                at_ms: 1_000 + i * 250,
+                output_tokens: 40 + i * 20,
+            })
+            .collect();
+        let observations: Vec<PendingQuota> = ["primary", "secondary"]
+            .iter()
+            .enumerate()
+            .map(|(i, window)| PendingQuota {
+                window: Id::new(*window).unwrap(),
+                used_percent: 40.0 + i as f64,
+                observed_at_ms: 1_000 + i as u64,
+                resets_at_ms: 9_999_999,
+            })
+            .collect();
+        store
+            .record_observations(&run, &session.id, &samples, &observations)
+            .unwrap();
+        assert_eq!(
+            store
+                .observation_commits
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "seven stream events must cost one fsync'd commit, not seven"
+        );
+        // Every buffered observation landed, velocity stayed monotonic and
+        // quota points were bound to the leased account's pool at record time.
+        let stored = store.velocities(&session.id, 0).unwrap();
+        assert_eq!(stored.len(), samples.len());
+        assert_eq!(stored.last().unwrap().output_tokens, 120);
+        let account = store.account(&run.account).unwrap();
+        let quotas = store.quotas(&account.quota_pool).unwrap();
+        assert_eq!(quotas.len(), 2);
+        assert_eq!(quotas[0].used_percent, 40.0);
+        // A second flush with new events is exactly one more commit; the
+        // empty flush common at turn end costs none.
+        store
+            .record_observations(&run, &session.id, &[], &[])
+            .unwrap();
+        assert_eq!(
+            store
+                .observation_commits
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        store
+            .record_observations(
+                &run,
+                &session.id,
+                &[VelocitySample {
+                    at_ms: 2_000,
+                    output_tokens: 200,
+                }],
+                &[],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .observation_commits
+                .load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+    }
+
+    /// A regressing sample or a quota observation stamped before its run
+    /// began (a backward clock step) is dropped, never stored and never an
+    /// error: the turn that reported it still settles on its own outcome.
+    #[test]
+    fn regressed_or_early_telemetry_is_dropped_without_failing_the_turn() {
+        let (_dir, store, run, session) = fixture();
+        store
+            .record_observations(
+                &run,
+                &session.id,
+                &[VelocitySample {
+                    at_ms: 1_000,
+                    output_tokens: 100,
+                }],
+                &[],
+            )
+            .unwrap();
+        // A later sample under an earlier counter, and one from before the
+        // stored sample, are dropped; the valid sample in the batch lands.
+        let regressed = [
+            VelocitySample {
+                at_ms: 1_500,
+                output_tokens: 150,
+            },
+            VelocitySample {
+                at_ms: 1_600,
+                output_tokens: 90,
+            },
+            VelocitySample {
+                at_ms: 900,
+                output_tokens: 400,
+            },
+        ];
+        store
+            .record_observations(&run, &session.id, &regressed, &[])
+            .unwrap();
+        let stored = store.velocities(&session.id, 0).unwrap();
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored.last().unwrap().output_tokens, 150);
+        assert_eq!(store.dropped_observations(), 2);
+        // A quota observation predating its lease is dropped the same way,
+        // and never attributed to the leased account's pool.
+        store
+            .record_observations(
+                &run,
+                &session.id,
+                &[],
+                &[PendingQuota {
+                    window: Id::new("primary").unwrap(),
+                    used_percent: 50.0,
+                    observed_at_ms: 1,
+                    resets_at_ms: 9_999_999,
+                }],
+            )
+            .unwrap();
+        let account = store.account(&run.account).unwrap();
+        assert!(store.quotas(&account.quota_pool).unwrap().is_empty());
+        assert_eq!(store.dropped_observations(), 3);
+        // Run custody still fails closed: a forged run records nothing.
+        let mut forged = run.clone();
+        forged.revision += 1;
+        assert!(
+            store
+                .record_observations(
+                    &forged,
+                    &session.id,
+                    &[],
+                    &[PendingQuota {
+                        window: Id::new("primary").unwrap(),
+                        used_percent: 50.0,
+                        observed_at_ms: 5_000,
+                        resets_at_ms: 9_999_999,
+                    }],
+                )
+                .is_err()
+        );
+        assert!(store.quotas(&account.quota_pool).unwrap().is_empty());
+    }
+
+    /// Two quota events for one window in the same millisecond with
+    /// different resets: the first stays, the second is dropped, and the
+    /// flush that carried them succeeds — within one batch and across two.
+    #[test]
+    fn same_instant_quota_conflicts_keep_the_first_row() {
+        let (_dir, store, run, session) = fixture();
+        let point = |used: f64, reset: u64| PendingQuota {
+            window: Id::new("primary").unwrap(),
+            used_percent: used,
+            observed_at_ms: 5_000,
+            resets_at_ms: reset,
+        };
+        store
+            .record_observations(
+                &run,
+                &session.id,
+                &[],
+                &[point(40.0, 9_000_000), point(41.0, 9_500_000)],
+            )
+            .unwrap();
+        store
+            .record_observations(&run, &session.id, &[], &[point(99.0, 9_900_000)])
+            .unwrap();
+        let account = store.account(&run.account).unwrap();
+        let quotas = store.quotas(&account.quota_pool).unwrap();
+        assert_eq!(quotas.len(), 1);
+        assert_eq!(quotas[0].used_percent, 40.0);
+        assert_eq!(quotas[0].resets_at_ms, 9_000_000);
+        assert_eq!(store.dropped_observations(), 2);
+        // An identical repeat is not a conflict.
+        store
+            .record_observations(&run, &session.id, &[], &[point(40.0, 9_000_000)])
+            .unwrap();
+        assert_eq!(store.dropped_observations(), 2);
+    }
+
+    fn concurrent_sessions(
+        store: &Store,
+        account: &Id,
+        workspace: &Path,
+        count: usize,
+    ) -> Vec<Session> {
+        (0..count)
+            .map(|index| {
+                store
+                    .create_session(
+                        account,
+                        ModelChoice {
+                            provider: Provider::Codex,
+                            id: Id::new("gpt-6-astra").unwrap(),
+                            label: "Astra".into(),
+                            mode: Mode::Fixed,
+                            resolved: None,
+                            effort: None,
+                            observed_at_ms: 1,
+                        },
+                        workspace,
+                        index as u64 + 2,
+                    )
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    /// Above one, the configured account run limit admits concurrent session
+    /// runs on the same subscription while probes still hold it alone.
+    #[test]
+    fn account_run_limit_admits_concurrent_sessions_and_keeps_probes_exclusive() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
+        let state = base.join("state");
+        crate::private::directory(&state).unwrap();
+        let workspace = crate::private::directory(&base.join("work")).unwrap();
+        let config = crate::config::Config {
+            max_runs_per_account: 2,
+            ..crate::config::Config::default()
+        };
+        crate::private::create(
+            &state.join("config.json"),
+            serde_json::to_string(&config).unwrap().as_bytes(),
+        )
+        .unwrap();
+        let store = Store::open(&state).unwrap();
+        let account = store
+            .add_account(Provider::Codex, "Fixture", 1, None)
+            .unwrap();
+        let sessions = concurrent_sessions(&store, &account.id, &workspace, 3);
+        let first = store
+            .prepare_run(&sessions[0].id, sessions[0].revision, 3)
+            .unwrap();
+        let second = store
+            .prepare_run(&sessions[1].id, sessions[1].revision, 3)
+            .unwrap();
+        let third = store
+            .prepare_run(&sessions[2].id, sessions[2].revision, 3)
+            .unwrap_err();
+        assert!(
+            third.to_string().contains("concurrent run limit"),
+            "{third}"
+        );
+        assert_eq!(store.unsettled_runs().unwrap().len(), 2);
+        // A probe is a credential-mutating operation: it is refused while any
+        // run is held, no matter the configured limit.
+        assert!(store.prepare_probe(&account.id, None, 4).is_err());
+        store.settle(&first, State::Idle, 5).unwrap();
+        // One run still holds the account: the probe stays refused.
+        assert!(store.prepare_probe(&account.id, None, 6).is_err());
+        store.settle(&second, State::Idle, 6).unwrap();
+        let probe = store.prepare_probe(&account.id, None, 7).unwrap();
+        // And while the probe is held, session runs cannot start.
+        let fourth = store
+            .prepare_run(&sessions[2].id, sessions[2].revision, 8)
+            .unwrap_err();
+        assert!(fourth.to_string().contains("unsettled probe"), "{fourth}");
+        store.settle(&probe, State::Idle, 9).unwrap();
+        store
+            .prepare_run(&sessions[2].id, sessions[2].revision, 10)
+            .unwrap();
+        assert_eq!(store.unsettled_runs().unwrap().len(), 1);
+    }
+
+    /// The default of one keeps the previous exclusive-account behavior.
+    #[test]
+    fn default_run_limit_keeps_one_session_run_per_account() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
+        let state = base.join("state");
+        let workspace = crate::private::directory(&base.join("work")).unwrap();
+        let store = Store::open(&state).unwrap();
+        let account = store
+            .add_account(Provider::Codex, "Fixture", 1, None)
+            .unwrap();
+        let sessions = concurrent_sessions(&store, &account.id, &workspace, 2);
+        store
+            .prepare_run(&sessions[0].id, sessions[0].revision, 3)
+            .unwrap();
+        assert!(
+            store
+                .prepare_run(&sessions[1].id, sessions[1].revision, 4)
+                .is_err()
+        );
+    }
+
+    /// A version-one store rekeys `leases` by run on open, preserving the
+    /// held row; schema reads stay (account, run)-scoped either way.
+    #[test]
+    fn version_two_migration_rekeys_leases_by_run() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
+        let state = base.join("state");
+        let store = Store::open(&state).unwrap();
+        let account = store
+            .add_account(Provider::Codex, "Fixture", 1, None)
+            .unwrap();
+        let probe = store.prepare_probe(&account.id, None, 2).unwrap();
+        // Rebuild the version-one shape through the store's own connection:
+        // the store's file checks admit only files it opened itself.
+        store
+            .db()
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE leases_v1(
+                account TEXT PRIMARY KEY REFERENCES accounts(id),
+                run TEXT NOT NULL UNIQUE REFERENCES runs(id));
+                INSERT INTO leases_v1(account,run) SELECT account,run FROM leases;
+                DROP TABLE leases;
+                ALTER TABLE leases_v1 RENAME TO leases;
+                PRAGMA user_version=1;",
+            )
+            .unwrap();
+        drop(store);
+        let store = Store::open(&state).unwrap();
+        let version: u32 = store
+            .db()
+            .unwrap()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+        // The held row migrated intact and still gates custody.
+        let kept: String = store
+            .db()
+            .unwrap()
+            .query_row(
+                "SELECT run FROM leases WHERE account=?1",
+                [account.id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, probe.id.as_str());
+        let run_pk: bool = store
+            .db()
+            .unwrap()
+            .query_row(
+                "SELECT pk FROM pragma_table_info('leases') WHERE name='run'",
+                [],
+                |row| row.get::<_, u32>(0).map(|pk| pk == 1),
+            )
+            .unwrap();
+        assert!(run_pk);
+        assert!(store.prepare_probe(&account.id, None, 3).is_err());
     }
 }

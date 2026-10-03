@@ -16,7 +16,6 @@ export interface AccountLeaseStore {
 type Row = { provider: AgentProvider; account_id: string; owner: string | null; generation: number; expires_at: number };
 
 const TABLE = "xcb_account_leases";
-const LEGACY_TABLE = "agentmixer_account_leases";
 
 /**
  * Shared host database, outside every agent workspace. A heartbeat deadline is
@@ -24,12 +23,6 @@ const LEGACY_TABLE = "agentmixer_account_leases";
  */
 export class SqliteAccountLeases implements AccountLeaseStore {
   constructor(private readonly db: SqliteDatabase) {
-    const tables = new Set(db.query<Readonly<{ name: string }>, []>(
-      "SELECT name FROM sqlite_master WHERE type='table'",
-    ).all().map((row) => row.name));
-    if (tables.has(LEGACY_TABLE) && !tables.has(TABLE)) {
-      db.exec(`ALTER TABLE ${LEGACY_TABLE} RENAME TO ${TABLE}`);
-    }
     db.exec(`CREATE TABLE IF NOT EXISTS ${TABLE} (
       provider TEXT NOT NULL, account_id TEXT NOT NULL, owner TEXT,
       generation INTEGER NOT NULL, expires_at INTEGER NOT NULL,

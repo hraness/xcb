@@ -1,398 +1,211 @@
 <!-- hraness:xcb-landing:start -->
-# xcb
+# Excalibur (xcb)
 
-Excalibur (`xcb`) is a subscription router for coding agents. It selects an
-eligible account/model route across your own Claude, Codex, and Devin
-accounts, runs one bounded turn, and proves account custody when the work
-settles. Another agent calls `xcb --json route`; an application embeds the
-TypeScript SDK. The terminal workspace is the reference host, and the managed
-harness — being rebuilt as a self-evolving ALGAL harness — is experimental.
-
-The native Rust app is a source preview for supported Claude, Codex, and Devin
-runtimes. It includes workspace file tools, an isolated Linux command runner,
-customizable panes, and a separate application API. Provider support and
-execution boundaries are explicit; it is not a replacement for every feature
-of the original provider tools.
+Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin
+subscriptions you already pay for. Each task runs on an account that is signed
+in, idle, and not at a known usage limit, on a model that fits the work. Drive
+xcb with its headless JSON route, CLI, or SDK; build any UI you need from the
+same typed projections.
 <!-- hraness:xcb-landing:end -->
 
-[Project site](https://xcb.sh) · [Getting started](https://xcb.sh/docs/getting-started) ·
-[Compare tools](https://xcb.sh/compare) · [Source](https://github.com/hraness/xcb) ·
-[Route contract](docs/route.md) · [Application API](docs/application-api.md) · [Compatibility reference](docs/compatibility.md) · [Contributing](CONTRIBUTING.md)
+**Status:** [Latest release](https://github.com/hraness/xcb/releases/latest)
+for macOS ARM64, Linux x86_64 and ARM64, and Windows x86_64; other hosts build from source. MIT licensed.
 
-## Readiness
+This guide follows the current source build. Unreleased commands require a
+source build until they appear in the [release notes](https://github.com/hraness/xcb/releases/latest).
 
-**xcb is not yet a daily-driver replacement for Codex, Claude Code, and Devin.**
-The native broker lists, reads, searches, and writes workspace files, creates
-directories, and removes or renames regular files with revision checks. The
-source also includes an isolated Linux command runner for tests and builds on
-macOS ARM64. The current backend passed its 12-case VM boundary suite, including
-filtered Git inspection, public dependency fetching, and offline Cargo/Bun use
-from immutable caches. Installed Claude and Codex coding workflows passed on
-macOS ARM64: an expected test failure, exact repair, passing test, and filtered
-Git status, with joined processes and settled effects. This evidence covers the
-tested accounts and admitted builds; Devin quota still blocks acceptance across
-all three providers. See the [command runner contract](docs/command-runner.md)
-for setup, supported boundaries, and current limits.
+[Site](https://xcb.sh) · [Docs](https://xcb.sh/docs) ·
+[Getting started](https://xcb.sh/docs/getting-started) ·
+[Vision](docs/vision.md) · [Route contract](docs/route.md) ·
+[TypeScript SDK](docs/sdk.md) ·
+[Compare](https://xcb.sh/compare) · [Changelog](CHANGELOG.md)
 
-| Provider | Native Rust CLI | TypeScript compatibility CLI |
-| --- | --- | --- |
-| Claude | Installed coding workflow verified on macOS ARM64 with the tested account; Linux remains an execution candidate after sign-in, binary admission, and confinement checks | Execution candidate, subject to its own admission and confinement checks |
-| Codex | Native app-server on macOS for exact build **0.155.0-alpha.2.6**; authenticated broker and installed coding workflow acceptance passed on macOS ARM64 with the tested account | Discovery only; managed task execution gated on host qualification |
-| Devin | Native ACP candidate on macOS for exact builds **3000.11.1** and **3000.10.31**; both passed credential-free boundary checks; authenticated model discovery passed on 3000.10.31, where the tested account hit provider quota before coding | ACP implementation exists; task execution disabled pending exact-runtime qualification |
+With fresh Claude and Codex usage reports, xcb favors unused quota approaching
+a reset while preserving the task's quality requirements and your chosen
+provider, account, or model. Existing provider sessions can be discovered and
+imported as context for a new headless task.
 
-A successful `doctor` or a visible model does not prove a working coding session.
-The current Devin CLI can be authenticated and can return its model catalog, but
-that provider login is separate from XCB's explicit credential import and from
-an admitted coding turn. The last recorded XCB Devin coding attempt stopped at
-provider quota before inference; treat that boundary as current until a fresh
-qualified turn proves otherwise.
-Native `doctor` reports `metadata pin only` for unqualified providers. Codex and
-Devin candidates require the checked executable digest as well as the version;
-other builds and their Linux execution paths remain unavailable. Automated
-fixtures check boundaries; they do not establish authentication, service
-reliability, or real-model task quality. The TypeScript compatibility CLI's
-Codex and Devin task routes remain unqualified and disabled.
+## Install
 
-## Native xcb
+### Install a verified release
 
-The source build is the current installation path. As of September 19, 2026,
-GitHub's latest published release is **AgentMixer v0.3.0**, with an AgentMixer
-package archive. No native xcb release or `@hraness/xcb` npm package is published.
-Source version 0.4.0 is not a published release. Check the
-[release assets](https://github.com/hraness/xcb/releases) before downloading.
-
-### Install from source
-
-Requires Git, the pinned Rust **1.97.1** toolchain, and platform build tools.
-Claude's supported execution boundary is macOS Seatbelt or Linux with a working,
-admitted `bwrap` configuration. The native Codex and Devin candidates currently
-require macOS Seatbelt; unsupported confinement fails closed.
+On macOS with Apple silicon or Linux x86_64 or ARM64 (glibc 2.34 or newer), one command
+downloads the latest release for your platform, checks its SHA-256 checksum,
+and installs `~/.local/bin/xcb`:
 
 ```sh
-git clone https://github.com/hraness/xcb.git
-cd xcb
+curl -fsSL https://xcb.sh/install.sh | sh
+```
+
+New release installs update automatically before `xcb run`, `xcb route`, or
+`xcb doctor`, at most once a day and only when no other
+xcb command or service is using the installation. Run `xcb update disable` to
+turn this off, or `xcb update enable --policy notify` for notices only. Existing
+saved preferences stay in force. `HRANESS_NO_UPDATE=1`, CI, JSON output, and
+noninteractive commands skip automatic updates.
+
+`xcb upgrade` installs the latest release manually. `XCB_VERSION` installs and
+pins one exact version, `XCB_INSTALL_PREFIX` replaces `~/.local`, and
+`XCB_ADD_PATH=yes` adds the `bin` folder to your shell profile. Source,
+package-manager, and older installs without a checksum-bound install record do
+not self-update; rerun the release installer to create a supported install.
+
+### Windows
+
+To run Claude Code on Windows, install the Linux build of xcb inside [WSL2](https://learn.microsoft.com/windows/wsl/install) with
+the command above. Claude is the supported provider on Linux; Codex and Devin
+require macOS. Releases also carry a native
+Windows x86_64 build that runs everything except the providers (the thread,
+`xcb doctor`, accounts, and `xcb route`, which refuses provider work with those
+WSL2 steps). Install it from PowerShell:
+
+```powershell
+irm https://xcb.sh/install.ps1 | iex
+```
+
+It checks the zip's SHA-256 checksum and installs
+`%LOCALAPPDATA%\Programs\xcb\bin\xcb.exe`; state lives in
+`%LOCALAPPDATA%\xcb`. The binary is not code-signed yet, so SmartScreen may
+ask before its first run.
+
+### Build from source
+
+On other hosts, build with Git, Rust 1.97.1, and the platform's build tools:
+
+```sh
+git clone https://github.com/hraness/xcb.git && cd xcb
 rustup toolchain install 1.97.1 --profile minimal
 ./scripts/install-native.sh
-export PATH="$HOME/.local/bin:$PATH"
-xcb --version
-xcb --help
 ```
 
-The installer builds with the lockfile and installs `~/.local/bin/xcb`.
-`XCB_INSTALL_PREFIX` changes the prefix. Both the old TypeScript CLI and the
-native CLI use the name `xcb`; use `command -v xcb` to check which one is active.
-The installer also records a private install manifest under the prefix and
-keeps the exact installer beside the binary, so later upgrades use the same
-verified path.
+[Upgrade and uninstall](https://xcb.sh/docs/upgrade-and-uninstall) covers
+updates and removal.
 
-### Updates and global operation
+## Use it as your coding agent
 
-The native binary is a user-global install when it lives in `~/.local/bin` and
-that directory is on `PATH`. XCB follows an OpenCode-style policy: `notify` is
-the default, `auto` installs only an exact stable release with its checksum,
-and `disable` turns checks off. A macOS LaunchAgent runs the check once a day
-when you enable it; it never reads project settings or updates from `main`.
+Install Claude Code 2.1.268 or later, then connect an account and open your
+thread:
 
 ```sh
-xcb update check
-xcb update enable --policy notify   # check daily and tell you when a release exists
-xcb update enable --policy auto     # check daily and install verified releases
-xcb update status
-xcb upgrade                         # install the latest verified native release
-xcb update disable
+xcb setup claude
+xcb
 ```
 
-There is currently no published native xcb release, so the updater fails closed
-and leaves the source-installed binary alone until the first verified
-`xcb-<version>-<platform>-<arch>.tar.gz` release is available. After any
-replacement, restart open terminals and rerun `xcb doctor`; provider and
-application qualification is bound to the exact installed executable bytes.
+`xcb setup` lets you choose an existing account or add another, checks the
+Claude Code build, opens browser sign-in, and loads the account's models. New
+Claude accounts keep a model-only token in xcb's state folder. Accounts connected
+for shared browser access use a dedicated xcb Keychain entry on macOS. Both are
+separate from your usual Claude Code login. `xcb setup codex`
+works the same way; Devin connects by importing the Devin CLI's sign-in
+([accounts and models](https://xcb.sh/docs/providers)).
 
-Managed supervisors record their exact executable identity. When that binary
-is replaced, a current supervisor stops starting new turns, retains custody of
-its active workers until they settle, then exits. Queued tasks and tasks waiting
-for input remain saved. Wait for that exit, restart the terminal, refresh provider
-pins with `xcb doctor`, and reopen the control conversation to continue.
-A different running build produces an explicit supervisor-version error.
-Legacy supervisors without an identity record need their exact process verified
-and stopped after active workers settle; a saved PID or a deleted lock file is
-not a safe replacement for that verification.
+The native CLI is headless and scriptable. Run one task with `xcb run`, or
+send a versioned JSON request through `xcb --json route`. Managed tasks,
+projects, attention, schedules, and history are durable local state that an
+agent can read and change through JSON or the SDK. A UI can be built on demand
+from those projections; xcb does not require a terminal UI.
 
-Managed records can gain fields that older source builds reject. Restart old
-clients and supervisors before using updated managed state, and retain that state
-during an installation rollback. Replacing the binary does not migrate provider
-sessions or establish fresh live acceptance across all three providers.
+The [route contract](docs/route.md) and [SDK quickstart](docs/sdk.md) show the
+stable machine-facing entry points.
 
-### First managed conversation
+## Build on it
 
-Install an admitted Claude Code binary (major 2, version 2.1.268 or newer).
-xcb performs its own account sign-in below; it does
-not silently import your existing provider login. Replace `<account-id>` below
-with the generated ID printed by `accounts add` or `accounts import-*` (also
-listed by `xcb accounts`). Account names come from observed provider identities;
-custom labels are not accepted.
+**From an agent or script,** `xcb --json route` reads one JSON task on stdin,
+picks an account and model that can take it, runs one turn, and prints one
+JSON result:
 
 ```sh
-xcb accounts add claude --plan Max
-xcb doctor --provider claude
-xcb accounts login <account-id>
-xcb accounts refresh <account-id>
-xcb models
-xcb --cwd /absolute/path/to/your/project
+echo '{"version":1,"workspace":"/absolute/path/to/project","task":"Fix the failing parser test"}' \
+  | xcb --json route
 ```
 
-Plain `xcb` opens a new persistent control conversation. Prompts become durable
-managed tasks routed through admitted Codex, Claude, or Devin sessions; closing
-the terminal detaches without cancelling them. Open another terminal for an
-independent conversation over the same task swarm, use `/tasks` to inspect work,
-or `/sessions` to switch control conversations. Ordinary prompts create new work;
-when one task in the conversation asks for input, the next reply answers it.
-Use `new task: …` to explicitly start separate work. Independent workspaces can
-run concurrently; tasks in the same workspace run one at a time. Say
-`cancel <task-id>` to request cancellation and inspect `/tasks` for settlement.
+```json
+{"version":1,"status":"completed","requestId":"route_…","session":"s_…",
+ "route":{"provider":"claude","account":"a_…","model":"claude/sonnet/low","label":"Sonnet · low","reason":"…"},
+ "state":"idle","outcome":{"terminal":"completed","joined":true,"effects":"settled","pending_attention":false,"failure":null},
+ "text":"…"}
+```
 
-The Rust supervisor owns scheduling and deterministic safety decisions. ALGAL
-records bounded transition receipts; it does not infer permissions, establish
-provider qualification, or replace the supervisor’s execution policy.
-`xcb tasks verify <task-id>` replays that task’s local receipt chain and checks
-it against the current record; it does not attest provider claims or real-world
-outcomes.
+Add `"dryRun": true` to see the chosen route without running anything, or pin
+`provider`, `account`, or `model`. A failure exits 1 with a `code` such as
+`unavailable`, `busy`, or `needs_input`. The [route contract](docs/route.md)
+lists every field.
 
-Managed routing first filters for qualified, credentialed, idle, quota-usable
-accounts. It then ranks bounded model candidates by task fit, fresh remaining
-usage, relative quality/cost/latency and Pareto layer, while preserving explicit
-provider requests and soft workspace-learned preferences. Official temporary
-offers are cached as expiring observations. They do not prove account entitlement
-or reduce a route’s estimated cost without that evidence. They never activate an
-unqualified provider or survive stale terms. Managed Claude, Codex and Devin workers share
-`xcb_swarm_status`, `xcb_message_list` and `xcb_message_send` for durable,
-workspace-scoped cross-provider coordination.
+**From your own app,** the TypeScript SDK's `createSubscriptionRouter` runs a
+task on the account and model your app names, and holds that account until
+the provider process exits; it does not choose them for you. Install it with
+`npm install @hraness/xcb`; the [SDK quickstart](docs/sdk.md) has a complete
+example.
 
-`--plan` is a display label; it does not verify your subscription. Complete the
-browser sign-in when prompted. `accounts refresh` probes supported model and
-usage metadata. Unknown or stale usage percentages remain unknown. A proven
-Claude account-wide quota exhaustion stays blocked until its reported reset,
-even when its percentage has gone stale. The account list shows a retry estimate;
-see [quota routing](docs/quota-routing.md) for the scope and credential binding.
-For direct sessions, select a model by copying its full observed key from
-`xcb models` and running `xcb models default <key>`. Managed tasks choose among
-eligible routes; begin a task with `Use Claude`, `Use Codex`, or `Use Devin` to
-require that provider.
+## Providers
 
-If discovery finds the wrong binary, use
-`xcb doctor --provider claude --executable /absolute/path/to/claude`.
-The pin binds executable bytes and version. After upgrading xcb, restart open
-xcb terminals and rerun `doctor`. A process started from the old binary cannot
-adopt the replacement binary's pin, and older clients refuse new run records
-whose credential-custody format they do not understand.
-An account, metadata pin, or model listing cannot activate an unqualified adapter.
+| Provider | Supported builds | Status |
+| --- | --- | --- |
+| Claude | Claude Code 2.1.268 or later within version 2 | Coding workflow passed on macOS ARM64 with the tested account. On Linux, Claude runs after you run xcb's sandbox checks on that machine. |
+| Codex | Codex CLI 0.159.0, 0.158.0, 0.157.1, or 0.156.1 on macOS ARM64 | Coding workflow passed on macOS ARM64 with the tested account and Codex CLI 0.158.0. |
+| Devin | Devin CLI 3000.11.3, 3000.11.1, or 3000.10.31 on macOS ARM64 | Coding workflow passed on macOS ARM64 with the tested account and Devin CLI 3000.11.3. |
 
-### Connect Codex on macOS
+xcb checks each provider executable's version, and for Codex and Devin its
+exact SHA-256, before it runs anything. `xcb doctor` shows what it found.
 
-Use the exact admitted **0.155.0-alpha.2.6** build. Authenticated broker
-read/write/read and installed coding-workflow acceptance passed on macOS ARM64
-with the tested account; this does not qualify arbitrary provider versions or
-the separate application API. xcb supervises the official
-CLI's ChatGPT device sign-in in a private profile:
+## Use available quota before it resets
+
+1. **Filter:** keep the accounts that can take the task now: supported provider build, signed in, enabled, idle, not at a known usage limit, with a recently seen model.
+2. **Rank:** order those models by relative quality, cost, and speed for the kind of task. Fresh Claude and Codex usage reports favor unused quota approaching a reset within the task's quality requirements. Long prompts get the highest-quality model available.
+3. **Hold:** lock the chosen account so no other task can use it, and run the provider in an OS sandbox with xcb's file tools for one project folder.
+4. **Record:** when the provider process exits, record how the run ended. If xcb can't confirm that, it keeps the account held and doesn't retry.
+
+[How routing works](https://xcb.sh/docs/how-routing-works) covers each step.
+
+Tasks that require an existing signed-in browser or native desktop control
+stay with Codex and prefer Astra, including after a retry or handoff. Use
+`xcb run --signed-in-browser` or `xcb run --desktop` to state that requirement.
+Claude and Devin can hand these tasks to Codex after their current run ends
+safely. `xcb tools setup-computer` connects the installed desktop computer-use
+plugin on macOS. `xcb tools setup-browser` shares Claude's Chrome extension
+across providers and opens full Claude sign-in when needed. This sign-in uses
+a dedicated xcb Keychain entry on macOS. See
+[browser and shared tools](docs/tools.md).
+
+## Everyday commands
 
 ```sh
-xcb doctor --provider codex
-xcb accounts add codex --plan ChatGPT
-xcb accounts login <account-id>
-xcb accounts refresh <account-id>
-xcb models
+xcb run -p "Describe the next task"      # one headless task
+xcb run -p "Explain this repository"   # one task here; prints the answer
+xcb tasks                              # managed tasks across projects
+xcb attention                          # questions and approvals waiting on you
+xcb accounts                           # accounts, usage, and which need you
+xcb doctor                             # provider builds and unfinished runs
+xcb upgrade                            # install the latest verified release
+xcb help advanced                      # project agents and extensions
 ```
 
-Follow the device sign-in instructions shown in the terminal. Alternatively,
-copy one existing ChatGPT credential into a new xcb account by selecting its
-private `auth.json` explicitly:
+Accounts, credentials, and task history live in `~/.local/share/xcb`, outside
+your projects (`--state` or `XCB_STATE` moves it). The
+[CLI and configuration reference](https://xcb.sh/docs/reference) lists every
+command, setting, and exit code.
 
-```sh
-xcb accounts import-codex --source /absolute/path/to/auth.json
-xcb accounts refresh <account-id>
-```
+## Limits
 
-The source file is preserved. Import does not copy provider configuration,
-plugins, sessions, or transcripts. API-key credentials are not accepted by this
-route. Refreshed ChatGPT credentials are persisted only after the owned provider
-process has joined.
+- **Tools:** providers use xcb's workspace tools and registered host MCP servers. Native shells and unrelated provider plugins remain unavailable; see [browser and shared tools](docs/tools.md).
+- **Tests and builds:** the [command runner](docs/command-runner.md) is an offline Linux VM on macOS ARM64; Git is read-only there, and native macOS builds can't run.
+- **Concurrency:** each account runs one provider turn at a time by default; `max_runs_per_account` in `config.json` (1–32) raises how many tasks may share an account, while sign-in and account checks still take the account alone. Tasks in the same project folder take turns.
+- **Managed harness:** the self-tuning harness is in development; the current build does not run self-modifying routing policies ([design](docs/managed-harness.md)).
 
-### Connect Devin on macOS
+## Compared with
 
-Use the exact admitted **3000.11.1** build; **3000.10.31** remains admitted.
-Both passed credential-free native boundary checks. Authenticated ACP model
-discovery passed on 3000.10.31; the tested account returned quota/resource exhaustion on a real turn,
-so successful coding acceptance remains pending. xcb preserves an unknown quota
-reset as unknown. Sign in through the provider CLI, then explicitly select its
-`credentials.toml` to create a private xcb account:
+- **Claude Code, Codex, or the Devin CLI alone:** enough when one subscription covers your work, and you keep all of the tool's built-in tools, MCP servers, and plugins. xcb supplies workspace tools, its offline command runner on macOS, and registered host tool servers across providers.
+- **Account switchers such as [claude-swap](https://github.com/realiti4/claude-swap):** change which login Claude Code uses. xcb picks an account for each task across Claude, Codex, and Devin, and sandboxes each run.
+- **[Claude Code Router](https://xcb.sh/compare/claude-code-router) and [OpenRouter](https://xcb.sh/compare/openrouter):** send each API request to a provider or model you choose, usually paid per token. xcb never touches API traffic; it routes whole tasks to subscriptions you already pay for.
+- **[Conductor](https://xcb.sh/compare/conductor) and Claude Squad:** give each agent a Git worktree and a merge flow. xcb has no worktree or pull request flow.
 
-```sh
-devin auth login
-xcb doctor --provider devin
-xcb accounts import-devin --source /absolute/path/to/credentials.toml
-xcb accounts refresh <account-id>
-xcb models
-```
+[All comparisons](https://xcb.sh/compare)
 
-The source file and provider sessions are preserved. xcb copies only the
-credential for the supported provider endpoints. To update just the catalog,
-use `xcb models refresh devin --account <account-id>`; Devin discovery requires
-an explicitly connected account. Native Devin currently uses fixed ACP model
-choices. Adaptive and Fusion catalog representations in the compatibility
-package do not establish native support.
+## More
 
-For either provider, copy a full matching model key from `xcb models` and set it
-with `xcb models default <key>` for direct sessions. Select the account with
-`xcb accounts default <account>` for new direct sessions, or pass
-`--account <account> --model <key>` to `xcb run`. Rerun `doctor` after a provider
-upgrade; a new version is not automatically admitted.
-
-### Isolated tests, builds, and Git
-
-Project commands use an explicitly provisioned Linux VM through `workspace_exec`.
-Follow the [command runner setup](docs/command-runner.md#setup-and-admission)
-from the same source checkout as the installed native CLI. Commands run offline
-against a staged workspace; host dependencies, credentials, and build products
-are excluded. Native macOS and Xcode builds are unavailable. The explicit
-[public dependency preparation frontend](docs/command-runner.md#dependencies-and-git)
-passed the current VM boundary suite, including rejection of a cache after its
-manifest changed. Installed Claude and Codex coding workflows passed on macOS
-ARM64 with the tested accounts; other repositories and toolchains still need
-their own checks.
-
-The Git projection is limited to filtered, read-only HEAD and index data for
-status and diffs. Original history, remotes, and hooks are omitted; commit and
-push workflows are unavailable. Publication checks file revisions and replaces
-each file atomically; it is not a transaction across every changed file. Failed,
-cancelled, or uncertain command state is retained. Successfully published and
-durably settled commands remove their verified input snapshot.
-
-### Application integration
-
-The [application API](docs/application-api.md) provides bounded, ephemeral
-inference with no tools or hooks. It requires evidence for the exact XCB binary,
-provider, account and model before accepting application traffic.
-[TextButler](https://github.com/hraness/textbutler), an MIT-licensed reference
-application, keeps its contact access and messaging approval in its own host.
-Sign-in and a successful `doctor` alone do not qualify the application route.
-
-### Everyday commands
-
-```sh
-xcb --cwd /absolute/path/to/your/project       # new control conversation
-xcb conversations                                # resumable control conversations
-xcb chat --resume <conversation-id>
-xcb tasks                                        # global managed task swarm
-xcb tasks verify <task-id>                       # verify local transition receipts
-xcb tasks messages <task-id>                     # durable cross-provider mailbox
-xcb offers --refresh                             # refresh official expiring offers
-xcb models tiers --task "fix a race"             # inspect Pareto layers
-xcb models route --task "fix a race"             # preview the eligible smart route
-xcb --cwd /absolute/path/to/your/project run --account <account-id> -p "Explain this repository"
-xcb sessions                                     # direct provider sessions
-xcb resume                                       # latest direct provider session
-xcb resume <session-id>
-xcb accounts
-xcb config
-xcb plugins
-xcb panes
-xcb doctor
-xcb completions zsh > /path/to/completions/_xcb
-```
-
-For another program — typically a coding agent — `xcb --json route` is the
-closed machine contract: one JSON task document on stdin selects an eligible
-account/model route and runs exactly one bounded turn, returning the selected
-route, saved session id, and settled outcome facts as bounded JSON. See
-[the route contract](docs/route.md).
-
-`xcb chat --resume` reopens a control conversation; `xcb resume` opens a saved
-direct provider session and its workspace. Neither is a headless continuation
-command. `/help` lists terminal commands. Conversations, tasks, provider
-sessions, and credentials live in the private native state root
-`~/.local/share/xcb`; `--state /absolute/path` or `XCB_STATE` overrides it.
-The compatibility CLI uses `~/.xcb` instead. Do not point both implementations
-at the same state directory. `xcb --json run` includes the native session ID
-in its result so it can be reopened with `xcb resume <session-id>`.
-
-One provider turn has a 30-minute default deadline, including initialization.
-The `turn_timeout_ms` setting in the private state root's `config.json` accepts
-1,000–3,600,000 milliseconds (one second to 60 minutes); `xcb config` displays the
-effective configuration. Older configurations that omit it use the default.
-Cancellation remains available before the deadline, and automatic continuation
-has its own separate limits.
-
-Control conversations are concurrent and share one durable task supervisor.
-Each account still owns at most one active provider turn, and one workspace can
-have only one admitted writer even when different accounts or terminals are
-available. Independent workspaces and accounts can run concurrently. Managed
-cancellation may be requested from the task’s originating conversation or by an
-explicit task ID/title elsewhere; direct provider-session cancellation remains
-owned by its terminal. Ctrl-C and SIGTERM request bounded cleanup for a headless
-run. `xcb run` reports success only for a completed, joined, settled idle result.
-
-Cancellation joins the owned process before releasing custody. If `doctor`
-reports an unsettled run, inspect `xcb recover` and the process state; an expired
-lease or a quiet terminal is not proof that the provider stopped. Recovery is
-an explicit operation, not a reason to delete state or lock files.
-
-### Optional behavior
-
-Auto-continue and Gobstopper context management default on with bounded
-continuation and settled-boundary checks. Disable either with
-`xcb plugins disable auto-continue` or `xcb plugins disable gobstopper`.
-Local usage measurement stays local. aiCharts upload is unavailable; local
-exports, external judgment, and executable hooks require separate opt-in.
-Panes are presentation data and cannot grant execution authority.
-
-The optional judge uses TypeSafe System One (`jev-latest`) to advise routing,
-continuation, and context retention. It sends bounded task/response context to
-that service; old tool-result bodies are excluded from compaction advice.
-A judge cannot qualify a provider or bypass deterministic safety gates.
-Store a key through stdin on macOS or Linux, then explicitly enable it:
-
-```sh
-xcb judge token < /secure/path/to/judge-key
-xcb judge status
-xcb judge enable
-xcb judge test
-# Later:
-xcb judge disable
-xcb judge logout
-```
-
-The input file is an existing private credential file, not a command-line key.
-Keys are vaulted mode-0600 outside the workspace. `XCB_JEV_API_KEY` or
-`TYPESAFE_API_KEY` may supply a key via the environment. Custom endpoints require
-an explicit environment key; the vaulted key remains bound to System One.
-
-## Migrating from AgentMixer
-
-The native command imports **one Claude credential**, preserving the source:
-
-```sh
-xcb accounts import-agentmixer --source /absolute/path/to/.agentmixer --label imported
-```
-
-It does not migrate transcripts or sessions. The compatibility source has its
-own `migrate` command and identifier changes; see the
-[compatibility migration reference](docs/compatibility.md#migrating-from-agentmixer).
-Do not run compatibility migration commands against the native state root.
-
-## Standalone package
-
-The retained TypeScript source provides host-owned routing, account custody,
-bounded tools, and provider adapters. It is separate from the native Rust app.
-For building it locally, library examples, qualification requirements, and its
-CLI commands, see the [compatibility reference](docs/compatibility.md) and
-[managed Codex contract](MANAGED-CODEX.md). The
-[publishing contract](docs/publishing.md) describes future verified artifacts;
-it is not evidence of a published package.
-
-## Development
-
-See [Contributing](CONTRIBUTING.md) for setup and the native, compatibility, and
-site checks. The credential-free [native Codex boundary fixtures](qualification/codex-native.md)
-and [native Devin boundary fixture](qualification/devin-native.md) document
-repeatable checks separately from authenticated live acceptance.
-Report vulnerabilities through [Security](SECURITY.md). Licensed under [MIT](LICENSE).
+The name xcb is short for Excalibur. xcb was formerly AgentMixer.
+The [compatibility reference](docs/compatibility.md) covers the TypeScript
+package and its `xcb-compat` CLI. Supported Unix Bun/npm global copies update
+before interactive work; `xcb-compat update disable` turns that off. SDK imports
+never update. [Contributing](CONTRIBUTING.md) ·
+[Security](SECURITY.md) · [MIT license](LICENSE)

@@ -1,3 +1,6 @@
+// These tests drive Unix permission bits, symlinks, or /bin/sh fixtures;
+// the Windows custody rules are covered by the platform tests.
+#![cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use xcb_core::{
     Id, Provider,
@@ -12,7 +15,7 @@ fn native_credentials(token: &str) -> Vec<u8> {
 #[test]
 fn devin_tokens_are_provider_scoped_private_and_rotated_without_exposure() {
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let store = Store::open(&base.join("state")).unwrap();
     let account = store.add_account(Provider::Devin, "Core", 1, None).unwrap();
     let other = store.add_account(Provider::Devin, "Core", 1, None).unwrap();
@@ -55,7 +58,7 @@ fn devin_tokens_are_provider_scoped_private_and_rotated_without_exposure() {
 #[test]
 fn devin_explicit_native_import_preserves_source_and_copies_only_the_token() {
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let source = private::directory(&base.join("source"))
         .unwrap()
         .join("credentials.toml");
@@ -89,7 +92,7 @@ fn devin_explicit_native_import_preserves_source_and_copies_only_the_token() {
 #[test]
 fn devin_native_hostname_field_imports_without_rewriting_the_source() {
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let source = private::directory(&base.join("source"))
         .unwrap()
         .join("credentials.toml");
@@ -126,9 +129,34 @@ fn devin_native_hostname_field_imports_without_rewriting_the_source() {
 }
 
 #[test]
+fn devin_import_connects_the_selected_account_without_creating_another() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
+    let source = private::directory(&base.join("source"))
+        .unwrap()
+        .join("credentials.toml");
+    let bytes = native_credentials("synthetic-selected-only");
+    private::create(&source, &bytes).unwrap();
+    let store = Store::open(&base.join("state")).unwrap();
+    let account = store.add_account(Provider::Devin, "Core", 1, None).unwrap();
+    let other = store.add_account(Provider::Devin, "Core", 1, None).unwrap();
+    let claude = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
+    assert!(auth::import_into_account(&store, &claude.id, &source).is_err());
+    auth::import_into_account(&store, &account.id, &source).unwrap();
+    assert_eq!(store.accounts().unwrap().len(), 3);
+    assert_eq!(
+        &*auth::token(&store, &account.id).unwrap(),
+        "synthetic-selected-only"
+    );
+    assert!(!auth::has_credentials(&store, &other.id).unwrap());
+    assert_eq!(std::fs::read(&source).unwrap(), bytes);
+    assert!(store.unsettled_runs().unwrap().is_empty());
+}
+
+#[test]
 fn devin_import_rejects_unsafe_sources_before_creating_accounts() {
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let source = private::directory(&base.join("source"))
         .unwrap()
         .join("credentials.toml");
@@ -156,7 +184,7 @@ fn devin_import_rejects_unsafe_sources_before_creating_accounts() {
 #[test]
 fn devin_native_parser_rejects_custom_endpoints_ambiguous_and_unbounded_inputs() {
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let source = private::directory(&base.join("source"))
         .unwrap()
         .join("credentials.toml");
@@ -202,7 +230,7 @@ fn devin_native_parser_rejects_custom_endpoints_ambiguous_and_unbounded_inputs()
 #[test]
 fn devin_token_changes_respect_existing_account_custody() {
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let store = Store::open(&base.join("state")).unwrap();
     let account = store.add_account(Provider::Devin, "Core", 1, None).unwrap();
     auth::store_token(&store, &account.id, b"synthetic-original").unwrap();
@@ -232,7 +260,7 @@ fn devin_token_changes_respect_existing_account_custody() {
 #[test]
 fn devin_credential_target_links_are_rejected_and_receipt_failure_retains_custody() {
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let store = Store::open(&base.join("state")).unwrap();
     let account = store.add_account(Provider::Devin, "Core", 1, None).unwrap();
     let target = store
@@ -266,7 +294,7 @@ fn devin_credential_target_links_are_rejected_and_receipt_failure_retains_custod
 #[test]
 fn devin_generation_receipt_failure_preserves_credential_and_retains_custody() {
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let store = Store::open(&base.join("state")).unwrap();
     let account = store.add_account(Provider::Devin, "Core", 1, None).unwrap();
     auth::store_token(&store, &account.id, b"synthetic-original").unwrap();

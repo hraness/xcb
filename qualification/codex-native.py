@@ -5,6 +5,9 @@ import argparse, base64, hashlib, json, os, pathlib, re, selectors, signal, stat
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--executable', required=True, type=pathlib.Path)
 parser.add_argument('--output', required=True, type=pathlib.Path)
+parser.add_argument('--expect-version', help='explicit reviewed artifact version (requires --expect-sha256)')
+parser.add_argument('--expect-sha256', help='explicit reviewed artifact digest (requires --expect-version)')
+parser.add_argument('--config-readback', type=pathlib.Path, help='write normalized synthetic configuration readback')
 parser.add_argument('--preplanted-aliases', action='store_true', help='negative control: deliberately violate host single-link admission')
 args = parser.parse_args()
 assert sys.platform == 'darwin', 'This fixture requires macOS Seatbelt'
@@ -13,7 +16,14 @@ ROOT = args.output.resolve()
 ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
 BIN = args.executable.resolve(strict=True)
 config_source = (REPO/'crates/xcb-runtime/src/codex/config.rs').read_text()
-EXPECTED = re.search(r'pub const BINARY_SHA256: &str = "([a-f0-9]{64})"', config_source).group(1)
+const = lambda name: re.search(r'pub const '+name+r': &str = "([^"]+)"', config_source).group(1)
+assert (args.expect_version is not None) == (args.expect_sha256 is not None), 'expected version and digest go together'
+VERSION, EXPECTED = args.expect_version or const('VERSION'), args.expect_sha256 or const('BINARY_SHA256')
+reviewed = [(const('VERSION'), const('BINARY_SHA256'), const('SCHEMA_SHA256'))]
+reviewed_literals = [json.loads(x) for x in re.findall(r'"(?:[^"\\]|\\.)*"', config_source.split('pub const REVIEWED_BUILDS: &[(&str, &str, &str)] = &[',1)[1].split('];',1)[0])]
+assert len(reviewed_literals) % 3 == 0
+reviewed += list(zip(*[iter(reviewed_literals)]*3))
+assert any((version,digest)==(VERSION,EXPECTED) for version,digest,_ in reviewed), 'artifact is not release-reviewed'
 adversarial_aliases = args.preplanted_aliases
 sha = lambda b: hashlib.sha256(b).hexdigest()
 
@@ -77,9 +87,11 @@ exe.chmod(0o500)
 ca_bundle=run/'public-ca.pem'
 ca_bytes=public_ca_copy(ca_bundle)
 catalog = run/'models.json'
+qualified=[json.loads(x) for x in re.findall(r'"(?:[^"\\]|\\.)*"',config_source.split('pub const QUALIFIED_MODELS: &[&str] = &[',1)[1].split('];',1)[0])]
+assert all(any(row['slug']==slug for row in data['models']) for slug in qualified), 'qualified model missing from the bundled catalog'
 rows=[]
 for row in data['models']:
-    if row['slug'] not in ['gpt-6-astra','gpt-5.6-sol']: continue
+    if row['slug'] not in qualified: continue
     row.update(tool_mode='direct',shell_type='disabled',apply_patch_tool_type=None,
                experimental_supported_tools=[],supports_search_tool=False,
                supports_experimental_context=False,multi_agent_version='disabled',node_repl_disabled=True)
@@ -94,7 +106,7 @@ configuration_source=config_source.split('pub fn configuration(',1)[1].split('\n
 array_blocks=re.findall(r'lines\.extend\(\s*\[(.*?)\]\s*\.map\(str::to_owned\)',configuration_source,re.S)
 assert len(array_blocks)==2
 arrays=[[json.loads(x) for x in re.findall(r'"(?:[^"\\]|\\.)*"',block)] for block in array_blocks]
-baseline='\n'.join(arrays[0]+[name+' = false' for name in features]+arrays[1])
+baseline='\n'.join(arrays[0]+[json.dumps(name)+' = false' for name in features]+arrays[1])
 config.write_text('model_catalog_json = '+json.dumps(str(catalog))+'\n'+baseline);config.chmod(0o600)
 source=(REPO/'crates/xcb-runtime/src/sandbox.rs').read_text()
 function=source.split('pub fn codex_seatbelt(',1)[1].split('\n/// Devin',1)[0]
@@ -182,12 +194,17 @@ def check(label,method,params,allowed,expected_data=None):
     return f
 def write(path):return {'path':str(path),'dataBase64':base64.b64encode(b'SYNTHETIC WRITE\n').decode()}
 try:
-    f=rpc('initialize',{'clientInfo':{'name':'xcb-production-canary','version':'0.4.0'},'capabilities':{'experimentalApi':True}})
+    f=rpc('initialize',{'clientInfo':{'name':'xcb-production-canary','version':'qualification'},'capabilities':{'experimentalApi':True,'requestAttestation':False,'explicitGatewayOauth':True}})
     receipt['metadataAfterInitialize']={str(path):file_identity(path) for path in protected_paths}
     assert f['result']['codexHome']==str(profile)
     send({'method':'initialized'})
     f=rpc('account/read',{'refreshToken':False});assert f['result']['account'] is None
     f=rpc('config/read',{'cwd':str(cwd),'includeLayers':True});assert f['result']['config']['model_catalog_json']==str(catalog)
+    assert all(f['result']['config']['features'].get(name) is False for name in features), 'account feature enabled'
+    receipt['accountFeaturesDisabled']=features
+    if args.config_readback:
+        readback=json.dumps(f['result'],indent=2).replace(str(catalog),'/synthetic/catalog.json').replace(str(run),'/synthetic')
+        args.config_readback.write_text(readback+'\n')
     f=rpc('model/list',{'includeHidden':True,'limit':100});receipt['models']=[m['id'] for m in f['result']['data']]
     receipt['metadataAfterStartup']={str(path):file_identity(path) for path in protected_paths}
     check('scratch read','fs/readFile',{'path':str(inside)},True,inside.read_bytes())

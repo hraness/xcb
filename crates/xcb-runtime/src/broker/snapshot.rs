@@ -1,23 +1,32 @@
 //! Bounded command snapshots and revision-checked publication. Guest paths
 //! never select a host root; every operation is rooted in Workspace descriptors.
-use super::{Workspace, components, git_snapshot, io};
-use crate::{Error, Result, coordination, digest, private};
+use super::git_snapshot;
+#[cfg(unix)]
+use super::{Workspace, components, io};
+#[cfg(unix)]
+use crate::{Error, coordination};
+use crate::{Result, digest, private};
+#[cfg(unix)]
 use base64::{Engine, engine::general_purpose::STANDARD};
+#[cfg(unix)]
 use rustix::fs::{Dir, FileType, Mode, OFlags};
 use serde::{Deserialize, Serialize};
+use std::{collections::BTreeMap, path::Path, sync::Arc};
+#[cfg(unix)]
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     fs::File,
     io::{Read, Write},
     os::unix::fs::{MetadataExt, PermissionsExt},
-    path::Path,
 };
-use xcb_core::policy::EffectState;
+#[cfg(unix)]
+use xcb_core::{FileIdentity, policy::EffectState};
 
 pub const SNAPSHOT_FILE_LIMIT: usize = 2 * 1024 * 1024;
 pub const SNAPSHOT_BYTE_LIMIT: usize = 64 * 1024 * 1024;
 pub const SNAPSHOT_ENTRY_LIMIT: usize = 8192;
 pub const CHANGE_BYTE_LIMIT: usize = 16 * 1024 * 1024;
+#[cfg(unix)]
 const DEPTH_LIMIT: usize = 64;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -42,7 +51,46 @@ pub struct CommandSnapshot {
     pub document: SnapshotDocument,
     pub excluded: Vec<String>,
     pub git_unavailable: Option<&'static str>,
+    #[cfg_attr(windows, allow(dead_code))]
     originals: BTreeMap<String, (String, bool)>,
+    encoded: VerifiedSnapshot,
+}
+/// Serialized snapshot bytes together with the digest this constructor
+/// computed over exactly those bytes. Holders compare digests instead of
+/// re-reading and re-hashing the snapshot file.
+#[derive(Clone)]
+pub struct VerifiedSnapshot {
+    bytes: Arc<Vec<u8>>,
+    sha256: String,
+}
+impl VerifiedSnapshot {
+    pub fn new(bytes: Vec<u8>) -> Self {
+        let sha256 = digest(&bytes);
+        Self {
+            bytes: Arc::new(bytes),
+            sha256,
+        }
+    }
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
+}
+/// The snapshot encoding bound shared with the command backend.
+pub const SNAPSHOT_ENCODING_LIMIT: usize = 96 * 1024 * 1024;
+#[cfg(unix)]
+struct RawFile {
+    path: String,
+    data: Vec<u8>,
+    executable: bool,
+}
+#[cfg(unix)]
+#[derive(Default)]
+struct Collected {
+    files: Vec<RawFile>,
+    directories: Vec<String>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -99,18 +147,7 @@ pub fn command_excluded(path: &str) -> bool {
             || name.starts_with(".xcb-")
     })
 }
-fn stamp(metadata: &std::fs::Metadata) -> (u64, u64, u64, u32, i64, i64, i64, i64) {
-    (
-        metadata.dev(),
-        metadata.ino(),
-        metadata.len(),
-        metadata.mode(),
-        metadata.mtime(),
-        metadata.mtime_nsec(),
-        metadata.ctime(),
-        metadata.ctime_nsec(),
-    )
-}
+#[cfg(unix)]
 fn read_binary(parent: &File, name: &std::ffi::OsStr) -> Result<(Vec<u8>, u32)> {
     let mut file = File::from(
         rustix::fs::openat(
@@ -137,7 +174,7 @@ fn read_binary(parent: &File, name: &std::ffi::OsStr) -> Result<(Vec<u8>, u32)> 
     let opened = rustix::fs::fstat(&file).map_err(io)?;
     if bytes.len() > SNAPSHOT_FILE_LIMIT
         || bytes.len() as u64 != before.len()
-        || stamp(&before) != stamp(&after)
+        || FileIdentity::of(&before) != FileIdentity::of(&after)
         || after.nlink() != 1
         || named.st_dev != opened.st_dev
         || named.st_ino != opened.st_ino
@@ -148,10 +185,13 @@ fn read_binary(parent: &File, name: &std::ffi::OsStr) -> Result<(Vec<u8>, u32)> 
     }
     Ok((bytes, before.mode() & 0o777))
 }
+/// Raw bytes are collected here under the coordination lock; base64 and
+/// JSON encoding happen after it is released.
+#[cfg(unix)]
 fn walk(
     directory: &File,
     prefix: &str,
-    document: &mut SnapshotDocument,
+    collected: &mut Collected,
     excluded: &mut Vec<String>,
     bytes: &mut usize,
     visited: &mut usize,
@@ -194,7 +234,7 @@ fn walk(
             }
             continue;
         }
-        if document.files.len() + document.directories.len() >= SNAPSHOT_ENTRY_LIMIT {
+        if collected.files.len() + collected.directories.len() >= SNAPSHOT_ENTRY_LIMIT {
             return Err(Error::Unavailable("command snapshot entry limit"));
         }
         let stat = rustix::fs::statat(
@@ -220,82 +260,188 @@ fn walk(
                         "workspace directory changed during snapshot",
                     ));
                 }
-                document.directories.push(path.clone());
-                walk(&child, &path, document, excluded, bytes, visited, depth + 1)?;
+                collected.directories.push(path.clone());
+                walk(
+                    &child,
+                    &path,
+                    collected,
+                    excluded,
+                    bytes,
+                    visited,
+                    depth + 1,
+                )?;
             }
             FileType::RegularFile => {
-                let (data, mode) = read_binary(directory, std::ffi::OsStr::new(&name))?;
+                // A file outside the bounded input contract is reported as
+                // excluded like a symlink or special file; publication still
+                // refuses to touch the real path because it is not an original.
+                if stat.st_nlink != 1 {
+                    if excluded.len() < 256 {
+                        excluded.push(format!("{path} [linked]"));
+                    }
+                    continue;
+                }
+                if stat.st_size > SNAPSHOT_FILE_LIMIT as i64 {
+                    if excluded.len() < 256 {
+                        excluded.push(format!("{path} [oversized]"));
+                    }
+                    continue;
+                }
+                let (data, mode) = match read_binary(directory, std::ffi::OsStr::new(&name)) {
+                    Ok(read) => read,
+                    // The file drifted out of bounds between stat and open:
+                    // exclude it the same way instead of failing the walk.
+                    Err(Error::Unavailable(_)) => {
+                        if excluded.len() < 256 {
+                            excluded.push(format!("{path} [unbounded]"));
+                        }
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
                 *bytes = bytes
                     .checked_add(data.len())
                     .ok_or(Error::Unavailable("command snapshot byte limit"))?;
                 if *bytes > SNAPSHOT_BYTE_LIMIT {
                     return Err(Error::Unavailable("command snapshot byte limit"));
                 }
-                document.files.push(SnapshotFile {
+                collected.files.push(RawFile {
                     path,
-                    base64: STANDARD.encode(&data),
-                    sha256: digest(&data),
+                    data,
                     executable: mode & 0o111 != 0,
                 });
             }
+            // A symlink or special file is not an input: it is reported as
+            // excluded and the snapshot continues. Publication still refuses
+            // to write through any such path.
+            FileType::Symlink => {
+                if excluded.len() < 256 {
+                    excluded.push(format!("{path} [symlink]"));
+                }
+            }
             _ => {
-                return Err(Error::Unavailable(
-                    "command snapshot refuses symlinks and special files",
-                ));
+                if excluded.len() < 256 {
+                    excluded.push(format!("{path} [special file]"));
+                }
             }
         }
     }
-    if stamp(&before) != stamp(&directory.metadata()?) {
+    if FileIdentity::of(&before) != FileIdentity::of(&directory.metadata()?) {
         return Err(Error::Conflict(
             "workspace directory changed during snapshot",
         ));
     }
     Ok(())
 }
+#[cfg(unix)]
 impl Workspace {
+    /// Capture only operator-selected text files for an offline context recipe.
+    /// This does not add a provider tool or expand the workspace tool inventory.
+    pub fn context_documents(
+        &self,
+        paths: &[String],
+    ) -> Result<Vec<crate::context_recipe::Document>> {
+        use crate::context_recipe::{Document, MAX_DOCUMENTS, MAX_SOURCE_BYTES};
+        if paths.is_empty() || paths.len() > MAX_DOCUMENTS {
+            return Err(Error::Unavailable("context requires 1 to 64 source paths"));
+        }
+        let _lock = coordination::WriteLock::acquire(&self.coordination)?;
+        self.check_root()?;
+        let mut documents = Vec::new();
+        let mut total = 0;
+        for path in paths {
+            if command_excluded(path) {
+                return Err(Error::Unavailable(
+                    "context source is an excluded workspace path",
+                ));
+            }
+            let (parent, name) = self.parent(path)?;
+            let (bytes, _) = read_binary(&parent, name)?;
+            total += bytes.len();
+            if total > MAX_SOURCE_BYTES {
+                return Err(Error::Unavailable("context sources exceed 8 MiB"));
+            }
+            let text = String::from_utf8(bytes)
+                .map_err(|_| Error::Unavailable("context sources must be UTF-8 text"))?;
+            documents.push(Document {
+                path: path.clone(),
+                text,
+            });
+        }
+        self.check_root()?;
+        Ok(documents)
+    }
+
     pub fn command_snapshot(&self) -> Result<CommandSnapshot> {
         self.check_root()?;
-        let _lock = coordination::WriteLock::acquire(&self.root, &self.coordination_root)?;
-        self.check_root()?;
+        let workspace_id = digest(self.root.to_str().ok_or(Error::PrivateState)?);
+        let mut excluded = vec![];
+        let mut collected = Collected::default();
+        let mut git_unavailable = None;
+        let git = {
+            let _lock = coordination::WriteLock::acquire(&self.coordination)?;
+            self.check_root()?;
+            let mut bytes = 0;
+            let mut visited = 0;
+            walk(
+                &self.directory,
+                "",
+                &mut collected,
+                &mut excluded,
+                &mut bytes,
+                &mut visited,
+                0,
+            )?;
+            self.check_root()?;
+            // Failure to capture optional Git metadata never widens authority or
+            // prevents ordinary offline tests. The worker receives no raw or
+            // partially captured Git data, and tool output explains its absence.
+            let git = match git_snapshot::capture(
+                &self.directory,
+                &self.root,
+                self.coordination.root(),
+            ) {
+                Ok(git) => git,
+                Err(_) => {
+                    git_unavailable = Some(
+                        "Git inspection unavailable: metadata is unsupported, changed, over its limit, or this linked worktree lacks a trusted association. No Git metadata was passed to the command.",
+                    );
+                    None
+                }
+            };
+            self.check_root()?;
+            git
+        };
+        // Encoding runs after the coordination lock is released so other
+        // cooperating writers are not blocked on base64 and JSON work.
+        let files = collected
+            .files
+            .into_iter()
+            .map(|file| SnapshotFile {
+                path: file.path,
+                base64: STANDARD.encode(&file.data),
+                sha256: digest(&file.data),
+                executable: file.executable,
+            })
+            .collect();
         let mut document = SnapshotDocument {
             version: 1,
-            workspace_id: digest(self.root.to_str().ok_or(Error::PrivateState)?),
-            files: vec![],
-            directories: vec![],
-            git: None,
+            workspace_id,
+            files,
+            directories: collected.directories,
+            git,
         };
-        let mut excluded = vec![];
-        let mut bytes = 0;
-        let mut visited = 0;
-        walk(
-            &self.directory,
-            "",
-            &mut document,
-            &mut excluded,
-            &mut bytes,
-            &mut visited,
-            0,
-        )?;
-        self.check_root()?;
-        // Failure to capture optional Git metadata never widens authority or
-        // prevents ordinary offline tests. The worker receives no raw or
-        // partially captured Git data, and tool output explains its absence.
-        let mut git_unavailable = None;
-        match git_snapshot::capture(&self.directory, &self.root, &self.coordination_root) {
-            Ok(git) => document.git = git,
-            Err(_) => {
-                git_unavailable = Some(
-                    "Git inspection unavailable: metadata is unsupported, changed, over its limit, or this linked worktree lacks a trusted association. No Git metadata was passed to the command.",
-                )
-            }
-        }
-        if document.git.is_some() && serde_json::to_vec(&document)?.len() > 96 * 1024 * 1024 {
+        let mut bytes = serde_json::to_vec(&document)?;
+        if bytes.len() > SNAPSHOT_ENCODING_LIMIT && document.git.is_some() {
             document.git = None;
             git_unavailable = Some(
                 "Git inspection unavailable: the combined snapshot exceeds its encoding limit. No Git metadata was passed to the command.",
             );
+            bytes = serde_json::to_vec(&document)?;
         }
-        self.check_root()?;
+        if bytes.len() > SNAPSHOT_ENCODING_LIMIT {
+            return Err(Error::Unavailable("command snapshot encoding limit"));
+        }
         let originals = document
             .files
             .iter()
@@ -306,6 +452,7 @@ impl Workspace {
             excluded,
             git_unavailable,
             originals,
+            encoded: VerifiedSnapshot::new(bytes),
         })
     }
     pub fn publish_command_changes(
@@ -370,7 +517,7 @@ impl Workspace {
             decoded.push((change, data));
         }
         self.check_root()?;
-        let _lock = coordination::WriteLock::acquire(&self.root, &self.coordination_root)?;
+        let _lock = coordination::WriteLock::acquire(&self.coordination)?;
         self.check_root()?;
         // Validate every changed source before the first host effect. A later
         // non-cooperating edit is checked again immediately before publication.
@@ -398,7 +545,10 @@ impl Workspace {
                     Ok(fd) => parent = File::from(fd),
                     Err(rustix::io::Errno::NOENT) if data.is_some() => {
                         *effects = EffectState::Uncertain;
-                        rustix::fs::mkdirat(&parent, *component, Mode::RWXU).map_err(io)?;
+                        // Ordinary directory create bits; the kernel applies
+                        // the process umask like any other tool's mkdir.
+                        rustix::fs::mkdirat(&parent, *component, Mode::from_raw_mode(0o777))
+                            .map_err(io)?;
                         parent.sync_all()?;
                         parent = File::from(
                             rustix::fs::openat(
@@ -423,6 +573,9 @@ impl Workspace {
             if let Some(data) = data {
                 let temp = format!(".xcb-command-{}", uuid::Uuid::new_v4().simple());
                 *effects = EffectState::Uncertain;
+                // A new path takes the ordinary create bits for its kind and
+                // the kernel applies the process umask; a replacement stages
+                // privately until the preserved mode is set.
                 let mut file = File::from(
                     rustix::fs::openat(
                         &parent,
@@ -432,20 +585,28 @@ impl Workspace {
                             | OFlags::EXCL
                             | OFlags::NOFOLLOW
                             | OFlags::CLOEXEC,
-                        Mode::RUSR | Mode::WUSR,
+                        Mode::from_raw_mode(match (old_mode.is_some(), change.executable) {
+                            (true, _) => 0o600,
+                            (false, true) => 0o777,
+                            (false, false) => 0o666,
+                        }),
                     )
                     .map_err(io)?,
                 );
-                let mode = if change.executable {
-                    old_mode.unwrap_or(0o600) | 0o100
-                } else {
-                    old_mode.unwrap_or(0o600) & !0o111
-                };
+                let mode = old_mode.map(|old| {
+                    if change.executable {
+                        old | 0o100
+                    } else {
+                        old & !0o111
+                    }
+                });
                 *effects = EffectState::Uncertain;
                 let mut publication = false;
                 let written = (|| -> Result<()> {
                     file.write_all(&data)?;
-                    file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+                    if let Some(mode) = mode {
+                        file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+                    }
                     file.sync_all()?;
                     command_current_at(snapshot, &change.path, &parent, name)?;
                     self.command_parent_current(&change.path, &parent)?;
@@ -523,6 +684,7 @@ impl Workspace {
         }
     }
 }
+#[cfg(unix)]
 fn command_current_at(
     snapshot: &CommandSnapshot,
     path: &str,
@@ -547,15 +709,16 @@ fn command_current_at(
 }
 
 impl CommandSnapshot {
+    /// The serialized snapshot bytes and their digest, encoded exactly once.
+    pub fn encoded(&self) -> &VerifiedSnapshot {
+        &self.encoded
+    }
+    /// Write the already-encoded snapshot and return its digest.
     pub fn save(&self, path: &Path) -> Result<String> {
-        let bytes = serde_json::to_vec(&self.document)?;
-        if bytes.len() > 96 * 1024 * 1024 {
-            return Err(Error::Unavailable("command snapshot encoding limit"));
-        }
-        private::create(path, &bytes)?;
-        Ok(digest(bytes))
+        private::create(path, self.encoded.bytes())?;
+        Ok(self.encoded.sha256().to_owned())
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

@@ -3,16 +3,19 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import {
+  assertNativeAssetBytes,
   assertReleaseAssetBytes,
   publicRepository,
   releaseDistribution,
   releasePackageForName,
 } from "./release-distribution-policy";
 import { verifyNpmProvenance } from "./npm-provenance-verification";
+import { renderReleaseNotes } from "./release-notes";
 import { assertReviewedMainComparison } from "./release-ref-authority";
 
 const maximumJsonBytes = 512 * 1_024;
 const maximumArtifactBytes = 32 * 1_024 * 1_024;
+const maximumNativeArchiveBytes = 64 * 1_024 * 1_024;
 
 function requireEnvironment(name: string, pattern?: RegExp): string {
   const value = process.env[name];
@@ -75,15 +78,19 @@ async function fetchJson(url: string, label: string, headers: HeadersInit = {}):
   }), label);
 }
 
-async function fetchArtifact(url: string, label: string): Promise<Uint8Array> {
+async function fetchArtifact(
+  url: string,
+  label: string,
+  maximum: number = maximumArtifactBytes,
+): Promise<Uint8Array> {
   const response = await fetch(url, {
     cache: "no-store",
     headers: { "Cache-Control": "no-cache", "User-Agent": "xcb-release-admission" },
     redirect: "follow",
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(60_000),
   });
   if (response.status !== 200) throw new Error(`${label} returned HTTP ${String(response.status)}.`);
-  return readBounded(response, label, maximumArtifactBytes);
+  return readBounded(response, label, maximum);
 }
 
 const repository = requireEnvironment("GITHUB_REPOSITORY");
@@ -102,25 +109,41 @@ const releasePackage = releasePackageForName(
 const distribution = releaseDistribution(releasePackage);
 const releaseVersion = distribution.releaseVersionForCurrentAdmission(releaseManifest, verifiedTag);
 
-const encodedPackage = encodeURIComponent(releasePackage.name);
-const registryBase = `https://registry.npmjs.org/${encodedPackage}`;
-const versionPayload = await fetchJson(
-  `${registryBase}/${encodeURIComponent(releaseVersion)}`,
-  "npm exact version",
-);
-const latestPayload = await fetchJson(`${registryBase}/latest`, "npm latest version");
-const npmVersion = distribution.parseNpmRelease(versionPayload, releaseVersion);
-const npmLatest = distribution.parseNpmRelease(latestPayload, releaseVersion);
-if (npmLatest.integrity !== npmVersion.integrity || npmLatest.shasum !== npmVersion.shasum) {
-  throw new Error("npm latest does not resolve to the exact verified version bytes.");
+// The release workflow derives NPM_WRITER_RESULT_REQUIRED from
+// vars.XCB_PUBLISH_NPM. "false" is the reviewed native-only mode: the package
+// is unpublished by design, so the npm registry, trusted-publisher
+// provenance, and writer-result checks are absent rather than failed. An unset
+// or "true" value keeps the full npm gate.
+const npmWriterResultRequired = process.env.NPM_WRITER_RESULT_REQUIRED;
+if (
+  npmWriterResultRequired !== undefined
+  && npmWriterResultRequired !== "true"
+  && npmWriterResultRequired !== "false"
+) throw new Error("Public release admission received an invalid npm-writer requirement.");
+const admitNpm = npmWriterResultRequired !== "false";
+
+let npmTarball: Uint8Array | undefined;
+if (admitNpm) {
+  const encodedPackage = encodeURIComponent(releasePackage.name);
+  const registryBase = `https://registry.npmjs.org/${encodedPackage}`;
+  const versionPayload = await fetchJson(
+    `${registryBase}/${encodeURIComponent(releaseVersion)}`,
+    "npm exact version",
+  );
+  const latestPayload = await fetchJson(`${registryBase}/latest`, "npm latest version");
+  const npmVersion = distribution.parseNpmRelease(versionPayload, releaseVersion);
+  const npmLatest = distribution.parseNpmRelease(latestPayload, releaseVersion);
+  if (npmLatest.integrity !== npmVersion.integrity || npmLatest.shasum !== npmVersion.shasum) {
+    throw new Error("npm latest does not resolve to the exact verified version bytes.");
+  }
+  npmTarball = await fetchArtifact(npmVersion.tarball, "npm release tarball");
+  const npmSha512 = `sha512-${createHash("sha512").update(npmTarball).digest("base64")}`;
+  const npmSha1 = createHash("sha1").update(npmTarball).digest("hex");
+  if (npmSha512 !== npmVersion.integrity || npmSha1 !== npmVersion.shasum) {
+    throw new Error("npm release tarball bytes do not match registry integrity metadata.");
+  }
 }
-const npmTarball = await fetchArtifact(npmVersion.tarball, "npm release tarball");
-const npmSha512 = `sha512-${createHash("sha512").update(npmTarball).digest("base64")}`;
-const npmSha1 = createHash("sha1").update(npmTarball).digest("hex");
-if (npmSha512 !== npmVersion.integrity || npmSha1 !== npmVersion.shasum) {
-  throw new Error("npm release tarball bytes do not match registry integrity metadata.");
-}
-const preNpmState = process.env.PRE_NPM_STATE;
+const preNpmState = process.env.PRE_NPM_STATE === "" ? undefined : process.env.PRE_NPM_STATE;
 if (preNpmState !== undefined && preNpmState !== "absent" && preNpmState !== "exact_same_run") {
   throw new Error("Public release admission received an invalid npm retry state.");
 }
@@ -139,7 +162,6 @@ const npmCompletionRunAttempt = process.env.NPM_COMPLETION_RUN_ATTEMPT ?? "";
 const writerConstraint = npmWriterResult.length > 0
   || npmCompletionRunId.length > 0
   || npmCompletionRunAttempt.length > 0;
-const npmWriterResultRequired = process.env.NPM_WRITER_RESULT_REQUIRED;
 if (
   (laterRunConstraint && (
     !/^[1-9][0-9]*$/u.test(expectedReleaseRunId)
@@ -150,11 +172,11 @@ if (
     || !/^[1-9][0-9]*$/u.test(npmCompletionRunId)
     || !/^[1-9][0-9]*$/u.test(npmCompletionRunAttempt)
   ))
-  || (npmWriterResultRequired !== undefined && npmWriterResultRequired !== "true")
+  || (!admitNpm && (preNpmState !== undefined || laterRunConstraint || writerConstraint))
   || (npmWriterResultRequired === "true" && !writerConstraint)
   || [preNpmState !== undefined, laterRunConstraint, writerConstraint].filter(Boolean).length > 1
 ) throw new Error("Public release admission received conflicting or invalid run constraints.");
-await verifyNpmProvenance(npmTarball, {
+if (admitNpm && npmTarball !== undefined) await verifyNpmProvenance(npmTarball, {
   releasePackage,
   ...(preNpmState === "exact_same_run"
     ? { maximumAttempt: constrainedAttempt as number, requiredRunId: constrainedRunId as string }
@@ -253,7 +275,15 @@ const [releasePayload, githubLatestPayload] = await Promise.all([
 if ((githubLatestPayload as Readonly<{ tag_name?: unknown }>).tag_name !== verifiedTag) {
   throw new Error("Latest GitHub Release does not match the admitted annotated tag.");
 }
-const release = distribution.parseGitHubRelease(releasePayload, releaseVersion);
+// The page notes must be byte-identical to this commit's CHANGELOG.md section
+// plus the generated install and verify sections.
+const expectedNotes = renderReleaseNotes({
+  changelog: await readFile(resolve(import.meta.dir, "..", "CHANGELOG.md"), "utf8"),
+  commit: verifiedSha,
+  releasePackage: distribution.package,
+  version: releaseVersion,
+});
+const release = distribution.parseGitHubRelease(releasePayload, releaseVersion, expectedNotes);
 const [githubTarball, githubChecksum] = await Promise.all([
   fetchArtifact(release.tarball.browserDownloadUrl, "GitHub Release tarball"),
   fetchArtifact(release.checksum.browserDownloadUrl, "GitHub Release checksum"),
@@ -264,10 +294,37 @@ assertReleaseAssetBytes(
   githubChecksum,
   (bytes) => createHash("sha256").update(bytes).digest("hex"),
 );
-if (!Buffer.from(githubTarball).equals(Buffer.from(npmTarball))) {
+// This pipeline always builds native assets, so a release carrying none is an
+// admission failure; each published pair must match its own digest, size, and
+// adjacent checksum. Byte parity with the workflow artifacts is the separate
+// pre-publish parity gate in scripts/check-github-release.ts.
+if (release.natives.length === 0) {
+  throw new Error(`GitHub Release ${verifiedTag} carries no native asset pairs.`);
+}
+for (const pair of release.natives) {
+  const [nativeArchive, nativeChecksum] = await Promise.all([
+    fetchArtifact(
+      pair.archive.browserDownloadUrl,
+      `GitHub Release ${pair.archive.name}`,
+      maximumNativeArchiveBytes,
+    ),
+    fetchArtifact(pair.checksum.browserDownloadUrl, `GitHub Release ${pair.checksum.name}`),
+  ]);
+  assertNativeAssetBytes(
+    pair,
+    nativeArchive,
+    nativeChecksum,
+    (bytes) => createHash("sha256").update(bytes).digest("hex"),
+  );
+}
+if (npmTarball !== undefined && !Buffer.from(githubTarball).equals(Buffer.from(npmTarball))) {
   throw new Error("npm and GitHub do not expose the same exact release tarball bytes.");
 }
 
 console.log(`Public release admission passed for ${releasePackage.name}@${releaseVersion}.`);
-console.log("- npm latest: exact MIT package, cryptographically verified trusted-publisher provenance, SHA-1 and SHA-512 integrity");
-console.log("- GitHub Release: exact annotated tag, commit, tarball, SHA256SUMS, sizes, and SHA-256 digests");
+if (admitNpm) {
+  console.log("- npm latest: exact MIT package, cryptographically verified trusted-publisher provenance, SHA-1 and SHA-512 integrity");
+} else {
+  console.log("- npm: unpublished by configuration (native-only admission)");
+}
+console.log("- GitHub Release: exact annotated tag, commit, tarball, SHA256SUMS, native pairs, sizes, and SHA-256 digests");

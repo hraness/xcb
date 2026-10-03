@@ -88,11 +88,7 @@ impl OfferState {
             || if self.checked_at_ms == 0 {
                 self.next_check_ms != 0 || !self.source_sha256.is_empty() || !self.offers.is_empty()
             } else {
-                self.source_sha256.len() != 64
-                    || !self
-                        .source_sha256
-                        .bytes()
-                        .all(|byte| byte.is_ascii_hexdigit())
+                !xcb_core::hex64_any(&self.source_sha256)
             }
         {
             return Err(xcb_core::Error::Invalid("offer state").into());
@@ -391,7 +387,8 @@ mod tests {
     fn older_refresh_cannot_overwrite_a_newer_saved_observation() {
         let directory = tempfile::tempdir().unwrap();
         let root =
-            private::directory(&directory.path().canonicalize().unwrap().join("state")).unwrap();
+            private::directory(&xcb_core::canonical(directory.path()).unwrap().join("state"))
+                .unwrap();
         let old = parse_devin_pricing(SWE2_TERMS.as_bytes(), 100).unwrap();
         let new = parse_devin_pricing(b"Promotion withdrawn", 200).unwrap();
         save(&root, &new).unwrap();

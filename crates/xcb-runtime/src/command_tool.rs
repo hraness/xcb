@@ -2,35 +2,71 @@
 //! future cannot drop the command's join, publication or durable settlement.
 use crate::{
     Error, Result,
-    broker::{Workspace, snapshot::CommandChanges},
-    command::{CommandBackend, CommandInput, CommandOutcome, CommandRequest},
+    broker::{
+        Workspace,
+        snapshot::{CommandChanges, CommandSnapshot},
+    },
+    command::{CommandBackend, CommandCustody, CommandInput, CommandOutcome, CommandRequest},
     digest, new_id, private,
     store::{RunRecord, Store},
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    fs::{File, Metadata},
+    fs::File,
     io::{Read, Seek, SeekFrom},
-    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     sync::Arc,
 };
 use tokio::{sync::watch, task::JoinHandle};
-use xcb_core::policy::EffectState;
+use xcb_core::{Id, policy::EffectState};
 
 pub(crate) struct CommandToolResult {
     pub output: Result<Value>,
     pub effects: EffectState,
     pub joined: bool,
 }
+
 struct Active {
     cancel: watch::Sender<bool>,
     task: JoinHandle<CommandToolResult>,
 }
+
+/// Snapshot, capture and backend preparation run on a blocking thread. The
+/// handle stays here until joined so a dropped provider wait cannot orphan
+/// the retained input or leave its tool receipt unsettled.
+struct Preparing {
+    store: Arc<Store>,
+    run: RunRecord,
+    call: String,
+    task: JoinHandle<Result<Prepared>>,
+}
+
+struct Prepared {
+    backend: CommandBackend,
+    input: CommandInput,
+    request: CommandRequest,
+    snapshot: CommandSnapshot,
+    owned_input: OwnedSnapshot,
+    custody: CommandCustody,
+}
+
+/// One ordinary workspace tool call running on a blocking thread. If the
+/// provider wait is dropped mid-call, the call still completes here and its
+/// observed effects settle the receipt before custody can be released.
+struct BlockingCall {
+    store: Arc<Store>,
+    run: RunRecord,
+    call: String,
+    task: JoinHandle<(Result<Value>, EffectState)>,
+    cancel: Option<watch::Sender<bool>>,
+}
+
 #[derive(Default)]
 pub(crate) struct CommandTools {
     active: Option<Active>,
+    preparing: Option<Preparing>,
+    blocking: Option<BlockingCall>,
 }
 
 pub fn default_root() -> Result<PathBuf> {
@@ -38,8 +74,53 @@ pub fn default_root() -> Result<PathBuf> {
     Ok(PathBuf::from(home).join(".local/share/xcb-command"))
 }
 
+fn prepare(
+    backend_root: PathBuf,
+    workspace: Arc<Workspace>,
+    request: CommandRequest,
+) -> Result<Prepared> {
+    let backend = CommandBackend::load(&backend_root).map_err(|_| {
+        Error::Unavailable(
+            "offline command runner is not ready; run the supported setup-command-runner.py installer",
+        )
+    })?;
+    let command_id = new_id("cmd");
+    let snapshots = backend_root.join("snapshots");
+    private::directory(&snapshots)?;
+    let snapshot_path = snapshots.join(format!("{command_id}.json"));
+    let snapshot = workspace.command_snapshot()?;
+    let snapshot_sha256 = snapshot.save(&snapshot_path)?;
+    let input = CommandInput {
+        command_id,
+        run_id: Id::new("run_placeholder").expect("static id"),
+        workspace_id: snapshot.document.workspace_id.clone(),
+        snapshot_path,
+        snapshot: snapshot.encoded().clone(),
+    };
+    // Capture verifies the written file against the digest of the bytes
+    // that were encoded once; the backend never re-reads the snapshot file.
+    let owned_input = OwnedSnapshot::capture(&input.snapshot_path, &snapshot_sha256)?;
+    Ok(Prepared {
+        backend,
+        input,
+        request,
+        snapshot,
+        owned_input,
+        custody: CommandCustody {
+            version: 1,
+            command_id: Id::new("cmd_placeholder").expect("static id"),
+            run_id: Id::new("run_placeholder").expect("static id"),
+            workspace_id: String::new(),
+            snapshot_sha256,
+            request_sha256: String::new(),
+            backend_sha256: String::new(),
+            boot_id: String::new(),
+        },
+    })
+}
+
 impl CommandTools {
-    pub fn start(
+    pub async fn start(
         &mut self,
         store: Arc<Store>,
         run: RunRecord,
@@ -47,34 +128,40 @@ impl CommandTools {
         call: String,
         arguments: &Value,
     ) -> Result<()> {
-        if self.active.is_some() {
+        if self.active.is_some() || self.preparing.is_some() || self.blocking.is_some() {
             return Err(Error::Conflict("a command is already active"));
         }
-        let request: CommandRequest = serde_json::from_value(arguments.clone())?;
+        let request = serde_json::from_value::<CommandRequest>(arguments.clone())?
+            .relative_to(workspace.root());
         request.validate()?;
         let backend_root = default_root()?;
-        let backend = CommandBackend::load(&backend_root).map_err(|_| Error::Unavailable("offline command runner is not ready; run the supported setup-command-runner.py installer"))?;
-        let command_id = new_id("cmd");
-        let snapshots = backend_root.join("snapshots");
-        private::directory(&snapshots)?;
-        let snapshot_path = snapshots.join(format!("{command_id}.json"));
-        let snapshot = workspace.command_snapshot()?;
-        let snapshot_sha256 = snapshot.save(&snapshot_path)?;
-        let input = CommandInput {
-            command_id,
-            run_id: run.id.clone(),
-            workspace_id: snapshot.document.workspace_id.clone(),
-            snapshot_path,
-            snapshot_sha256,
-        };
-        let owned_input = OwnedSnapshot::capture(&input.snapshot_path, &input.snapshot_sha256)?;
-        let custody = match backend.prepare(&input, &request) {
-            Ok(custody) => custody,
-            Err(error) => {
-                discard_unsubmitted(&store, &run, owned_input);
-                return Err(error);
+        let run_id = run.id.clone();
+        let task = tokio::task::spawn_blocking({
+            let workspace = workspace.clone();
+            move || {
+                let mut prepared = prepare(backend_root, workspace, request)?;
+                prepared.input.run_id = run_id;
+                prepared.custody = prepared
+                    .backend
+                    .prepare(&prepared.input, &prepared.request)?;
+                Ok(prepared)
             }
-        };
+        });
+        self.preparing = Some(Preparing {
+            store: store.clone(),
+            run: run.clone(),
+            call: call.clone(),
+            task,
+        });
+        let prepared = self.join_preparation().await?;
+        let Prepared {
+            backend,
+            input,
+            request,
+            snapshot,
+            owned_input,
+            custody,
+        } = prepared;
         // The strict run decoder in earlier releases rejects this marker. It
         // is written before the independent owner can launch guest work.
         if let Err(error) = store.record_command_custody(&run, &custody) {
@@ -100,12 +187,107 @@ impl CommandTools {
                     };
                 }
             };
-            let publication = publish(&workspace, &snapshot, &outcome, *cancellation.borrow());
-            finish_command(&store, &run, &call, &outcome, publication, owned_input)
+            // Publication and durable settlement are blocking filesystem and
+            // database work; they run off the async workers but stay owned
+            // by this independent task.
+            let cancelled = *cancellation.borrow();
+            let settled = tokio::task::spawn_blocking(move || {
+                let publication = publish(&workspace, &snapshot, &outcome, cancelled);
+                finish_command(&store, &run, &call, &outcome, publication, owned_input)
+            })
+            .await;
+            settled.unwrap_or(CommandToolResult {
+                output: Err(Error::Unavailable(
+                    "command settlement worker failed; custody retained",
+                )),
+                effects: EffectState::Uncertain,
+                joined: true,
+            })
         });
         self.active = Some(Active { cancel, task });
         Ok(())
     }
+
+    async fn join_preparation(&mut self) -> Result<Prepared> {
+        let Some(preparing) = self.preparing.as_mut() else {
+            return Err(Error::Conflict("no command preparation"));
+        };
+        // Await by reference. A dropped wait leaves the handle in self so
+        // cancel_and_join can still discard the unsubmitted input.
+        let result = (&mut preparing.task).await;
+        self.preparing.take();
+        result
+            .map_err(|_| Error::Unavailable("command preparation worker failed; input retained"))?
+    }
+
+    /// Run one ordinary workspace tool on a blocking thread. The call's
+    /// effects are returned to the caller for settlement; a dropped wait is
+    /// joined and settled by cancel_and_join instead.
+    pub async fn workspace_call(
+        &mut self,
+        store: Arc<Store>,
+        run: RunRecord,
+        call: String,
+        workspace: Arc<Workspace>,
+        name: String,
+        arguments: Value,
+    ) -> (Result<Value>, EffectState) {
+        if self.active.is_some() || self.preparing.is_some() || self.blocking.is_some() {
+            return (
+                Err(Error::Conflict("a command is already active")),
+                EffectState::None,
+            );
+        }
+        let host = if name == "workspace_host_exec" {
+            if let Err(error) = host::admit(&store, &run, workspace.root()) {
+                return (Err(error), EffectState::None);
+            }
+            match host::Request::parse(&arguments, workspace.root()) {
+                Ok(request) => Some(request),
+                Err(error) => return (Err(error), EffectState::None),
+            }
+        } else {
+            None
+        };
+        let (cancel, cancellation) = watch::channel(false);
+        let host_call = host.is_some();
+        let task = tokio::task::spawn_blocking(move || {
+            if let Some(request) = host {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build();
+                return match runtime {
+                    Ok(runtime) => {
+                        runtime.block_on(host::call(workspace.root(), request, cancellation))
+                    }
+                    Err(_) => (
+                        Err(Error::Unavailable("host command owner could not start")),
+                        EffectState::None,
+                    ),
+                };
+            }
+            workspace.call_observed(&name, &arguments)
+        });
+        self.blocking = Some(BlockingCall {
+            store,
+            run,
+            call,
+            task,
+            cancel: host_call.then_some(cancel),
+        });
+        let Some(blocking) = self.blocking.as_mut() else {
+            unreachable!("blocking call was just stored");
+        };
+        let result = (&mut blocking.task).await;
+        self.blocking.take();
+        result.unwrap_or((
+            Err(Error::Unavailable(
+                "workspace tool worker failed; custody retained",
+            )),
+            EffectState::Uncertain,
+        ))
+    }
+
     pub async fn wait(&mut self) -> CommandToolResult {
         let Some(active) = self.active.as_mut() else {
             return CommandToolResult {
@@ -124,46 +306,124 @@ impl CommandTools {
             joined: false,
         })
     }
+
+    /// Join every retained handle: an interrupted preparation, an
+    /// interrupted workspace call and the active command owner. Their
+    /// receipts settle here so a dropped provider wait never leaves a
+    /// started tool intent behind.
     pub async fn cancel_and_join(&mut self) -> Option<CommandToolResult> {
-        self.active.as_ref()?.cancel.send_replace(true);
-        Some(self.wait().await)
+        let mut folded: Option<CommandToolResult> = None;
+        let mut fold = |next: CommandToolResult| {
+            folded = Some(match folded.take() {
+                Some(previous) => CommandToolResult {
+                    output: next.output,
+                    effects: combine_effects(previous.effects, next.effects),
+                    joined: previous.joined && next.joined,
+                },
+                None => next,
+            });
+        };
+        if let Some(preparing) = self.preparing.take() {
+            // Nothing was submitted: custody was never recorded, so the
+            // retained input is discarded only with durable proof of that.
+            if let Ok(Ok(prepared)) = preparing.task.await {
+                discard_unsubmitted(&preparing.store, &preparing.run, prepared.owned_input);
+            }
+            fold(settle_interrupted(
+                &preparing.store,
+                &preparing.run,
+                &preparing.call,
+                EffectState::None,
+            ));
+        }
+        if let Some(blocking) = self.blocking.take() {
+            if let Some(cancel) = &blocking.cancel {
+                cancel.send_replace(true);
+            }
+            let effects = match blocking.task.await {
+                Ok((_, effects)) => effects,
+                Err(_) => EffectState::Uncertain,
+            };
+            fold(settle_interrupted(
+                &blocking.store,
+                &blocking.run,
+                &blocking.call,
+                effects,
+            ));
+        }
+        if let Some(active) = self.active.as_ref() {
+            active.cancel.send_replace(true);
+            fold(self.wait().await);
+        }
+        folded
     }
 }
+
+fn combine_effects(previous: EffectState, next: EffectState) -> EffectState {
+    if previous == EffectState::Uncertain || next == EffectState::Uncertain {
+        EffectState::Uncertain
+    } else if previous == EffectState::Settled || next == EffectState::Settled {
+        EffectState::Settled
+    } else {
+        EffectState::None
+    }
+}
+
+/// Settle the receipt of a call whose provider wait was dropped. An
+/// uncertain call, or a receipt that cannot be written, keeps custody.
+fn settle_interrupted(
+    store: &Store,
+    run: &RunRecord,
+    call: &str,
+    effects: EffectState,
+) -> CommandToolResult {
+    let effects = if effects != EffectState::Uncertain && store.settle_tool(run, call).is_ok() {
+        effects
+    } else {
+        EffectState::Uncertain
+    };
+    CommandToolResult {
+        output: Err(Error::Unavailable("tool call interrupted by cancellation")),
+        effects,
+        joined: true,
+    }
+}
+
 impl Drop for CommandTools {
     fn drop(&mut self) {
         if let Some(active) = &self.active {
             active.cancel.send_replace(true);
         }
+        if let Some(blocking) = &self.blocking
+            && let Some(cancel) = &blocking.cancel
+        {
+            cancel.send_replace(true);
+        }
     }
 }
+
 // This capability is created only for the unique input just published by this
 // invocation. It is never reconstructed from a historical job or caller path.
 struct OwnedSnapshot {
     path: PathBuf,
     parent: File,
     file: File,
-    identity: Metadata,
+    identity: xcb_core::FileIdentity,
     sha256: String,
 }
+
 const SNAPSHOT_LIMIT: u64 = 96 * 1024 * 1024;
 
-fn same_snapshot(left: &Metadata, right: &Metadata) -> bool {
-    left.dev() == right.dev()
-        && left.ino() == right.ino()
-        && left.uid() == right.uid()
-        && left.gid() == right.gid()
-        && left.mode() == right.mode()
-        && left.nlink() == right.nlink()
-        && left.len() == right.len()
-        && left.mtime() == right.mtime()
-        && left.mtime_nsec() == right.mtime_nsec()
-        && left.ctime() == right.ctime()
-        && left.ctime_nsec() == right.ctime_nsec()
+/// Device, inode, owner, group, mode, links, size, mtime and ctime: every
+/// field of [`xcb_core::FileIdentity`].
+fn same_snapshot(left: &xcb_core::FileIdentity, file: &File) -> Result<bool> {
+    Ok(*left == xcb_core::FileIdentity::of_file(file)?)
 }
 
 impl OwnedSnapshot {
     fn capture(path: &Path, sha256: &str) -> Result<Self> {
         let directory = private::check_directory(path.parent().ok_or(Error::PrivateState)?)?;
+        #[cfg(unix)]
         let parent = File::from(
             rustix::fs::open(
                 &directory,
@@ -175,8 +435,10 @@ impl OwnedSnapshot {
             )
             .map_err(std::io::Error::from)?,
         );
+        #[cfg(windows)]
+        let parent = xcb_platform::open_metadata(&directory)?;
         let file = private::open_file(path, SNAPSHOT_LIMIT)?;
-        let identity = file.metadata()?;
+        let identity = xcb_core::FileIdentity::of_file(&file)?;
         let mut owned = Self {
             path: path.to_owned(),
             parent,
@@ -191,9 +453,9 @@ impl OwnedSnapshot {
     fn check_parent(&self) -> Result<()> {
         let path = self.path.parent().ok_or(Error::PrivateState)?;
         private::check_directory(path)?;
-        let named = std::fs::symlink_metadata(path)?;
-        let retained = self.parent.metadata()?;
-        if named.dev() != retained.dev() || named.ino() != retained.ino() {
+        let named = crate::os::lstat(path)?;
+        let retained = crate::os::fstat(&self.parent)?;
+        if named.dev != retained.dev || named.ino != retained.ino {
             return Err(Error::Conflict("command snapshot parent changed"));
         }
         Ok(())
@@ -202,7 +464,7 @@ impl OwnedSnapshot {
     fn verify(&mut self) -> Result<()> {
         self.check_parent()?;
         private::check_file(&self.file, SNAPSHOT_LIMIT)?;
-        if !same_snapshot(&self.identity, &self.file.metadata()?) {
+        if !same_snapshot(&self.identity, &self.file)? {
             return Err(Error::Conflict("command snapshot identity changed"));
         }
         self.file.seek(SeekFrom::Start(0))?;
@@ -220,11 +482,11 @@ impl OwnedSnapshot {
             }
             hasher.update(&buffer[..count]);
         }
-        if total != self.identity.len() || hex::encode(hasher.finalize()) != self.sha256 {
+        if total != self.identity.size || hex::encode(hasher.finalize()) != self.sha256 {
             return Err(Error::Conflict("command snapshot digest changed"));
         }
         private::check_file(&self.file, SNAPSHOT_LIMIT)?;
-        if !same_snapshot(&self.identity, &self.file.metadata()?) {
+        if !same_snapshot(&self.identity, &self.file)? {
             return Err(Error::Conflict("command snapshot changed during cleanup"));
         }
         self.check_parent()?;
@@ -237,9 +499,16 @@ impl OwnedSnapshot {
         let name = self.path.file_name().ok_or(Error::PrivateState)?;
         // Remove through the retained parent, never through an unchecked
         // re-resolved ancestor. A failure does not change process join proof.
-        rustix::fs::unlinkat(&self.parent, name, rustix::fs::AtFlags::empty())
-            .map_err(std::io::Error::from)?;
-        self.parent.sync_all()?;
+        #[cfg(unix)]
+        {
+            rustix::fs::unlinkat(&self.parent, name, rustix::fs::AtFlags::empty())
+                .map_err(std::io::Error::from)?;
+            self.parent.sync_all()?;
+        }
+        // Windows has no handle-relative unlink; the parent's identity is
+        // re-proved just below. Command runs are refused there regardless.
+        #[cfg(windows)]
+        std::fs::remove_file(self.path.with_file_name(name))?;
         self.check_parent()?;
         Ok(())
     }
@@ -276,18 +545,32 @@ fn finish_command(
         };
     }
     let (mut output, effects) = publication;
-    if store.clear_command_custody(run, &outcome.custody).is_err() {
+    // A partial publication is itself an unresolved effect. Keep both the
+    // command custody marker and the tool intent so recovery can reconcile
+    // the exact guest receipt and real worktree before any retry.
+    if effects == EffectState::Uncertain {
         return CommandToolResult {
-            output: Err(Error::Unavailable("command custody settlement failed")),
-            effects: EffectState::Uncertain,
+            output: Err(Error::Unavailable(
+                "command publication is uncertain; account custody retained",
+            )),
+            effects,
             joined: true,
         };
     }
-    if effects != EffectState::Uncertain && store.settle_tool(run, call).is_err() {
+    // Settle the tool intent before clearing command custody. If either write
+    // is ambiguous, leaving custody in place preserves an exact recovery key.
+    if store.settle_tool(run, call).is_err() {
         return CommandToolResult {
             output: Err(Error::Unavailable(
                 "command effect receipt could not settle",
             )),
+            effects: EffectState::Uncertain,
+            joined: true,
+        };
+    }
+    if store.clear_command_custody(run, &outcome.custody).is_err() {
+        return CommandToolResult {
+            output: Err(Error::Unavailable("command custody settlement failed")),
             effects: EffectState::Uncertain,
             joined: true,
         };
@@ -322,6 +605,7 @@ fn clipped_at(value: &str, maximum: usize) -> (&str, bool) {
     }
     (&value[..end], end != value.len())
 }
+
 fn publish(
     workspace: &Workspace,
     snapshot: &crate::broker::snapshot::CommandSnapshot,
@@ -340,11 +624,16 @@ fn publish(
                 outcome.error.as_deref().unwrap_or("command did not start"),
                 4096,
             );
-            return Ok(
-                json!({"commandId":outcome.custody.command_id,"status":"not_started",
-                "joined":true,"published":false,"error":error,"truncated":truncated,
-                "network":"none","platform":"linux"}),
-            );
+            return Ok(json!({
+                "commandId": outcome.custody.command_id,
+                "status": "not_started",
+                "joined": true,
+                "published": false,
+                "error": error,
+                "truncated": truncated,
+                "network": "none",
+                "platform": "linux"
+            }));
         };
         let eligible = !cancelled
             && !output.cancelled
@@ -388,17 +677,28 @@ fn publish(
                 (Some(text), cut)
             })
             .unwrap_or((None, false));
-        Ok(
-            json!({"commandId":outcome.custody.command_id,"exitCode":output.exit_code,
-            "stdout":stdout,"stderr":stderr,"timedOut":output.timed_out,
-            "cancelled":cancelled || output.cancelled,"truncated":output.truncated || stdout_cut || stderr_cut || error_cut,
-            "joined":true,"network":"none","platform":"linux","published":eligible,
-            "scratchCleanupPending":output.cleanup_pending,
-            "scratchCleanupNotice":output.cleanup_pending.then_some("Command joined; private scratch cleanup is pending. Execution and publication results remain valid."),
-            "publication":publication,"stagedChangesRetained":!eligible,
-            "gitInspectionAvailable":snapshot.document.git.is_some(),"gitUnavailable":snapshot.git_unavailable,
-            "excludedInputPaths":excluded,"excludedPathsTruncated":excluded.len() != snapshot.excluded.len(),"error":error}),
-        )
+        Ok(json!({
+            "commandId": outcome.custody.command_id,
+            "exitCode": output.exit_code,
+            "stdout": stdout,
+            "stderr": stderr,
+            "timedOut": output.timed_out,
+            "cancelled": cancelled || output.cancelled,
+            "truncated": output.truncated || stdout_cut || stderr_cut || error_cut,
+            "joined": true,
+            "network": "none",
+            "platform": "linux",
+            "published": eligible,
+            "scratchCleanupPending": output.cleanup_pending,
+            "scratchCleanupNotice": output.cleanup_pending.then_some("Command joined; private scratch cleanup is pending. Execution and publication results remain valid."),
+            "publication": publication,
+            "stagedChangesRetained": !eligible,
+            "gitInspectionAvailable": snapshot.document.git.is_some(),
+            "gitUnavailable": snapshot.git_unavailable,
+            "excludedInputPaths": excluded,
+            "excludedPathsTruncated": excluded.len() != snapshot.excluded.len(),
+            "error": error
+        }))
     })();
     (result, effects)
 }
@@ -424,5 +724,6 @@ pub async fn recover(store: &Store, run: &RunRecord, expected_digest: &str) -> R
     store.reconcile_command_custody(&run.id, expected_digest, custody)
 }
 
-#[cfg(test)]
+mod host;
+#[cfg(all(test, unix))]
 mod tests;

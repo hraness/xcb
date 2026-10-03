@@ -1,12 +1,55 @@
 # Known quota limits and route selection
 
-Native XCB keeps known Claude account-wide exhaustion separate from short-lived
-usage percentages. A current-credential observation of 100% use in `five_hour`
-or `seven_day` prevents a new coding turn until the provider-reported reset,
+Automatic routing favors fresh subscription capacity that would otherwise go
+unused before a reset. For Claude and Codex, xcb divides the remaining
+percentage in each known account-wide window by the hours until that window
+resets, then uses the lowest rate across overlapping windows. This lets unused
+capacity influence the choice without treating a nearly renewed short window
+as permission to exhaust a weekly allowance. The route explanation includes
+the rate when it contributed to the choice.
+
+The rate adds a capped preference to the existing model score. It preserves
+explicit account, provider, and model choices, known usage blocks, and the
+highest-quality tier required by a substantial task. Measurements must be
+at most five minutes old and belong to the account's applicable quota pool.
+A stale active window makes the rate unknown; unknown capacity receives no
+bonus. Devin currently reports no comparable account-wide percentage meter.
+Percentages across subscriptions are a routing heuristic, not equal amounts of
+work or a promise about provider billing.
+
+This policy draws on the reset-aware scheduling approach in
+[llm-quota-router](https://github.com/tonygwu/llm-quota-router/tree/61d952568cdda6b661857cd96f6b9c8fc09a9cdf). xcb keeps its
+own provider checks, account ownership, and task-quality rules. No source code
+from that project was copied.
+
+Native xcb keeps known account-wide exhaustion separate from short-lived
+usage percentages. Claude uses `five_hour` and `seven_day`; Codex uses
+`codex.primary` and `codex.secondary`. An applicable observation of 100% use
+prevents a new coding turn until the provider-reported reset,
 even after the five-minute percentage freshness period. If both windows are
 exhausted, the later reset applies. A newer observation of the same window can
 supersede the old one. Reaching a reset permits another attempt; it does not
 prove that the provider will accept it.
+
+A provider can also refuse a turn for the account's usage limit without saying
+when the limit resets. Every Codex `usageLimitExceeded` and Devin
+resource-exhaustion error arrives this way (the Codex error carries no reset
+or rate-limit snapshot), and a Claude rejection may omit its reset time. Once
+the provider process has exited and xcb has recorded that the turn ended at
+the account's usage limit, xcb records a cooldown for the account while it
+still holds it: the account stays at a known usage limit for
+`quota_limit_cooldown_ms` from `config.json` (default 30 minutes; 1 minute to
+7 days). A limit the provider reports for one model only is recorded with the
+turn but not as an account cooldown, because a model-specific window never
+implies account scope. A reset the provider reports after the cooldown was
+recorded replaces it, whether sooner or later, and a later meter that shows
+capacity clears it; a cooldown recorded after an exhausted window with a later
+reset keeps that later reset. The cooldown is not a meter: it changes no
+percentage, reset, or runway shown for the account. xcb does not start a
+metadata check after the failed turn to learn the real reset, because the
+account is released when the turn settles and a new hold would race other
+terminals; the next turn or `xcb accounts refresh` records the provider's
+meters, which then take over.
 
 Automatic account selection skips these blocked accounts. An explicit blocked
 account choice reports why it cannot start. Saved sessions keep their account
@@ -15,25 +58,35 @@ ownership, so a second terminal cannot race a newly recorded exhaustion.
 Configured continuation retains its existing cleanup, effect, checkpoint and
 quota-evidence gates; this change only removes blocked candidates.
 
-Managed tasks apply a second bounded selection stage after admission. XCB derives
-relative quality, cost and latency profiles from observed model identities,
-peels non-dominated models into Pareto layers, then scores them for routine,
-balanced or complex work. Fresh remaining usage, configured favorites and a
-soft workspace-learned provider preference break ties. An explicit opening “Use
-Claude/Codex/Devin” directive remains a hard provider constraint. If the judge is
-enabled it may choose only from the already eligible top routes; a missing or
-failed judgment falls back to the deterministic ordering rather than widening
-eligibility. `xcb models tiers --task TEXT` shows the model layers and
-`xcb --cwd WORKSPACE models route --task TEXT` previews the admitted route using
+By default an account runs one task at a time. `max_runs_per_account` in
+`config.json` (1 to 32) raises how many tasks may share one account; every
+run still gets its own provider profile, so concurrent tasks do not share
+provider state. Sign-in, credential checks, and other account operations
+still take the account alone: no task starts while one is held, and none of
+them start while tasks are running.
+
+Managed tasks then rank the accounts and models that remain. xcb derives
+relative quality, cost, and latency profiles from observed model identities and
+sorts the models into Pareto layers: a model is in the first layer when no other
+model is at least as good on every measure and better on one. It then scores the layers for routine,
+balanced, or complex work. Fresh quota timing, configured favorites and a
+soft workspace-learned provider preference adjust the score. An explicit opening “Use
+Claude/Codex/Devin” directive remains a hard provider constraint. The optional
+judge classifies capability demand through the ALGAL fitted classifier; route
+selection then follows deterministic policy within already eligible candidates.
+A missing or failed classification uses a deterministic demand estimate without
+widening eligibility. `xcb models tiers --task TEXT` shows the model layers and
+`xcb --cwd WORKSPACE models route --task TEXT` previews the route using
 the same workspace preferences and provider directive. Preview does not reserve
-an account; availability and optional judgment may change before execution. These are relative
+an account; availability and optional classification may change before execution. These are relative
 routing heuristics, not provider price guarantees; the SWE-2 capability/cost
 position follows Cognition’s published
 [Pareto analysis](https://cognition.com/blog/swe-2).
 
 `xcb accounts` and `/accounts` show the known retry estimate.
 `xcb --json accounts` adds `quotaBlockedUntilMs`, the exact Unix timestamp in
-milliseconds, separately from `remainingPercent` and `resetsAtMs`. A null block
+milliseconds, separately from `remainingPercent` and `resetsAtMs`; a cooldown
+appears there as its end time. A null block
 means no enforceable observation in this narrow scope; it does not certify
 that an account is available. Disabled accounts and unsettled runs still have
 their own checks.
@@ -43,26 +96,27 @@ observations recorded while holding that account's exact run or metadata-probe
 ownership can adopt the generation-bound quota pool. Credential replacement
 makes the old pool inapplicable; ordinary refresh with unchanged credentials
 retains its binding. Legacy observations remain preserved but cannot impose
-this block. Refreshing metadata can supply newer evidence without starting a
-coding turn:
+this block. Refreshing metadata can supply newer evidence without starting a coding turn
+on Claude Code builds that report usage at session start; 2.1.282 reports usage
+only on requests, so the next routed turn records the meters instead:
 
 ```sh
 xcb accounts refresh ACCOUNT
 ```
 
-This first slice does not infer account-wide limits from Claude model-specific
-windows, arbitrary Codex quota buckets, or Devin resource-exhaustion errors.
-It does not persist unknown-reset denials or authentication health. Existing
+xcb does not infer account-wide meters from Claude model-specific windows or
+arbitrary Codex quota buckets. A refused turn without a reset records only the
+bounded cooldown above, never a percentage or a provider reset. Existing
 percentage summaries remain telemetry, not proof of model-specific availability.
 
-Official temporary pricing offers are a separate observation class. XCB checks
+Official temporary pricing offers are a separate observation class. xcb checks
 the bounded public [Devin pricing page](https://devin.ai/pricing) at supervisor
 startup and every six hours,
 retains its source digest, treats it as stale after 24 hours, and enforces the
 advertised end timestamp independently of page freshness. The September 2026
 observation annotates the advertised Devin CLI SWE-2 promotion only for known
 SWE-2 effort variants. The public offer is conditional on an eligible paid plan;
-it does not prove that a connected account qualifies. XCB therefore does not
+it does not prove that a connected account qualifies. xcb therefore does not
 zero a route’s relative cost or grant a free-price bonus from this observation.
 It never qualifies Devin or verifies the user-supplied `--plan` label. Inspect or refresh it with `xcb offers` and
 `xcb offers --refresh`.
@@ -70,11 +124,160 @@ It never qualifies Devin or verifies the user-supplied `--plan` label. Inspect o
 Managed continuation has one owner. Each supervisor attempt executes exactly
 one settled provider turn. Turn/token-limit continuation uses the existing
 bounded deterministic policy; semantic continuation may proceed only after the
-same safety gates and a positive judge result. A settled account/model quota
+same safety gates when a settle head acts, and a configured judge may veto
+it but never start it. A settled account/model quota
 failure can choose another admitted Pareto route, excluding routes already
 tried by that task. Unsettled or uncertain effects are never failed over.
+Direct sessions and the terminal keep their transcript across such a switch
+and treat an account without a usage meter, or with a stale reading, as able
+to take the task; [failover.md](failover.md) describes that path, its route
+order (same model, then same provider, then the least recently used account),
+and the notice xcb shows when no account can take the task.
 
 The separation of account health from active work and selection was informed by
 [Underclass's routing and health design](https://github.com/ghuntley/underclass/tree/a0ed73d732e5230657595ab6803c182aea93d792).
-XCB retains its own custody and provider contracts; no Underclass source code
+xcb retains its own custody and provider contracts; no Underclass source code
 was copied.
+
+## Preference stack
+
+Automatic routing (managed tasks, unpinned `xcb run`, `xcb --json route`
+without a model pin, and failover) follows a preference stack: for each kind
+of task, an ordered list of route patterns. The stack is applied after every
+account check above, so it orders the routes that can take the task now and
+never adds one. Defaults ship with xcb; `routing` in `config.json` overrides
+them, and `xcb routing show` prints the effective stack with the observed
+models each pattern matches.
+
+```json
+"routing": {
+  "never": ["devin/swe-*"],
+  "fallback_providers": ["devin"],
+  "tiers": {
+    "buildout":   ["codex/gpt-*-astra/ultra", "claude/*fable*/max"],
+    "meaty":      ["codex/gpt-*-astra/max",   "claude/*fable*/max"],
+    "default":    ["codex/gpt-*-sol/ultra",   "claude/opus*/max"],
+    "mechanical": ["codex/gpt-*-sol/max",     "claude/opus*/max"]
+  }
+}
+```
+
+Every key is optional and keeps its default when absent. Each list holds at
+most 64 patterns.
+
+**Patterns.** A pattern is `provider/model-glob[/effort]`. The provider is
+`claude`, `codex`, `devin`, or `*`. The model glob (`*` any run of
+characters, `?` one character) is matched against the model's id and, for a
+Claude alias such as `opus` or `default`, also against the id the catalog
+resolved it to, lowercased with `.` written as `-` and with or without the
+provider prefix: `gpt-*-sol` matches `gpt-5.6-sol`, `gpt-6-sol`, and
+`gpt-6.1-sol`; `*fable*` matches `claude-fable-5-1`; `opus*` matches `opus`,
+`opus[1m]`, and a `default` alias resolved to `claude-opus-5-5`. The effort
+must match exactly (`ultra`, `xhigh`, `max`, `high`, `medium`, `low`,
+`minimal`, `none`, or `*`); an absent effort matches every effort. Devin ids
+carry the effort as a suffix (`gpt-6-astra-medium`), so for Devin the suffix
+is removed before matching and the pattern's effort segment is ignored.
+Malformed patterns are refused with a message naming the segment at fault.
+
+**Tiers.** Each task is assigned one tier, printed in the route reason as
+`tier default · stack #1` (the pattern position that decided) or `no stack
+match`:
+
+- `mechanical`: the prompt carries a routine cue (format, rename, typo,
+  status, summarize, explain, docs, documentation) and none of the signals
+  below.
+- `buildout`: the optional judge answered, says the task warrants a frontier
+  model, and rated both scope and difficulty at least 4 on their 1–5 scales;
+  or, without a judge answer, the prompt is substantial (at least 400 words
+  or 8 KiB) and carries a complex cue (architecture, migration, security,
+  race, concurrency, redesign, root cause, adversarial, refactor).
+- `meaty`: the task otherwise warrants a frontier model (the judge's answer,
+  an active route reflex, a substantial prompt, or, without a judge, a
+  complex cue), or the judge classed the prompt as resuming earlier work.
+- `default`: everything else.
+
+`xcb resume` is unchanged: a resumed direct session keeps its saved model.
+
+**Ranking.** Among the routes that can take the task, the first pattern of
+the tier that a route matches decides: a route matching pattern #1 outranks
+every route matching #2, and routes matching no pattern come after all
+matched ones. Within one pattern the newest version of a model family wins
+(`gpt-6.1-sol` over `gpt-5.6-sol`), so a new Fable, Astra, or Sol release is
+preferred without a configuration change. The existing order (task type,
+relative quality, cost, and latency, remaining usage before a reset,
+favorites, then the account that ran a session longest ago) breaks the
+remaining ties. For a default-tier task Sol at ultra therefore outranks
+Astra, and for a build-out Astra at ultra outranks Fable at max; when every
+Astra account is at a usage limit the build-out goes to Fable. The
+substantial-prompt rule and the judge decide the tier; they no longer pick
+the model directly when a pattern matches. Among routes matching no pattern,
+a substantial prompt still gets the highest known quality.
+
+**Never.** A route matching a `never` pattern is not used anywhere: not by
+automatic routing, not by failover, and not by an explicit `--model` or route
+pin, which is refused with `excluded by routing.never` instead of widened.
+`xcb routing never add <pattern>` and `xcb routing never remove <pattern>`
+edit the list. The built-in default excludes SWE models on Devin.
+
+**Fallback providers.** Routes on a fallback provider are considered only
+when no route on any other provider can take the task now (every other
+account is at a usage limit, busy, signed out, or disabled). They are then
+ranked by the same tier patterns and the profile order. Devin is the built-in
+fallback.
+
+**Pins and constraints.** An opening “Use Claude/Codex/Devin”, `--account`,
+`--provider`, and `--model` still narrow the routes first; the stack orders
+what remains. A pinned model that matches no pattern still runs. Managed
+backlog tasks take the same pin: `xcb backlog add <target> "<task>" --model
+provider/model/effort` records an exact observed key on the task, requires
+its provider, and stamps it on every worker session, so failover stays
+inside the pin. The pin resolves to one catalog entry at admission — bare
+ids and labels work only when they name one model — and a `never`-matched
+pin is refused up front; if the never list changes while a pinned task is
+queued, dispatch fails the task rather than widening it.
+
+## Automatic capability selection
+
+Native managed tasks and unpinned `xcb run` use the same automatic selector.
+The optional typed judge asks the six questions from ALGAL's fitted model-router:
+kind, difficulty, scope, ambiguity, stakes and frontier demand. The fitted head
+combines them with deterministic prompt-shape features. One bounded call supplies
+all answers; missing, invalid or timed-out answers use deterministic routing.
+The fit predicts one operator's historical model choices, not measured model
+quality. Its implementation and provenance are in `task_classifier.rs` and
+[ALGAL's model-router documentation](https://github.com/hraness/algal/blob/main/docs/model-router.md).
+
+The fitted head is generation 0 of the `route` [reflex](reflexes.md). The
+reflex runs it as an effect-free ALGAL program, records the decision, and
+learns later generations from your explicit and implicit tier choices. A
+generation is promoted only when a forward trial on labels received after
+fitting lowers log loss within the accuracy and AUC guardrails described in
+[forward trials](reflexes.md#forward-trials). `xcb reflex rollback route 0`
+restores the fitted head.
+
+Score answers use zero-based criterion indices, as specified by the
+[TypeSafe API](https://docs.typesafe.ai/api#score-answer). Five criteria therefore
+admit indices 0–4; their text labels do not change the numeric scale. The ALGAL
+example response fixture includes an out-of-range probability bucket `5` and
+is not a live-wire conformance fixture. Native tests preserve the fitted
+numeric inputs while using valid probability distributions; invalid bucket
+responses fall back instead of weakening judge validation.
+
+A prompt with at least 400 words or 8 KiB is assigned at least the `meaty`
+tier of the [preference stack](#preference-stack) independently of classifier
+availability, and among routes matching no pattern requests the highest known
+quality. This is an explicit xcb policy, not a claim made by the fitted
+classifier. Lower price, quota percentage, favorites and provider preference
+cannot demote that quality tier. Explicit provider/model constraints still
+narrow eligibility first.
+
+If observed usage exhaustion excludes a stronger connected admitted model, the
+selected route explains the downgrade. Busy, disconnected and unqualified
+routes are not described as quota failures. If a matching admitted route is
+quota-blocked and no eligible fallback exists, the CLI reports the usage limit
+and managed work enters the attention inbox while waiting for availability.
+Unknown account/model availability
+remains unknown until the provider validates the route. An observed model's
+context-window size is not recorded here, so length-based selection is a quality
+policy and does not certify context fit. Provider/session admission and account
+custody continue to be checked at execution time.

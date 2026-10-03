@@ -1,0 +1,524 @@
+{
+  "version": "3000.11.3",
+  "provider_sha256": "7ef3859e68d4eabc0115e51898fcd4eab1edde753c27a472349ef551180b38ff",
+  "tools": [
+    {
+      "name": "edit",
+      "inputSchema": {
+        "required": [
+          "file_path",
+          "old_string",
+          "new_string"
+        ],
+        "properties": {
+          "file_path": {
+            "description": "The absolute path to the file to modify",
+            "type": "string"
+          },
+          "old_string": {
+            "description": "The text to replace. Always provide `old_string` before `new_string` so that streaming displays can show the diff progressively.",
+            "type": "string"
+          },
+          "new_string": {
+            "description": "The text to replace it with (must be different from `old_string`)",
+            "type": "string"
+          },
+          "replace_all": {
+            "description": "Replace all occurrences of `old_string` (default false)",
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "type": "object",
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "exec",
+      "inputSchema": {
+        "additionalProperties": false,
+        "required": [
+          "command"
+        ],
+        "type": "object",
+        "properties": {
+          "command": {
+            "description": "The command to execute in the current shell session.\n\nExamples:\n- Bash: \"echo 'Hello World'\", \"ls -la\", \"git status\"\n- PowerShell: \"Write-Output 'Hello World'\", \"Get-ChildItem\"\n\nNote: Do NOT include the shell executable (like \"bash -c\" or \"powershell -Command\") in the command.\nThe command should be the raw shell command as you would type it in the active shell.",
+            "type": "string"
+          },
+          "shell_id": {
+            "description": "Optional shell ID to reuse an existing interactive session. Use shell IDs to maintain multiple shell sessions. When shell ID is provided, writes to that session's stdin. When no shell ID is provided, a new session is created.",
+            "type": "string"
+          },
+          "workdir": {
+            "description": "Optional absolute path to use as the working directory for this command (does not persist between one-shot calls; with a `shell_id` it cds the session).",
+            "type": "string"
+          },
+          "timeout": {
+            "description": "Optional timeout in milliseconds (default: background after 10s idle or 30s total).\nWhen it elapses, a still-running command is backgrounded and its shell_id returned for `get_output`/`kill_shell`. Set to `0` to background immediately.",
+            "type": "integer"
+          },
+          "tty": {
+            "description": "Allocate a PTY-backed interactive session. Default `false`.\n`false` (default): one-shot non-interactive command run through pipes; good for most use cases.\n`true`: persistent interactive session \u2014 for TUI programs (vim, tmux, top, REPLs) or state that must persist across calls.",
+            "type": "boolean",
+            "default": false
+          },
+          "shell_flavor": {
+            "description": "Which shell runs the command: `bash`, `zsh`, `fish` or `powershell`.\nDefaults to bash on every platform (Git Bash on Windows; PowerShell only\non a Windows machine without Git Bash). Pick a shell here instead of\nnesting one shell inside another: the command is handed to it verbatim,\nso `shell_flavor: \"powershell\"` runs plain PowerShell syntax with no\nbash parse of your quoting and `$` expansions in between. Only valid\nwhen starting a new shell: a `shell_id` that already exists keeps the\nshell it was started with.",
+            "type": "string",
+            "enum": [
+              "bash",
+              "zsh",
+              "fish",
+              "powershell"
+            ]
+          },
+          "env": {
+            "description": "Environment variables for this command's process tree, e.g.\n`{\"API_KEY\": \"abc123\", \"NODE_ENV\": \"development\"}`. These take effect\nonly when a new shell is started, so `env` cannot be combined with\n`shell_id` \u2014 omit `shell_id` (the call is rejected otherwise) so the\nvariables are set from the shell's first process onward. They are\nvisible to this command and its child processes only, not to other\nshells or later commands.",
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "properties": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "find_file_by_name",
+      "inputSchema": {
+        "required": [
+          "pattern"
+        ],
+        "properties": {
+          "pattern": {
+            "description": "The glob pattern to match files against.\nExamples:\n- `*.py` - matches all Python files in the current directory only (not subdirectories)\n- `**/*.js` - matches all JavaScript files in the current directory and all subdirectories recursively\n- `src/**/*.ts` - matches all TypeScript files within the `src` folder and its subdirectories\n- `test_*.py` - matches Python files starting with `test_` in the current directory (e.g., `test_utils.py`)\n- `**/*.{ts,tsx}` - matches all TypeScript files (both .ts and .tsx) recursively using brace expansion",
+            "type": "string"
+          },
+          "path": {
+            "description": "The directory to search in (defaults to current working directory)",
+            "type": "string"
+          }
+        },
+        "type": "object",
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_output",
+      "inputSchema": {
+        "required": [
+          "shell_id"
+        ],
+        "properties": {
+          "shell_id": {
+            "description": "The ID of the shell to read output from.",
+            "type": "string"
+          },
+          "timeout": {
+            "description": "Optional timeout in milliseconds.",
+            "type": "integer"
+          },
+          "incremental": {
+            "description": "If true (default), returns the changes since your last read. For interactive shells whose\nscreen redraws in place (progress bars, block redraws), this is a unified diff so in-place\nline changes are shown as `-`old / `+`new; for plain append-only output it is the new lines.\nIf false, returns the full output buffer.",
+            "type": "boolean"
+          }
+        },
+        "type": "object",
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "grep",
+      "inputSchema": {
+        "additionalProperties": false,
+        "required": [
+          "pattern"
+        ],
+        "type": "object",
+        "properties": {
+          "pattern": {
+            "description": "The regular expression pattern to search for, passed to ripgrep under the hood",
+            "type": "string"
+          },
+          "path": {
+            "description": "The directory or file to search in. Defaults to current directory.",
+            "type": "string",
+            "default": "."
+          },
+          "glob_pattern": {
+            "description": "Glob pattern to filter files (e.g., '*.rs' searches .rs files in current dir but not subdirs, 'src/**/*.py' searches .py files in src/ and its subdirs). Defaults to searching all files.",
+            "type": "string"
+          },
+          "output_mode": {
+            "type": "string",
+            "enum": [
+              "content",
+              "files_with_matches",
+              "count"
+            ],
+            "description": "How to format the output.",
+            "default": "content"
+          },
+          "case_insensitive": {
+            "description": "Perform case-insensitive search. Defaults to false.",
+            "type": "boolean",
+            "default": false
+          },
+          "max_results": {
+            "description": "Maximum number of matches to return. Defaults to 100, max 20,000. Only applicable for \"content\" output mode.",
+            "type": "integer"
+          },
+          "context_lines": {
+            "description": "Number of lines to show before and after each match (context). Defaults to 0.",
+            "type": "integer",
+            "default": 0
+          }
+        }
+      }
+    },
+    {
+      "name": "kill_shell",
+      "inputSchema": {
+        "required": [
+          "shell_id"
+        ],
+        "properties": {
+          "shell_id": {
+            "description": "The ID of the shell to kill.",
+            "type": "string"
+          }
+        },
+        "type": "object",
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "mcp_call_tool",
+      "inputSchema": {
+        "required": [
+          "server_name",
+          "tool_name"
+        ],
+        "properties": {
+          "server_name": {
+            "description": "Name of the MCP server to use (e.g., \"linear\", \"github\").",
+            "type": "string"
+          },
+          "tool_name": {
+            "description": "Name of the tool to execute.",
+            "type": "string"
+          },
+          "arguments": {
+            "description": "Input arguments for the tool as a JSON object.",
+            "type": "object",
+            "additionalProperties": true,
+            "default": {}
+          }
+        },
+        "type": "object",
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "mcp_list_servers",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "mcp_list_tools",
+      "inputSchema": {
+        "properties": {
+          "server_name": {
+            "description": "Name of the MCP server to list tools from (e.g., \"linear\", \"github\"). If not provided, lists tools from all configured servers.",
+            "type": "string"
+          }
+        },
+        "type": "object",
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "mcp_read_resource",
+      "inputSchema": {
+        "required": [
+          "server_name",
+          "resource_uri"
+        ],
+        "properties": {
+          "server_name": {
+            "description": "Name of the MCP server (e.g., \"linear\", \"github\").",
+            "type": "string"
+          },
+          "resource_uri": {
+            "description": "Resource URI to read (e.g., \"<file:///path/to/file>\", \"<linear://issue/123>\").",
+            "type": "string"
+          }
+        },
+        "type": "object",
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "notebook_edit",
+      "inputSchema": {
+        "additionalProperties": false,
+        "required": [
+          "notebook_path",
+          "cell_number",
+          "new_source"
+        ],
+        "type": "object",
+        "properties": {
+          "notebook_path": {
+            "description": "The absolute path to the Jupyter notebook file (.ipynb) to edit.",
+            "type": "string"
+          },
+          "cell_number": {
+            "description": "The 0-based index of the cell to edit.",
+            "type": "integer"
+          },
+          "new_source": {
+            "description": "The new source content for the cell.",
+            "type": "string"
+          },
+          "cell_type": {
+            "description": "The type of the cell. If not specified, keeps the current type (for replace) or defaults to code (for insert).",
+            "type": "string",
+            "enum": [
+              "code",
+              "markdown"
+            ]
+          },
+          "edit_mode": {
+            "default": "replace",
+            "description": "The edit operation to perform. Defaults to replace.",
+            "type": "string",
+            "enum": [
+              "replace",
+              "insert",
+              "delete"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "notebook_read",
+      "inputSchema": {
+        "required": [
+          "notebook_path"
+        ],
+        "properties": {
+          "notebook_path": {
+            "description": "The absolute path to the Jupyter notebook file to read (must be absolute, not relative)",
+            "type": "string"
+          }
+        },
+        "type": "object",
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "read",
+      "inputSchema": {
+        "required": [
+          "file_path"
+        ],
+        "properties": {
+          "file_path": {
+            "description": "The absolute path to the file to read.",
+            "type": "string"
+          },
+          "offset": {
+            "description": "Optional line number to start reading from (1-based).",
+            "type": "integer"
+          },
+          "limit": {
+            "description": "Optional number of lines to read.",
+            "type": "integer"
+          }
+        },
+        "type": "object",
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "request_scope",
+      "inputSchema": {
+        "required": [
+          "scope",
+          "path"
+        ],
+        "properties": {
+          "scope": {
+            "description": "The type of access to request: \"read\" or \"write\".",
+            "type": "string"
+          },
+          "path": {
+            "description": "The absolute path to the directory to request access to.",
+            "type": "string"
+          }
+        },
+        "type": "object",
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "skill",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "default": "invoke",
+            "description": "The skill operation to perform. Defaults to \"invoke\" if omitted.",
+            "type": "string",
+            "enum": [
+              "invoke",
+              "list",
+              "search"
+            ]
+          },
+          "skill": {
+            "description": "The name of the skill to invoke (required for 'invoke' command).\nUse one of the available skills listed in the system prompt.",
+            "type": "string",
+            "default": null
+          },
+          "path": {
+            "description": "Project path to discover skills in. Scans skill directories (e.g.\n.devin/skills/) at the project root; `list` does not recurse into\nsubdirectories, while `search` does. Relative paths are resolved\nagainst the session's working directory. Provide either `path` or\n`source` for list/search, not both.",
+            "type": "string",
+            "default": null
+          },
+          "source": {
+            "description": "Set to `plugins` to list or search active plugin skills instead of\nscanning a project path.",
+            "type": "string",
+            "enum": [
+              "plugins"
+            ]
+          },
+          "keywords": {
+            "description": "List of keywords to search for. Empty or omitted means include all skills.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": null
+          },
+          "keywords_mode": {
+            "type": "string",
+            "enum": [
+              "or",
+              "and"
+            ],
+            "description": "Controls whether all keywords or any keyword need to be present.",
+            "default": "or"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "todo_write",
+      "inputSchema": {
+        "additionalProperties": false,
+        "required": [
+          "todos"
+        ],
+        "type": "object",
+        "properties": {
+          "todos": {
+            "description": "The updated list of todo items.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "content": {
+                  "description": "The task description.",
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "pending",
+                    "in_progress",
+                    "completed"
+                  ],
+                  "description": "Current status of the todo item."
+                }
+              },
+              "required": [
+                "content",
+                "status"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "webfetch",
+      "inputSchema": {
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "url": {
+            "description": "The URL to fetch content from.",
+            "type": "string"
+          }
+        },
+        "type": "object",
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "write",
+      "inputSchema": {
+        "required": [
+          "file_path",
+          "content"
+        ],
+        "properties": {
+          "file_path": {
+            "description": "The absolute path to the file to write",
+            "type": "string"
+          },
+          "content": {
+            "description": "The content to write to the file",
+            "type": "string"
+          }
+        },
+        "type": "object",
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "write_to_process",
+      "inputSchema": {
+        "required": [
+          "shell_id"
+        ],
+        "properties": {
+          "shell_id": {
+            "description": "The ID of the shell to write to.",
+            "type": "string"
+          },
+          "text_input": {
+            "description": "Text content to write to the shell (interpreted as literal text).",
+            "type": "string"
+          },
+          "bytes_input": {
+            "description": "Special characters/bytes to write to the shell (interpreted with angle bracket notation).",
+            "type": "string"
+          }
+        },
+        "type": "object",
+        "additionalProperties": false
+      }
+    }
+  ]
+}

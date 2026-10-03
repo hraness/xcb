@@ -1,41 +1,72 @@
+mod agent_overview;
 pub mod application;
 pub mod application_diagnostic;
 mod application_qualification;
 pub mod attachments;
 pub mod auth;
 pub mod broker;
+pub mod capabilities;
+pub(crate) mod capability_bundle;
+pub mod catalog;
+pub mod chrome_connector;
 pub mod claude;
 mod claude_protocol;
+pub mod cloud;
 pub mod codex;
 pub mod command;
 pub mod command_tool;
 pub mod config;
 pub mod context;
+pub mod context_recipe;
+pub mod cua_connector;
+pub mod device_login;
+// Only the workspace tools, which Windows builds refuse, take this lock.
+#[cfg_attr(windows, allow(dead_code))]
 mod coordination;
 pub mod devin;
+#[cfg(unix)]
+pub mod egress;
+#[cfg(windows)]
+#[path = "egress_windows.rs"]
 pub mod egress;
 pub mod exports;
+pub mod habitat_service;
 pub mod hooks;
+pub mod host_resources;
 pub mod jev;
 pub mod judge;
 pub mod kernel;
 pub mod managed;
+pub mod managed_program;
 mod managed_supervisor;
+#[cfg(unix)]
+pub mod native_mcp;
 pub mod offers;
+mod os;
 pub mod panes;
 pub mod private;
 pub mod process;
 mod protocol;
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(any(all(test, unix), target_os = "macos"))]
 mod public_ca;
 pub mod qualification;
+pub mod reflex;
 pub mod route;
 pub mod routing;
+pub mod routing_stack;
 pub mod runner;
 pub mod sandbox;
+pub mod service_watchdog;
 pub mod store;
 pub mod summary;
+pub mod systemd;
+mod task_classifier;
+mod tool_output;
+mod transcript;
 pub mod update;
+mod wire_helpers;
+pub mod wordcell;
+pub mod workspace_infer;
 
 use sha2::{Digest, Sha256};
 use xcb_core::Id;
@@ -53,11 +84,17 @@ pub enum Error {
     /// A preparation helper failed to prove shutdown; retain account custody.
     #[error("provider preparation cleanup is unproven; account custody retained")]
     CleanupUnproven,
+    /// Static authentication diagnostics with the same custody requirement as
+    /// CleanupUnproven. Never embed provider output or credential contents.
+    #[error("{0}; account custody retained until sign-in recovery is proven")]
+    AuthUnproven(&'static str),
     #[error("local database operation failed: {0}")]
     Database(#[from] rusqlite::Error),
     #[error("invalid local record")]
     Json(#[from] serde_json::Error),
-    #[error("state must be an owned physical directory with private permissions")]
+    #[error(
+        "state must be an owned real directory with private permissions; symlinked, foreign-owned or shared paths are refused"
+    )]
     PrivateState,
     #[error("conflict: {0}")]
     Conflict(&'static str),
@@ -65,6 +102,19 @@ pub enum Error {
     Unavailable(&'static str),
     #[error("provider protocol error: {0}")]
     Protocol(&'static str),
+    #[error("Codex unadmitted notification (method SHA-256 {method_sha256})")]
+    CodexNotification { method_sha256: String },
+    /// Provider-reported counters that do not reconcile. Values are provider
+    /// telemetry only — evidence for diagnosing schema drift, never text.
+    #[error("Codex token counters inconsistent (input {input} + output {output} != total {total})")]
+    CodexUsage { input: u64, output: u64, total: u64 },
+    #[error(
+        "Codex unadmitted native tool (server SHA-256 {server_sha256}, tool SHA-256 {tool_sha256})"
+    )]
+    CodexNativeTool {
+        server_sha256: String,
+        tool_sha256: String,
+    },
     #[error("Codex {method} failed (RPC {code}): {category}")]
     CodexRpc {
         method: &'static str,
@@ -82,8 +132,80 @@ pub enum Error {
         code: i64,
         category: &'static str,
     },
+    /// A complete user-facing sentence, printed verbatim — use instead of
+    /// `Core(Invalid)` when the text is guidance, not a noun fragment.
+    #[error("{0}")]
+    Message(&'static str),
+    /// A user-facing sentence built at runtime (it can name the input), plus
+    /// the one command to run next. The CLI prints `next` on its own line;
+    /// other surfaces get it appended to the sentence.
+    #[error("{message}{}", next.as_deref().map(|next| format!(" Next: {next}")).unwrap_or_default())]
+    Guided {
+        message: String,
+        next: Option<String>,
+    },
+}
+/// Why this build refuses to start or sign in to a provider. Claude Code,
+/// Codex, and Devin run only inside xcb's macOS and Linux sandboxes; Windows
+/// builds keep everything else (accounts, routing answers, the terminal
+/// workspace, relay links) and point provider work at WSL2.
+pub const PROVIDERS_UNSUPPORTED: &str = "xcb can't run or sign in to Claude Code, Codex, or Devin on Windows: their sandbox needs macOS or Linux. Install the Linux build of xcb inside WSL2 and run providers there.";
+
+impl Error {
+    pub fn is_cleanup_unproven(&self) -> bool {
+        matches!(self, Self::CleanupUnproven | Self::AuthUnproven(_))
+    }
+
+    /// The refusal every provider launch and sign-in returns on Windows.
+    pub fn providers_unsupported() -> Self {
+        Self::guided(PROVIDERS_UNSUPPORTED, "wsl --install")
+    }
+
+    /// A [`Error::Guided`] error with a next command.
+    pub fn guided(message: impl Into<String>, next: impl Into<String>) -> Self {
+        Self::Guided {
+            message: message.into(),
+            next: Some(next.into()),
+        }
+    }
 }
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Fixed provider failure categories. They are the only provider-derived text
+/// that reaches diagnostics, and the runner settles account state from them,
+/// so every codec maps its raw errors onto exactly these strings.
+pub(crate) mod category {
+    pub const AUTHENTICATION: &str = "authentication rejected; reconnect this account";
+    pub const CODEX_USAGE_LIMIT: &str = "provider usage limit exceeded";
+    pub const DEVIN_RESOURCE_LIMIT: &str = "provider quota or resource limit reached";
+    pub const TLS: &str = "TLS certificate or transport failure";
+    pub const NETWORK: &str = "provider request or network failure";
+    /// The provider reported a temporary capacity shortage for the request
+    /// (an overloaded service or an unavailable Flex processing tier). It is
+    /// a transient provider-side condition, never the account's own quota.
+    pub const PROVIDER_CAPACITY: &str = "provider capacity temporarily unavailable";
+}
+
+impl Error {
+    /// Account-level classification of a turn that failed with this error.
+    /// Only a codec-assigned fixed category can name authentication, quota or
+    /// transport; every other error stays `Unknown` so custody is not
+    /// released or recovery started on a guess.
+    pub(crate) fn failure(&self) -> xcb_core::policy::Failure {
+        use xcb_core::policy::Failure;
+        let category = match self {
+            Error::CodexRpc { category, .. } | Error::DevinRpc { category, .. } => *category,
+            Error::Unavailable(text) => *text,
+            _ => return Failure::Unknown,
+        };
+        match category {
+            category::AUTHENTICATION => Failure::Authentication,
+            category::CODEX_USAGE_LIMIT | category::DEVIN_RESOURCE_LIMIT => Failure::AccountQuota,
+            category::TLS | category::NETWORK | category::PROVIDER_CAPACITY => Failure::Transport,
+            _ => Failure::Unknown,
+        }
+    }
+}
 
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -97,3 +219,6 @@ pub fn new_id(prefix: &str) -> Id {
 pub fn digest(bytes: impl AsRef<[u8]>) -> String {
     hex::encode(Sha256::digest(bytes.as_ref()))
 }
+
+#[cfg(test)]
+mod authentication_tests;

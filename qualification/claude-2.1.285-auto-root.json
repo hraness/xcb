@@ -1,0 +1,1095 @@
+{
+  "binarySha256": "51f09bd1e021d9fa8a1864c179799bd37cb39962a937935c5cf6823398e86db4",
+  "checks": {
+    "autoModeReadback": true,
+    "binaryAndSourcesUnchanged": true,
+    "brokerManifestExact": true,
+    "brokerResultObserved": true,
+    "canaryNotLeaked": true,
+    "canaryUnchanged": true,
+    "noFixtureErrors": true,
+    "noPermissionDecisionSimulated": true,
+    "oneRootBrokerCallback": true,
+    "processAndListenerJoined": true,
+    "productionNativeToolsEmpty": true,
+    "terminalSuccess": true
+  },
+  "egress": "Production Seatbelt narrowed to one owned loopback endpoint; synthetic API key and empty profile.",
+  "evidence": {
+    "binarySha256": "51f09bd1e021d9fa8a1864c179799bd37cb39962a937935c5cf6823398e86db4",
+    "binaryUnchanged": true,
+    "callbacks": [
+      {
+        "_meta": {
+          "claudecode/toolUseId": "toolu_echo",
+          "progressToken": 2
+        },
+        "arguments": {
+          "text": "root callback"
+        },
+        "name": "synthetic_echo"
+      }
+    ],
+    "canaryUnchanged": true,
+    "fixtureErrors": [],
+    "frames": [
+      {
+        "request": {
+          "message": {
+            "id": 0,
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "params": {
+              "capabilities": {},
+              "clientInfo": {
+                "description": "Anthropic's agentic coding tool",
+                "name": "claude-code",
+                "title": "Claude Code",
+                "version": "2.1.285",
+                "websiteUrl": "https://claude.com/claude-code"
+              },
+              "protocolVersion": "2025-11-25"
+            }
+          },
+          "server_name": "xcb",
+          "subtype": "mcp_message"
+        },
+        "request_id": "uuid_1",
+        "type": "control_request"
+      },
+      {
+        "response": {
+          "pending_permission_requests": [],
+          "pending_user_dialog_requests": [],
+          "request_id": "xcb_initialize",
+          "response": {
+            "account": {
+              "apiKeySource": "ANTHROPIC_API_KEY",
+              "apiProvider": "firstParty",
+              "tokenSource": "none"
+            },
+            "agents": [
+              {
+                "description": "Catch-all for any task that doesn't fit a more specific agent. FleetView's default when no agent name is typed.",
+                "name": "claude"
+              },
+              {
+                "description": "Fast read-only search agent for locating code. Use it to find files by pattern (eg. \"src/components/**/*.tsx\"), grep for symbols or keywords (eg. \"API endpoints\"), or answer \"where is X defined / which files reference Y.\" Do NOT use it for code review, design-doc auditing, cross-file consistency checks, or open-ended analysis \u2014 it reads excerpts rather than whole files and will miss content past its read window. When calling, specify search breadth: \"quick\" for a single targeted lookup, \"medium\" for moderate exploration, or \"very thorough\" to search across multiple locations and naming conventions.",
+                "model": "inherit",
+                "name": "Explore"
+              },
+              {
+                "description": "General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find the right match in the first few tries use this agent to perform the search for you.",
+                "name": "general-purpose"
+              },
+              {
+                "description": "Software architect agent for designing implementation plans. Use this when you need to plan the implementation strategy for a task. Returns step-by-step plans, identifies critical files, and considers architectural trade-offs.",
+                "model": "inherit",
+                "name": "Plan"
+              },
+              {
+                "description": "Use this agent to configure the user's Claude Code status line setting.",
+                "model": "sonnet",
+                "name": "statusline-setup"
+              }
+            ],
+            "analytics_disabled": true,
+            "available_output_styles": [
+              "default",
+              "Proactive",
+              "Concise",
+              "Explanatory",
+              "Learning"
+            ],
+            "commands": [
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "(removed) Ask Claude to create/manage subagents, or edit .claude/agents/",
+                "name": "agents"
+              },
+              {
+                "argumentHint": "[--request-id <uuid>] (--wizard posture=\u2026 scope=\u2026 depth=\u2026 --propose | --expect-sha256 <64-hex> --apply-file <path>)",
+                "builtin": true,
+                "description": "Teach auto mode about your environment, plus optional rule tweaks",
+                "name": "auto-mode-setup"
+              },
+              {
+                "argumentHint": "[auto|<tokens>]",
+                "builtin": true,
+                "description": "Configure the auto-compact window size",
+                "name": "autocompact"
+              },
+              {
+                "aliases": [
+                  "reset",
+                  "new"
+                ],
+                "argumentHint": "[name]",
+                "builtin": true,
+                "description": "Start a new session with empty context; previous session stays on disk (resumable with /resume)",
+                "name": "clear"
+              },
+              {
+                "argumentHint": "[red|blue|green|yellow|purple|orange|pink|cyan|default]",
+                "builtin": true,
+                "description": "Set the prompt bar color for this session",
+                "name": "color"
+              },
+              {
+                "argumentHint": "<optional custom summarization instructions>",
+                "builtin": true,
+                "description": "Free up context by summarizing the conversation so far",
+                "name": "compact"
+              },
+              {
+                "aliases": [
+                  "settings"
+                ],
+                "argumentHint": "key=value",
+                "builtin": true,
+                "description": "Set a setting by key",
+                "name": "config"
+              },
+              {
+                "argumentHint": "[style]",
+                "builtin": true,
+                "description": "List output styles or switch to one",
+                "name": "output-style"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Show current context usage",
+                "name": "context"
+              },
+              {
+                "argumentHint": "<low|medium|high|xhigh|max|auto>",
+                "builtin": true,
+                "description": "Set effort level for model usage",
+                "name": "effort"
+              },
+              {
+                "argumentHint": "[on|off]",
+                "builtin": true,
+                "description": "Toggle fast mode (Opus 5.5)",
+                "name": "fast"
+              },
+              {
+                "argumentHint": "[on|off]",
+                "builtin": true,
+                "description": "Toggle focus view: just your prompt, summary, and response",
+                "name": "focus"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Dump the JS heap to the Desktop; on Linux with no Desktop folder, the home directory",
+                "name": "heapdump"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Initialize a new CLAUDE.md file with codebase documentation",
+                "name": "init"
+              },
+              {
+                "argumentHint": "[reconnect|enable|disable [<server>|all]]",
+                "builtin": true,
+                "description": "Manage MCP servers",
+                "name": "mcp"
+              },
+              {
+                "argumentHint": "<model>",
+                "builtin": true,
+                "description": "Set the AI model for Claude Code",
+                "name": "model"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Run the workflow script delivered in this session environment (server-launched sessions only)",
+                "name": "__remote-workflow"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Execute a server-launched workflow handoff (workflow_launch event sessions only)",
+                "name": "workflow-launch-exec"
+              },
+              {
+                "argumentHint": "[--force]",
+                "builtin": true,
+                "description": "Activate pending plugin changes in the current session",
+                "name": "reload-plugins"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Pick up skills added or changed on disk during this session",
+                "name": "reload-skills"
+              },
+              {
+                "aliases": [
+                  "name"
+                ],
+                "argumentHint": "[name]",
+                "builtin": true,
+                "description": "Rename the current conversation",
+                "name": "rename"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Complete a security review of the pending changes on the current branch",
+                "name": "security-review"
+              },
+              {
+                "aliases": [
+                  "cost",
+                  "stats"
+                ],
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Show session cost, plan usage, and what's contributing to your limits",
+                "name": "usage"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Generate a report analyzing your Claude Code sessions",
+                "name": "insights"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Generate a one-line session recap now",
+                "name": "recap"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Set a goal \u2014 keep working until the condition is met",
+                "name": "goal"
+              },
+              {
+                "aliases": [
+                  "peers"
+                ],
+                "argumentHint": "",
+                "builtin": true,
+                "description": "List subagents, teammates, and other Claude sessions you can message",
+                "name": "list-agents"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Help teammates ramp on Claude Code with a guide from your usage",
+                "name": "team-onboarding"
+              }
+            ],
+            "current_permission_mode": "auto",
+            "fast_mode_disabled_reason": "sdk_opt_in_required",
+            "fast_mode_state": "off",
+            "feedback_mode": {
+              "kind": "disabled"
+            },
+            "hooks_applied": true,
+            "ide_rc_auto_enable_gate": false,
+            "models": [
+              {
+                "description": "Use the default model (currently Opus 5.5) \u00b7 $4/$20 per Mtok",
+                "displayName": "Default (recommended)",
+                "resolvedModel": "claude-opus-5-5",
+                "supportedEffortLevels": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "supportsAdaptiveThinking": true,
+                "supportsAutoMode": true,
+                "supportsEffort": true,
+                "supportsFastMode": true,
+                "value": "default"
+              },
+              {
+                "description": "Opus 5.5 \u00b7 Best for everyday, complex tasks \u00b7 $4/$20 per Mtok",
+                "displayName": "Opus",
+                "resolvedModel": "claude-opus-5-5",
+                "supportedEffortLevels": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "supportsAdaptiveThinking": true,
+                "supportsAutoMode": true,
+                "supportsEffort": true,
+                "supportsFastMode": true,
+                "value": "opus"
+              },
+              {
+                "description": "Fable 5.1 \u00b7 Most capable for your hardest and longest-running tasks \u00b7 $10/$50 per Mtok",
+                "displayName": "Fable",
+                "resolvedModel": "claude-fable-5-1",
+                "supportedEffortLevels": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "supportsAdaptiveThinking": true,
+                "supportsAutoMode": true,
+                "supportsEffort": true,
+                "value": "claude-fable-5-1"
+              },
+              {
+                "description": "Sonnet 5.5 \u00b7 Efficient for routine tasks \u00b7 $2/$10 per Mtok",
+                "displayName": "Sonnet",
+                "resolvedModel": "claude-sonnet-5-5",
+                "supportedEffortLevels": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "supportsAdaptiveThinking": true,
+                "supportsAutoMode": true,
+                "supportsEffort": true,
+                "value": "sonnet"
+              },
+              {
+                "description": "Haiku 4.5 \u00b7 Fastest for quick answers \u00b7 $1/$5 per Mtok",
+                "displayName": "Haiku",
+                "resolvedModel": "claude-haiku-4-5-20251001",
+                "value": "haiku"
+              }
+            ],
+            "output_style": "default",
+            "pid": 73769,
+            "remote_control_auto_connect_default": false,
+            "remote_control_auto_enable": false,
+            "remote_control_auto_on_by_default": false,
+            "remote_control_available": false,
+            "session_state": "idle",
+            "user_output_styles_dir": "/synthetic/scratch/config/output-styles"
+          },
+          "subtype": "success"
+        },
+        "type": "control_response"
+      },
+      {
+        "request": {
+          "message": {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+          },
+          "server_name": "xcb",
+          "subtype": "mcp_message"
+        },
+        "request_id": "uuid_2",
+        "type": "control_request"
+      },
+      {
+        "request": {
+          "message": {
+            "id": 1,
+            "jsonrpc": "2.0",
+            "method": "tools/list"
+          },
+          "server_name": "xcb",
+          "subtype": "mcp_message"
+        },
+        "request_id": "uuid_3",
+        "type": "control_request"
+      },
+      {
+        "agents": [
+          "claude",
+          "Explore",
+          "general-purpose",
+          "Plan",
+          "statusline-setup"
+        ],
+        "analytics_disabled": true,
+        "apiKeySource": "ANTHROPIC_API_KEY",
+        "capabilities": [
+          "interrupt_receipt_v1",
+          "interrupt_cancel_queued_v1",
+          "msg_lifecycle_v1",
+          "mcp_read_resource_v1",
+          "mcp_tool_ui_meta_v1"
+        ],
+        "claude_code_version": "2.1.285",
+        "cwd": "/synthetic/scratch/work",
+        "fast_mode_disabled_reason": "sdk_opt_in_required",
+        "fast_mode_state": "off",
+        "mcp_servers": [
+          {
+            "name": "xcb",
+            "source": "sdk",
+            "status": "connected"
+          }
+        ],
+        "model": "claude-fable-5-1",
+        "output_style": "default",
+        "per_turn_effort_active": true,
+        "permissionMode": "auto",
+        "plugins": [],
+        "product_feedback_disabled": true,
+        "session_id": "uuid_4",
+        "skills": [],
+        "slash_commands": [
+          "agents",
+          "auto-mode-setup",
+          "autocompact",
+          "clear",
+          "color",
+          "compact",
+          "config",
+          "output-style",
+          "context",
+          "effort",
+          "fast",
+          "focus",
+          "heapdump",
+          "init",
+          "mcp",
+          "model",
+          "__remote-workflow",
+          "workflow-launch-exec",
+          "reload-plugins",
+          "reload-skills",
+          "rename",
+          "security-review",
+          "usage",
+          "insights",
+          "recap",
+          "goal",
+          "list-agents",
+          "team-onboarding"
+        ],
+        "subtype": "init",
+        "terminal_slash_commands": [
+          "color",
+          "focus",
+          "reload-plugins"
+        ],
+        "tools": [
+          "mcp__xcb__synthetic_echo"
+        ],
+        "type": "system",
+        "uuid": "uuid_5",
+        "view_mode": "default"
+      },
+      {
+        "session_id": "uuid_4",
+        "status": "requesting",
+        "subtype": "status",
+        "type": "system",
+        "uuid": "uuid_6"
+      },
+      {
+        "event": {
+          "message": {
+            "content": [],
+            "id": "msg_fixture",
+            "model": "claude-fable-5-1",
+            "role": "assistant",
+            "stop_reason": null,
+            "stop_sequence": null,
+            "type": "message",
+            "usage": {
+              "input_tokens": 1,
+              "output_tokens": 0
+            }
+          },
+          "type": "message_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "uuid_4",
+        "ttft_ms": 4,
+        "type": "stream_event",
+        "uuid": "uuid_7"
+      },
+      {
+        "event": {
+          "content_block": {
+            "id": "toolu_echo",
+            "input": {},
+            "name": "mcp__xcb__synthetic_echo",
+            "type": "tool_use"
+          },
+          "index": 0,
+          "type": "content_block_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "uuid_4",
+        "type": "stream_event",
+        "uuid": "uuid_8"
+      },
+      {
+        "event": {
+          "delta": {
+            "partial_json": "{\"text\": \"root callback\"}",
+            "type": "input_json_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "uuid_4",
+        "type": "stream_event",
+        "uuid": "uuid_9"
+      },
+      {
+        "message": {
+          "content": [
+            {
+              "id": "toolu_echo",
+              "input": {
+                "text": "root callback"
+              },
+              "name": "mcp__xcb__synthetic_echo",
+              "type": "tool_use"
+            }
+          ],
+          "context_management": null,
+          "id": "msg_fixture",
+          "model": "claude-fable-5-1",
+          "role": "assistant",
+          "stop_reason": null,
+          "stop_sequence": null,
+          "type": "message",
+          "usage": {
+            "input_tokens": 1,
+            "output_tokens": 0
+          }
+        },
+        "parent_tool_use_id": null,
+        "session_id": "uuid_4",
+        "timestamp": "2026-09-30T03:45:41.618Z",
+        "tool_use_meta": [
+          {
+            "display_name": "Synthetic Echo",
+            "id": "toolu_echo",
+            "server_display_name": "xcb"
+          }
+        ],
+        "type": "assistant",
+        "uuid": "uuid_10"
+      },
+      {
+        "request": {
+          "message": {
+            "id": 2,
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {
+              "_meta": {
+                "claudecode/toolUseId": "toolu_echo",
+                "progressToken": 2
+              },
+              "arguments": {
+                "text": "root callback"
+              },
+              "name": "synthetic_echo"
+            }
+          },
+          "server_name": "xcb",
+          "subtype": "mcp_message"
+        },
+        "request_id": "uuid_11",
+        "type": "control_request"
+      },
+      {
+        "event": {
+          "index": 0,
+          "type": "content_block_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "uuid_4",
+        "type": "stream_event",
+        "uuid": "uuid_12"
+      },
+      {
+        "event": {
+          "delta": {
+            "stop_reason": "tool_use",
+            "stop_sequence": null
+          },
+          "type": "message_delta",
+          "usage": {
+            "output_tokens": 1
+          }
+        },
+        "parent_tool_use_id": null,
+        "session_id": "uuid_4",
+        "type": "stream_event",
+        "uuid": "uuid_13"
+      },
+      {
+        "content": "We're changing auto mode to no longer charge for classifier requests in Claude Code. However, this session isn't eligible because your requests go through 127.0.0.1:61078, which isn't compatible with this update. Nothing breaks: auto mode keeps working, and its classifier requests are billed as before. To fix it and access the new version of auto mode, ask your gateway to implement: https://code.claude.com/docs/en/auto-mode-classifier-billing",
+        "isMeta": false,
+        "level": "warning",
+        "session_id": "uuid_4",
+        "subtype": "informational",
+        "timestamp": "2026-09-30T03:45:41.623Z",
+        "type": "system",
+        "uuid": "uuid_14"
+      },
+      {
+        "event": {
+          "type": "message_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "uuid_4",
+        "type": "stream_event",
+        "uuid": "uuid_15"
+      },
+      {
+        "message": {
+          "content": [
+            {
+              "content": [
+                {
+                  "text": "SYNTHETIC_ECHO",
+                  "type": "text"
+                }
+              ],
+              "tool_use_id": "toolu_echo",
+              "type": "tool_result"
+            }
+          ],
+          "role": "user"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "uuid_4",
+        "timestamp": "2026-09-30T03:45:41.626Z",
+        "tool_use_result": [
+          {
+            "text": "SYNTHETIC_ECHO",
+            "type": "text"
+          }
+        ],
+        "type": "user",
+        "uuid": "uuid_16"
+      },
+      {
+        "session_id": "uuid_4",
+        "status": "requesting",
+        "subtype": "status",
+        "type": "system",
+        "uuid": "uuid_17"
+      },
+      {
+        "event": {
+          "message": {
+            "content": [],
+            "id": "msg_fixture",
+            "model": "claude-fable-5-1",
+            "role": "assistant",
+            "stop_reason": null,
+            "stop_sequence": null,
+            "type": "message",
+            "usage": {
+              "input_tokens": 1,
+              "output_tokens": 0
+            }
+          },
+          "type": "message_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "uuid_4",
+        "ttft_ms": 1,
+        "type": "stream_event",
+        "uuid": "uuid_18"
+      },
+      {
+        "event": {
+          "content_block": {
+            "text": "",
+            "type": "text"
+          },
+          "index": 0,
+          "type": "content_block_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "uuid_4",
+        "type": "stream_event",
+        "uuid": "uuid_19"
+      },
+      {
+        "event": {
+          "delta": {
+            "text": "FIXTURE_DONE",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "uuid_4",
+        "type": "stream_event",
+        "uuid": "uuid_20"
+      },
+      {
+        "message": {
+          "content": [
+            {
+              "text": "FIXTURE_DONE",
+              "type": "text"
+            }
+          ],
+          "context_management": null,
+          "id": "msg_fixture",
+          "model": "claude-fable-5-1",
+          "role": "assistant",
+          "stop_reason": null,
+          "stop_sequence": null,
+          "type": "message",
+          "usage": {
+            "input_tokens": 1,
+            "output_tokens": 0
+          }
+        },
+        "parent_tool_use_id": null,
+        "session_id": "uuid_4",
+        "timestamp": "2026-09-30T03:45:41.633Z",
+        "type": "assistant",
+        "uuid": "uuid_21"
+      },
+      {
+        "event": {
+          "index": 0,
+          "type": "content_block_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "uuid_4",
+        "type": "stream_event",
+        "uuid": "uuid_22"
+      },
+      {
+        "event": {
+          "delta": {
+            "stop_reason": "end_turn",
+            "stop_sequence": null
+          },
+          "type": "message_delta",
+          "usage": {
+            "output_tokens": 1
+          }
+        },
+        "parent_tool_use_id": null,
+        "session_id": "uuid_4",
+        "type": "stream_event",
+        "uuid": "uuid_23"
+      },
+      {
+        "event": {
+          "type": "message_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "uuid_4",
+        "type": "stream_event",
+        "uuid": "uuid_24"
+      },
+      {
+        "api_error_status": null,
+        "duration_api_ms": 17,
+        "duration_ms": 35,
+        "fast_mode_disabled_reason": "sdk_opt_in_required",
+        "fast_mode_state": "off",
+        "first_content_frame_ms": 18,
+        "is_error": false,
+        "modelUsage": {
+          "claude-fable-5-1": {
+            "cacheCreationInputTokens": 0,
+            "cacheReadInputTokens": 0,
+            "canonicalModel": "claude-fable-5-1",
+            "contextWindow": 1000000,
+            "costBasis": "list",
+            "costUSD": 0.00011999999999999999,
+            "inputTokens": 2,
+            "maxOutputTokens": 64000,
+            "outputTokens": 2,
+            "provider": "firstParty",
+            "thinkingTokens": 0,
+            "webSearchRequests": 0
+          }
+        },
+        "num_turns": 2,
+        "permission_denials": [],
+        "queued_turn_count": 0,
+        "result": "FIXTURE_DONE",
+        "result_index": 0,
+        "session_id": "uuid_4",
+        "stop_reason": "end_turn",
+        "subagent_stats": {
+          "by_type": {},
+          "completed": 0,
+          "failed": 0,
+          "killed": {
+            "parent": 0,
+            "system": 0,
+            "user": 0
+          },
+          "max_depth": 0,
+          "refused": {
+            "budget": 0,
+            "concurrency_limit": 0,
+            "depth_limit": 0
+          },
+          "requested": {
+            "background": 0,
+            "foreground": 0,
+            "unset": 0
+          },
+          "spawned": 0,
+          "spawned_by_subagents": 0,
+          "started_in_background": 0
+        },
+        "subtype": "success",
+        "terminal_reason": "completed",
+        "time_to_request_ms": 14,
+        "total_cost_usd": 0.00011999999999999999,
+        "ttft_ms": 18,
+        "ttft_stream_ms": 17,
+        "type": "result",
+        "usage": {
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "fallback_credit": null,
+          "inference_geo": "",
+          "input_tokens": 2,
+          "iterations": [],
+          "output_tokens": 2,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "server_tool_use": {
+            "web_fetch_requests": 0,
+            "web_search_requests": 0
+          },
+          "service_tier": "standard",
+          "speed": "standard"
+        },
+        "uuid": "uuid_25"
+      }
+    ],
+    "initialization": {
+      "request": {
+        "agents": {},
+        "hooks": {},
+        "plugins": [],
+        "sdkMcpServers": [
+          "xcb"
+        ],
+        "skills": [],
+        "subtype": "initialize",
+        "supportedDialogKinds": [],
+        "systemPrompt": [
+          "Synthetic local qualification."
+        ]
+      },
+      "request_id": "xcb_initialize",
+      "type": "control_request"
+    },
+    "launchArgs": [
+      "--print",
+      "--input-format",
+      "stream-json",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--include-partial-messages",
+      "--tools",
+      "",
+      "--permission-mode",
+      "auto",
+      "--permission-prompt-tool",
+      "stdio",
+      "--setting-sources",
+      "",
+      "--strict-mcp-config",
+      "--no-session-persistence",
+      "--max-turns",
+      "32",
+      "--model",
+      "claude-fable-5-1",
+      "--effort",
+      "max",
+      "--settings",
+      "{\"disableAllHooks\": true, \"disableClaudeAiConnectors\": true, \"autoMemoryEnabled\": false, \"disableBundledSkills\": true, \"disableSkillShellExecution\": true, \"enableWorkflows\": false, \"workflowKeywordTriggerEnabled\": false, \"skillOverrides\": {\"doctor\": \"off\", \"checkup\": \"off\"}, \"enabledPlugins\": {\"agents-md@builtin\": false}}",
+      "--allowedTools",
+      "mcp__xcb__synthetic_echo"
+    ],
+    "listenerJoined": true,
+    "paidModelRequests": 0,
+    "permissionRequests": [],
+    "policySourceSha256": "6f46eb3b41a84b28151f1596cf2e0e40ee06698a21ef3f28b6262b15fbdf197a",
+    "processExit": 0,
+    "processGroupAbsent": true,
+    "productionQualificationIssued": false,
+    "realCredentialsUsed": false,
+    "requests": [
+      {
+        "canaryLeaked": false,
+        "kind": "root",
+        "model": "claude-fable-5-1",
+        "step": 0,
+        "toolResults": [],
+        "tools": [
+          "mcp__xcb__synthetic_echo"
+        ],
+        "userText": [
+          "XCB_ROOT_PROBE"
+        ]
+      },
+      {
+        "canaryLeaked": false,
+        "kind": "root",
+        "model": "claude-fable-5-1",
+        "step": 1,
+        "toolResults": [
+          {
+            "content": [
+              {
+                "text": "SYNTHETIC_ECHO",
+                "type": "text"
+              }
+            ],
+            "tool_use_id": "toolu_echo",
+            "type": "tool_result"
+          }
+        ],
+        "tools": [
+          "mcp__xcb__synthetic_echo"
+        ],
+        "userText": [
+          "XCB_ROOT_PROBE"
+        ]
+      }
+    ],
+    "result": {
+      "api_error_status": null,
+      "duration_api_ms": 17,
+      "duration_ms": 35,
+      "fast_mode_disabled_reason": "sdk_opt_in_required",
+      "fast_mode_state": "off",
+      "first_content_frame_ms": 18,
+      "is_error": false,
+      "modelUsage": {
+        "claude-fable-5-1": {
+          "cacheCreationInputTokens": 0,
+          "cacheReadInputTokens": 0,
+          "canonicalModel": "claude-fable-5-1",
+          "contextWindow": 1000000,
+          "costBasis": "list",
+          "costUSD": 0.00011999999999999999,
+          "inputTokens": 2,
+          "maxOutputTokens": 64000,
+          "outputTokens": 2,
+          "provider": "firstParty",
+          "thinkingTokens": 0,
+          "webSearchRequests": 0
+        }
+      },
+      "num_turns": 2,
+      "permission_denials": [],
+      "queued_turn_count": 0,
+      "result": "FIXTURE_DONE",
+      "result_index": 0,
+      "session_id": "uuid_4",
+      "stop_reason": "end_turn",
+      "subagent_stats": {
+        "by_type": {},
+        "completed": 0,
+        "failed": 0,
+        "killed": {
+          "parent": 0,
+          "system": 0,
+          "user": 0
+        },
+        "max_depth": 0,
+        "refused": {
+          "budget": 0,
+          "concurrency_limit": 0,
+          "depth_limit": 0
+        },
+        "requested": {
+          "background": 0,
+          "foreground": 0,
+          "unset": 0
+        },
+        "spawned": 0,
+        "spawned_by_subagents": 0,
+        "started_in_background": 0
+      },
+      "subtype": "success",
+      "terminal_reason": "completed",
+      "time_to_request_ms": 14,
+      "total_cost_usd": 0.00011999999999999999,
+      "ttft_ms": 18,
+      "ttft_stream_ms": 17,
+      "type": "result",
+      "usage": {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 0,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "fallback_credit": null,
+        "inference_geo": "",
+        "input_tokens": 2,
+        "iterations": [],
+        "output_tokens": 2,
+        "output_tokens_details": {
+          "thinking_tokens": 0
+        },
+        "server_tool_use": {
+          "web_fetch_requests": 0,
+          "web_search_requests": 0
+        },
+        "service_tier": "standard",
+        "speed": "standard"
+      },
+      "uuid": "uuid_25"
+    },
+    "runnerSourceSha256": "3d8715573e9d9b3d1857d89f1d893de6a49d4164c5b143282fc93e6badf947cb",
+    "scenario": "root",
+    "schema": "xcb.claude-delegation-observation.v1",
+    "sourceUnchanged": true,
+    "stderr": "",
+    "stdioJoined": true,
+    "unsupportedRequests": [],
+    "version": "2.1.285"
+  },
+  "harnessSha256": "9b4c7b3089d6eb40b8b17fb57db539819178f66d50f4832d611238908e7aacb2",
+  "limitations": [
+    "Does not establish real model inference, authentication, or Auto classifier decisions."
+  ],
+  "nativeDelegationEnabled": false,
+  "observedDate": "2026-09-29",
+  "passed": true,
+  "policySourceSha256": "6f46eb3b41a84b28151f1596cf2e0e40ee06698a21ef3f28b6262b15fbdf197a",
+  "productionQualificationIssued": false,
+  "rawObservationSha256": "aacd83fde003e6173e7f2b0f59ffb00e37e97906d843ee09feee5b0d28664d1e",
+  "realClassifierDecisionObserved": false,
+  "realCredentialsUsed": false,
+  "realProviderInference": false,
+  "runnerSourceSha256": "3d8715573e9d9b3d1857d89f1d893de6a49d4164c5b143282fc93e6badf947cb",
+  "schema": "xcb.claude-auto-root-observation.v1",
+  "scope": "Root Auto mode and one explicitly allowed synthetic SDK broker callback; no native tools or agents.",
+  "version": "2.1.285"
+}

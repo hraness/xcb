@@ -12,20 +12,23 @@ concurrency:
   group: stable-release
   cancel-in-progress: false
 
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: "10"
+  RUST_BACKTRACE: short
+
 jobs:
-  verify:
-    name: Verify release source
+  identity:
+    # Resolves the exact release identity first so the native builds start
+    # immediately instead of waiting behind the compatibility-package gate.
+    name: Resolve release identity
     permissions:
       contents: read
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 10
     outputs:
-      github_writer_artifact_digest: ${{ steps.github_writer_artifact.outputs.artifact-digest }}
-      github_writer_artifact_id: ${{ steps.github_writer_artifact.outputs.artifact-id }}
-      release_artifact_digest: ${{ steps.release_artifact.outputs.artifact-digest }}
-      release_artifact_id: ${{ steps.release_artifact.outputs.artifact-id }}
-      writer_artifact_digest: ${{ steps.writer_artifact.outputs.artifact-digest }}
-      writer_artifact_id: ${{ steps.writer_artifact.outputs.artifact-id }}
+      tag: ${{ steps.request.outputs.tag }}
       verified_sha: ${{ steps.identity.outputs.sha }}
       verified_tag: ${{ steps.identity.outputs.tag }}
     steps:
@@ -53,72 +56,6 @@ jobs:
           fetch-tags: false
           persist-credentials: false
           ref: refs/tags/${{ steps.request.outputs.tag }}
-      - name: Stage exact dependency-free release writers from reviewed source
-        id: writer_roots
-        run: |
-          set -euo pipefail
-          npm_writer_root="$(mktemp -d "$RUNNER_TEMP/xcb-npm-writer.XXXXXX")"
-          github_writer_root="$(mktemp -d "$RUNNER_TEMP/xcb-github-writer.XXXXXX")"
-          mkdir -m 0700 "$npm_writer_root/scripts" "$github_writer_root/scripts"
-
-          copy_regular_source() {
-            local source="$1"
-            local destination_root="$2"
-            if [[ ! -f "$source" || -L "$source" ]]; then
-              echo "::error::Release writer source $source is not one regular non-symlink file"
-              exit 1
-            fi
-            install -m 0600 -- "$source" "$destination_root/$source"
-          }
-
-          for source in \
-            scripts/check-npm-trusted-publishing.ts \
-            scripts/npm-release-policy.ts \
-            scripts/publish-npm-release.ts \
-            scripts/release-artifact-checksum.ts \
-            scripts/release-distribution-policy.ts \
-            scripts/release-process-environment.ts
-          do
-            copy_regular_source "$source" "$npm_writer_root"
-          done
-          for source in \
-            scripts/publish-github-release.ts \
-            scripts/release-artifact-checksum.ts \
-            scripts/release-distribution-policy.ts \
-            scripts/release-included-response.ts \
-            scripts/release-process-environment.ts \
-            scripts/release-ref-authority.ts
-          do
-            copy_regular_source "$source" "$github_writer_root"
-          done
-          install -m 0600 -- package.json "$npm_writer_root/package.json"
-          install -m 0600 -- package.json "$github_writer_root/package.json"
-
-          npm_writer_inventory="$(find "$npm_writer_root" -mindepth 1 -maxdepth 2 -printf '%P\t%y\n' | LC_ALL=C sort)"
-          github_writer_inventory="$(find "$github_writer_root" -mindepth 1 -maxdepth 2 -printf '%P\t%y\n' | LC_ALL=C sort)"
-          expected_npm_writer_inventory=$'package.json\tf\nscripts\td\nscripts/check-npm-trusted-publishing.ts\tf\nscripts/npm-release-policy.ts\tf\nscripts/publish-npm-release.ts\tf\nscripts/release-artifact-checksum.ts\tf\nscripts/release-distribution-policy.ts\tf\nscripts/release-process-environment.ts\tf'
-          expected_github_writer_inventory=$'package.json\tf\nscripts\td\nscripts/publish-github-release.ts\tf\nscripts/release-artifact-checksum.ts\tf\nscripts/release-distribution-policy.ts\tf\nscripts/release-included-response.ts\tf\nscripts/release-process-environment.ts\tf\nscripts/release-ref-authority.ts\tf'
-          if [[ "$npm_writer_inventory" != "$expected_npm_writer_inventory" || "$github_writer_inventory" != "$expected_github_writer_inventory" ]]; then
-            echo "::error::Release writer closure is not the exact regular-file allowlist"
-            exit 1
-          fi
-          printf 'npm_path=%s\ngithub_path=%s\n' "$npm_writer_root" "$github_writer_root" >> "$GITHUB_OUTPUT"
-      - name: Preserve the reviewed dependency-free npm writer
-        id: writer_artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: xcb-release-writer-${{ github.run_attempt }}
-          path: ${{ steps.writer_roots.outputs.npm_path }}
-          if-no-files-found: error
-          retention-days: 30
-      - name: Preserve the reviewed dependency-free GitHub Release writer
-        id: github_writer_artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: xcb-github-release-writer-${{ github.run_attempt }}
-          path: ${{ steps.writer_roots.outputs.github_path }}
-          if-no-files-found: error
-          retention-days: 30
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.3.14"
@@ -145,7 +82,115 @@ jobs:
             echo "::error::Tag $REQUESTED_TAG does not match package version $expected_tag"
             exit 1
           fi
+
+  verify:
+    name: Verify release source
+    needs: identity
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      github_writer_artifact_digest: ${{ steps.github_writer_artifact.outputs.artifact-digest }}
+      github_writer_artifact_id: ${{ steps.github_writer_artifact.outputs.artifact-id }}
+      release_artifact_digest: ${{ steps.release_artifact.outputs.artifact-digest }}
+      release_artifact_id: ${{ steps.release_artifact.outputs.artifact-id }}
+      writer_artifact_digest: ${{ steps.writer_artifact.outputs.artifact-digest }}
+      writer_artifact_id: ${{ steps.writer_artifact.outputs.artifact-id }}
+      verified_sha: ${{ needs.identity.outputs.verified_sha }}
+      verified_tag: ${{ needs.identity.outputs.verified_tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          fetch-tags: false
+          persist-credentials: false
+          ref: ${{ needs.identity.outputs.verified_sha }}
+      - name: Stage exact dependency-free release writers from the verified source
+        id: writer_roots
+        run: |
+          set -euo pipefail
+          npm_writer_root="$(mktemp -d "$RUNNER_TEMP/xcb-npm-writer.XXXXXX")"
+          github_writer_root="$(mktemp -d "$RUNNER_TEMP/xcb-github-writer.XXXXXX")"
+          mkdir -m 0700 "$npm_writer_root/scripts" "$github_writer_root/scripts"
+
+          copy_regular_source() {
+            local source="$1"
+            local destination_root="$2"
+            if [[ ! -f "$source" || -L "$source" ]]; then
+              echo "::error::Release writer source $source is not one regular non-symlink file"
+              exit 1
+            fi
+            install -m 0600 -- "$source" "$destination_root/$source"
+          }
+
+          for source in \
+            scripts/check-npm-trusted-publisher-oidc.ts \
+            scripts/check-npm-trusted-publishing.ts \
+            scripts/npm-publisher-boundary.ts \
+            scripts/npm-release-policy.ts \
+            scripts/publish-npm-release.ts \
+            scripts/release-artifact-checksum.ts \
+            scripts/release-distribution-policy.ts \
+            scripts/release-process-environment.ts
+          do
+            copy_regular_source "$source" "$npm_writer_root"
+          done
+          for source in \
+            scripts/publish-github-release.ts \
+            scripts/release-artifact-checksum.ts \
+            scripts/release-distribution-policy.ts \
+            scripts/release-included-response.ts \
+            scripts/release-notes.ts \
+            scripts/release-process-environment.ts \
+            scripts/release-ref-authority.ts \
+            CHANGELOG.md
+          do
+            copy_regular_source "$source" "$github_writer_root"
+          done
+          install -m 0600 -- package.json "$npm_writer_root/package.json"
+          install -m 0600 -- package.json "$github_writer_root/package.json"
+
+          npm_writer_inventory="$(find "$npm_writer_root" -mindepth 1 -maxdepth 2 -printf '%P\t%y\n' | LC_ALL=C sort)"
+          github_writer_inventory="$(find "$github_writer_root" -mindepth 1 -maxdepth 2 -printf '%P\t%y\n' | LC_ALL=C sort)"
+          expected_npm_writer_inventory=$'package.json\tf\nscripts\td\nscripts/check-npm-trusted-publisher-oidc.ts\tf\nscripts/check-npm-trusted-publishing.ts\tf\nscripts/npm-publisher-boundary.ts\tf\nscripts/npm-release-policy.ts\tf\nscripts/publish-npm-release.ts\tf\nscripts/release-artifact-checksum.ts\tf\nscripts/release-distribution-policy.ts\tf\nscripts/release-process-environment.ts\tf'
+          expected_github_writer_inventory=$'CHANGELOG.md\tf\npackage.json\tf\nscripts\td\nscripts/publish-github-release.ts\tf\nscripts/release-artifact-checksum.ts\tf\nscripts/release-distribution-policy.ts\tf\nscripts/release-included-response.ts\tf\nscripts/release-notes.ts\tf\nscripts/release-process-environment.ts\tf\nscripts/release-ref-authority.ts\tf'
+          if [[ "$npm_writer_inventory" != "$expected_npm_writer_inventory" || "$github_writer_inventory" != "$expected_github_writer_inventory" ]]; then
+            echo "::error::Release writer closure is not the exact regular-file allowlist"
+            exit 1
+          fi
+          printf 'npm_path=%s\ngithub_path=%s\n' "$npm_writer_root" "$github_writer_root" >> "$GITHUB_OUTPUT"
+      - name: Preserve the reviewed dependency-free npm writer
+        id: writer_artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: xcb-release-writer-${{ github.run_attempt }}
+          path: ${{ steps.writer_roots.outputs.npm_path }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Preserve the reviewed dependency-free GitHub Release writer
+        id: github_writer_artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: xcb-github-release-writer-${{ github.run_attempt }}
+          path: ${{ steps.writer_roots.outputs.github_path }}
+          if-no-files-found: error
+          retention-days: 30
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.3.14"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.19.0"
+          registry-url: https://registry.npmjs.org
       - run: bun install --frozen-lockfile --ignore-scripts
+      - name: Render the release page notes from CHANGELOG.md
+        # Fails before any build or publication when this version's section
+        # is missing, empty, or still says Unreleased.
+        env:
+          VERIFIED_SHA: ${{ needs.identity.outputs.verified_sha }}
+          VERIFIED_TAG: ${{ needs.identity.outputs.verified_tag }}
+        run: bun run ./scripts/release-notes.ts "${VERIFIED_TAG#v}" "$VERIFIED_SHA" > /dev/null
       - run: bun run check
       - name: Create the one exact release tarball and checksum
         run: |
@@ -156,7 +201,7 @@ jobs:
           bun run ./scripts/release-artifact-checksum.ts write artifacts/*.tgz artifacts/SHA256SUMS
       - name: Preserve the exact release bytes
         id: release_artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: xcb-release-${{ github.run_attempt }}
           path: artifacts/
@@ -189,7 +234,7 @@ jobs:
           node-version: "24.19.0"
       - run: bun install --frozen-lockfile --ignore-scripts
       - name: Download the exact release bytes
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           artifact-ids: ${{ needs.verify.outputs.release_artifact_id }}
           merge-multiple: true
@@ -210,37 +255,309 @@ jobs:
           bun run ./scripts/package-smoke.ts artifacts/*.tgz
 
   native_artifact:
-    name: Native binary (${{ matrix.os }})
-    needs: verify
+    name: Native binary (${{ matrix.platform }})
+    needs: identity
     permissions:
+      attestations: write
       contents: read
+      id-token: write
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15]
+        include:
+          # Linux links against the runner's glibc: Ubuntu 22.04 has 2.35,
+          # and the floor check below admits nothing newer than 2.34 (see
+          # docs/publishing.md). GitHub retires this image on 2027-04-17.
+          - os: ubuntu-22.04
+            platform: linux-x86_64
+          # Built natively on the arm64 image with the same glibc (2.35), so
+          # the same floor check applies. No cross toolchain is involved.
+          - os: ubuntu-22.04-arm
+            platform: linux-aarch64
+          # Not Authenticode-signed; the zip is attested like the tarballs.
+          - os: windows-2025
+            platform: windows-x86_64
+    steps:
+      # Keep LF line endings so embedded fixtures hash the same as on Unix.
+      - if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          fetch-tags: false
+          persist-credentials: false
+          ref: ${{ needs.identity.outputs.verified_sha }}
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable 2026-09-03
+        with:
+          toolchain: 1.97.1
+      # No dependency cache: a release build is a cold, reproducible build.
+      - name: Build and package the native binary
+        if: runner.os != 'Windows'
+        env:
+          XCB_VERSION: ${{ needs.identity.outputs.verified_tag }}
+        run: ./scripts/build-native.sh
+      # The Windows script re-admits its zip exactly like scripts/install.ps1.
+      - name: Build and package the native Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          XCB_VERSION: ${{ needs.identity.outputs.verified_tag }}
+        run: ./scripts/build-native-windows.ps1
+      - name: Re-admit the packaged archive exactly like the installer
+        if: runner.os != 'Windows'
+        env:
+          XCB_VERSION: ${{ needs.identity.outputs.verified_tag }}
+        run: ./scripts/check-native-archive.sh "$XCB_VERSION" artifacts/*.tar.gz
+      - name: Enforce the Linux glibc floor
+        if: runner.os == 'Linux'
+        run: python3 -I scripts/check-glibc-floor.py artifacts/*.tar.gz
+      - name: Attest native release tarball provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.os == 'Windows' && 'artifacts/*.zip' || 'artifacts/*.tar.gz' }}
+      - name: Preserve the exact native release assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: xcb-native-${{ matrix.platform }}-${{ github.run_attempt }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30
+
+  macos_build:
+    name: Build unsigned macOS binary without Apple credentials
+    needs: identity
+    permissions:
+      contents: read
+    runs-on: macos-15
+    timeout-minutes: 45
+    outputs:
+      artifact_id: ${{ steps.unsigned.outputs.artifact-id }}
+      artifact_digest: ${{ steps.unsigned.outputs.artifact-digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
           fetch-tags: false
           persist-credentials: false
-          ref: ${{ needs.verify.outputs.verified_sha }}
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+          ref: ${{ needs.identity.outputs.verified_sha }}
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable 2026-09-03
         with:
           toolchain: 1.97.1
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
-      - name: Build and package the native binary
+      - name: Build and validate unsigned intermediate
         env:
-          XCB_VERSION: ${{ needs.verify.outputs.verified_tag }}
+          XCB_VERSION: ${{ needs.identity.outputs.verified_tag }}
         run: ./scripts/build-native.sh
-      - name: Preserve the exact native release assets
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - name: Preserve exact unsigned input for the isolated signing job
+        id: unsigned
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: xcb-native-${{ matrix.os }}-${{ github.run_attempt }}
-          path: artifacts/
+          # Deliberately cannot match ^xcb-native-<platform>-<attempt>$.
+          name: xcb-unsigned-darwin-aarch64-${{ github.run_attempt }}
+          path: |
+            artifacts/*.unsigned.tar.gz
+            artifacts/*.unsigned.tar.gz.sha256
           if-no-files-found: error
+          retention-days: 30
+
+  macos_submit:
+    name: Sign and submit exact macOS candidate
+    needs:
+      - verify
+      - macos_build
+    # This environment permits only release tags and has no reviewers/timers.
+    # Apple credentials stay in the submit/finalize jobs, never source/build jobs.
+    environment: xcb-apple-release
+    permissions:
+      actions: read
+      contents: read
+    runs-on: macos-15
+    timeout-minutes: 10
+    outputs:
+      artifact_id: ${{ steps.candidate.outputs.artifact-id }}
+      artifact_digest: ${{ steps.candidate.outputs.artifact-digest }}
+    env:
+      VERIFIED_SHA: ${{ needs.verify.outputs.verified_sha }}
+      UNSIGNED_ARTIFACT_ID: ${{ needs.macos_build.outputs.artifact_id }}
+      UNSIGNED_ARTIFACT_DIGEST: ${{ needs.macos_build.outputs.artifact_digest }}
+      VERIFIED_TAG: ${{ needs.verify.outputs.verified_tag }}
+    steps:
+      - name: Check out verified dependency-free signing and admission code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          fetch-tags: false
+          persist-credentials: false
+          ref: ${{ needs.verify.outputs.verified_sha }}
+      - name: Download and cryptographically bind exact same-run unsigned artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ needs.macos_build.outputs.artifact_id }}
+          ARTIFACT_DIGEST: ${{ needs.macos_build.outputs.artifact_digest }}
+          VERIFIED_SHA: ${{ needs.verify.outputs.verified_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ || ! "$ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Unsigned input lacks an immutable artifact identity"
+            exit 1
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > "$RUNNER_TEMP/xcb-unsigned-metadata.json"
+          jq -e --arg id "$ARTIFACT_ID" --arg digest "sha256:$ARTIFACT_DIGEST" --arg run "$GITHUB_RUN_ID" --arg sha "$VERIFIED_SHA" '
+            (.id | tostring) == $id and .digest == $digest and .expired == false and
+            (.workflow_run.id | tostring) == $run and .workflow_run.head_sha == $sha and
+            (.name | test("^xcb-unsigned-darwin-aarch64-[1-9][0-9]*$")) and
+            .size_in_bytes > 0 and .size_in_bytes <= 134217728
+          ' "$RUNNER_TEMP/xcb-unsigned-metadata.json" > /dev/null
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$RUNNER_TEMP/xcb-unsigned.zip"
+          python3 -I scripts/sign-macos-release.py extract-artifact "$RUNNER_TEMP/xcb-unsigned.zip" "$ARTIFACT_DIGEST" "$VERIFIED_TAG" "$RUNNER_TEMP/xcb-unsigned-input"
+      - name: Refuse another signing or submission attempt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ && "$GITHUB_RUN_ATTEMPT" -le 100 ]] || exit 1
+          for (( attempt=1; attempt<GITHUB_RUN_ATTEMPT; attempt++ )); do
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$attempt/jobs?per_page=100" > "$RUNNER_TEMP/xcb-prior-jobs.json"
+            if ! jq -e '
+              .total_count == (.jobs | length) and .total_count <= 100 and
+              ([.jobs[] | select(.name == "Sign and submit exact macOS candidate")] | length) <= 1 and
+              all(.jobs[]; .name != "Sign and submit exact macOS candidate" or .conclusion == "skipped")
+            ' "$RUNNER_TEMP/xcb-prior-jobs.json" > /dev/null; then
+              echo "::error::A previous submission producer ran or its outcome is unknown. Re-run failed finalization jobs with the original successful producer; do not sign or submit again."
+              exit 1
+            fi
+          done
+      - name: Sign and submit without executing the binary
+        env:
+          APPLE_DEVELOPER_ID_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+          APPLE_NOTARY_KEY_P8_BASE64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          python3 -I scripts/sign-macos-release.py submit "$RUNNER_TEMP/xcb-unsigned-input/xcb-${VERIFIED_TAG#v}-darwin-aarch64.unsigned.tar.gz" "$VERIFIED_TAG" "$RUNNER_TEMP/xcb-apple-candidate" "$RUNNER_TEMP/xcb-apple-signing"
+      - name: Remove temporary signing credentials even on failure or cancellation
+        if: always()
+        run: python3 -I scripts/sign-macos-release.py cleanup "$RUNNER_TEMP/xcb-apple-signing"
+      - name: Preserve exact secret-free submitted candidate before waiting
+        id: candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          # A pending candidate must never match the final native asset names.
+          name: xcb-apple-candidate-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/xcb-apple-candidate/notarization.zip
+            ${{ runner.temp }}/xcb-apple-candidate/receipt.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Preserve non-secret submission diagnostic
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: xcb-apple-submission-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/xcb-apple-notarization.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  macos_sign:
+    name: Finalize the original macOS notarization
+    needs:
+      - verify
+      - macos_build
+      - macos_submit
+    # This environment permits only release tags and has no reviewers/timers.
+    # Apple credentials stay in the submit/finalize jobs, never source/build jobs.
+    environment: xcb-apple-release
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    runs-on: macos-15
+    timeout-minutes: 30
+    outputs:
+      artifact_id: ${{ steps.signed.outputs.artifact-id }}
+      artifact_digest: ${{ steps.signed.outputs.artifact-digest }}
+      archive_sha256: ${{ steps.signed_bytes.outputs.archive_sha256 }}
+      checksum_sha256: ${{ steps.signed_bytes.outputs.checksum_sha256 }}
+    env:
+      VERIFIED_SHA: ${{ needs.verify.outputs.verified_sha }}
+      UNSIGNED_ARTIFACT_ID: ${{ needs.macos_build.outputs.artifact_id }}
+      UNSIGNED_ARTIFACT_DIGEST: ${{ needs.macos_build.outputs.artifact_digest }}
+      VERIFIED_TAG: ${{ needs.verify.outputs.verified_tag }}
+    steps:
+      - name: Check out verified dependency-free signing and admission code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          fetch-tags: false
+          persist-credentials: false
+          ref: ${{ needs.verify.outputs.verified_sha }}
+      - name: Bind the original submitted candidate by immutable identity
+        id: candidate_input
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ needs.macos_submit.outputs.artifact_id }}
+          ARTIFACT_DIGEST: ${{ needs.macos_submit.outputs.artifact_digest }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ || ! "$ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Submission producer lacks an immutable candidate identity"
+            exit 1
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > "$RUNNER_TEMP/xcb-candidate-metadata.json"
+          jq -e --arg id "$ARTIFACT_ID" --arg digest "sha256:$ARTIFACT_DIGEST" --arg run "$GITHUB_RUN_ID" --arg sha "$VERIFIED_SHA" --argjson attempt "$GITHUB_RUN_ATTEMPT" '
+            (.id | tostring) == $id and .digest == $digest and .expired == false and
+            (.workflow_run.id | tostring) == $run and .workflow_run.head_sha == $sha and
+            (.name | test("^xcb-apple-candidate-[1-9][0-9]*$")) and
+            (.name | split("-") | last | tonumber) <= $attempt and
+            .size_in_bytes > 0 and .size_in_bytes <= 134217728
+          ' "$RUNNER_TEMP/xcb-candidate-metadata.json" > /dev/null
+          printf 'producer_attempt=%s\n' "$(jq -r '.name | split("-") | last' "$RUNNER_TEMP/xcb-candidate-metadata.json")" >> "$GITHUB_OUTPUT"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$RUNNER_TEMP/xcb-candidate.zip"
+      - name: Resume the original submission without signing or executing its bytes
+        env:
+          CANDIDATE_PRODUCER_ATTEMPT: ${{ steps.candidate_input.outputs.producer_attempt }}
+          ARTIFACT_DIGEST: ${{ needs.macos_submit.outputs.artifact_digest }}
+          APPLE_NOTARY_KEY_P8_BASE64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          python3 -I scripts/sign-macos-release.py finalize "$RUNNER_TEMP/xcb-candidate.zip" "$ARTIFACT_DIGEST" "$VERIFIED_TAG" "$GITHUB_WORKSPACE/signed-artifacts" "$RUNNER_TEMP/xcb-apple-signing"
+      - name: Remove temporary notary credentials even on failure or cancellation
+        if: always()
+        run: python3 -I scripts/sign-macos-release.py cleanup "$RUNNER_TEMP/xcb-apple-signing"
+      - name: Bind the final signed bytes before executing the archive smoke
+        id: signed_bytes
+        run: |
+          set -euo pipefail
+          archive="signed-artifacts/xcb-${VERIFIED_TAG#v}-darwin-aarch64.tar.gz"
+          archive_sha256="$(shasum -a 256 "$archive" | cut -d ' ' -f 1)"
+          checksum_sha256="$(shasum -a 256 "$archive.sha256" | cut -d ' ' -f 1)"
+          [[ "$archive_sha256" =~ ^[0-9a-f]{64}$ && "$checksum_sha256" =~ ^[0-9a-f]{64}$ ]]
+          printf 'archive_sha256=%s\nchecksum_sha256=%s\n' "$archive_sha256" "$checksum_sha256" >> "$GITHUB_OUTPUT"
+      - name: Re-admit final signed archive after credential removal
+        run: ./scripts/check-native-archive.sh "$VERIFIED_TAG" signed-artifacts/*.tar.gz
+      - name: Attest final signed and notarized macOS archive
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: signed-artifacts/*.tar.gz
+      - name: Preserve exact signed macOS release assets
+        id: signed
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: xcb-native-darwin-aarch64-${{ github.run_attempt }}
+          path: signed-artifacts/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Preserve non-secret notarization submission diagnostic
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: xcb-apple-notarization-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/xcb-apple-notarization.json
+          if-no-files-found: ignore
           retention-days: 30
 
   publish_github:
@@ -249,7 +566,9 @@ jobs:
       - verify
       - exact_artifact
       - native_artifact
+      - macos_sign
     permissions:
+      actions: read
       contents: write
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -264,27 +583,93 @@ jobs:
         with:
           bun-version: "1.3.14"
       - name: Download the validated release bytes by numeric artifact ID
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           artifact-ids: ${{ needs.verify.outputs.release_artifact_id }}
           merge-multiple: true
           path: artifacts
       - name: Download the reviewed GitHub Release writer by numeric artifact ID
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           artifact-ids: ${{ needs.verify.outputs.github_writer_artifact_id }}
           merge-multiple: true
           path: github-release-writer
-      - name: Download the exact Ubuntu native assets by run-bound name
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      # Re-running failed jobs gives them a new run_attempt while the native
+      # assets keep the attempt that built them, so resolve each platform's
+      # newest upload in this run to its numeric artifact ID instead of
+      # rebuilding the name from github.run_attempt.
+      - name: Resolve the exact native assets to numeric artifact IDs
+        id: native_ids
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          MACOS_ARTIFACT_ID: ${{ needs.macos_sign.outputs.artifact_id }}
+          MACOS_ARTIFACT_DIGEST: ${{ needs.macos_sign.outputs.artifact_digest }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$MACOS_ARTIFACT_ID" =~ ^[1-9][0-9]*$ || ! "$MACOS_ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Signing job did not supply an exact macOS artifact identity"
+            exit 1
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$MACOS_ARTIFACT_ID" > "$RUNNER_TEMP/xcb-signed-metadata.json"
+          jq -e --arg id "$MACOS_ARTIFACT_ID" --arg digest "sha256:$MACOS_ARTIFACT_DIGEST" --arg run "$RUN_ID" --arg sha "$VERIFIED_SHA" '
+            (.id | tostring) == $id and .digest == $digest and .expired == false and
+            (.workflow_run.id | tostring) == $run and .workflow_run.head_sha == $sha and
+            (.name | test("^xcb-native-darwin-aarch64-[1-9][0-9]*$")) and
+            .size_in_bytes > 0 and .size_in_bytes <= 134217728
+          ' "$RUNNER_TEMP/xcb-signed-metadata.json" > /dev/null
+          listing="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/artifacts?per_page=100")"
+          if [[ "$(jq -r '.total_count' <<<"$listing")" -gt 100 ]]; then
+            echo "::error::This run has more artifacts than one listing page"
+            exit 1
+          fi
+          # Darwin is bound to the signing job output, never a name search.
+          ids=("$MACOS_ARTIFACT_ID")
+          for platform in linux-x86_64 linux-aarch64 windows-x86_64; do
+            id="$(jq -r --arg platform "$platform" '[.artifacts[] | select(.expired == false and (.name | test("^xcb-native-" + $platform + "-[1-9][0-9]*$")))] | max_by(.id) | .id // empty' <<<"$listing")"
+            if [[ ! "$id" =~ ^[1-9][0-9]*$ ]]; then
+              echo "::error::No native $platform asset artifact exists in this run"
+              exit 1
+            fi
+            echo "xcb-native-$platform: artifact $id"
+            ids+=("$id")
+          done
+          if [[ "${#ids[@]}" -ne 4 ]]; then
+            echo "::error::Expected 4 native asset artifacts, found ${#ids[@]}"
+            exit 1
+          fi
+          (IFS=,; echo "ids=${ids[*]}") >> "$GITHUB_OUTPUT"
+      - name: Download the exact native assets by numeric artifact ID
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: xcb-native-ubuntu-24.04-${{ github.run_attempt }}
+          artifact-ids: ${{ steps.native_ids.outputs.ids }}
+          merge-multiple: true
           path: native-artifacts
-      - name: Download the exact macOS native assets by run-bound name
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: xcb-native-macos-15-${{ github.run_attempt }}
-          path: native-artifacts
+      - name: Require exact signed macOS archive and checksum bytes
+        env:
+          MACOS_ARCHIVE_SHA256: ${{ needs.macos_sign.outputs.archive_sha256 }}
+          MACOS_CHECKSUM_SHA256: ${{ needs.macos_sign.outputs.checksum_sha256 }}
+        run: |
+          set -euo pipefail
+          archive="native-artifacts/xcb-${VERIFIED_TAG#v}-darwin-aarch64.tar.gz"
+          if [[ ! "$MACOS_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ || ! "$MACOS_CHECKSUM_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Signing job did not supply exact macOS byte digests"
+            exit 1
+          fi
+          [[ -f "$archive" && ! -L "$archive" && -f "$archive.sha256" && ! -L "$archive.sha256" ]] || exit 1
+          [[ "$(sha256sum "$archive" | cut -d ' ' -f 1)" == "$MACOS_ARCHIVE_SHA256" ]] || exit 1
+          [[ "$(sha256sum "$archive.sha256" | cut -d ' ' -f 1)" == "$MACOS_CHECKSUM_SHA256" ]] || exit 1
+      - name: Re-verify the downloaded native asset checksums
+        run: |
+          set -euo pipefail
+          for archive in native-artifacts/*.tar.gz native-artifacts/*.zip; do
+            recorded=$(tr -d '[:space:]' < "$archive.sha256")
+            actual=$(sha256sum "$archive" | sed 's/ .*//')
+            if [[ ${#recorded} -ne 64 || "$recorded" != "$actual" ]]; then
+              echo "::error::Downloaded native asset $archive fails its adjacent checksum"
+              exit 1
+            fi
+          done
       - name: Bind the immutable workflow artifacts
         env:
           GITHUB_WRITER_ARTIFACT_DIGEST: ${{ needs.verify.outputs.github_writer_artifact_digest }}
@@ -305,11 +690,13 @@ jobs:
           bun run ./github-release-writer/scripts/publish-github-release.ts "$VERIFIED_TAG" artifacts/*.tgz artifacts/SHA256SUMS github-release-writer/package.json native-artifacts
 
   pre_npm:
-    name: Admit immutable GitHub bytes and npm retry state
+    name: GitHub parity and pre-npm admission
     needs:
       - verify
       - publish_github
+      - macos_sign
     permissions:
+      actions: read
       contents: read
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -340,15 +727,83 @@ jobs:
       - name: Install the pinned Sigstore verifier
         run: bun install --frozen-lockfile --ignore-scripts
       - name: Download exact release bytes by numeric artifact ID
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           artifact-ids: ${{ needs.verify.outputs.release_artifact_id }}
           merge-multiple: true
           path: artifacts
+      # Re-running failed jobs gives them a new run_attempt while the native
+      # assets keep the attempt that built them, so resolve each platform's
+      # newest upload in this run to its numeric artifact ID instead of
+      # rebuilding the name from github.run_attempt.
+      - name: Resolve the exact native assets to numeric artifact IDs
+        id: native_ids
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          MACOS_ARTIFACT_ID: ${{ needs.macos_sign.outputs.artifact_id }}
+          MACOS_ARTIFACT_DIGEST: ${{ needs.macos_sign.outputs.artifact_digest }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$MACOS_ARTIFACT_ID" =~ ^[1-9][0-9]*$ || ! "$MACOS_ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Signing job did not supply an exact macOS artifact identity"
+            exit 1
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$MACOS_ARTIFACT_ID" > "$RUNNER_TEMP/xcb-signed-metadata.json"
+          jq -e --arg id "$MACOS_ARTIFACT_ID" --arg digest "sha256:$MACOS_ARTIFACT_DIGEST" --arg run "$RUN_ID" --arg sha "$VERIFIED_SHA" '
+            (.id | tostring) == $id and .digest == $digest and .expired == false and
+            (.workflow_run.id | tostring) == $run and .workflow_run.head_sha == $sha and
+            (.name | test("^xcb-native-darwin-aarch64-[1-9][0-9]*$")) and
+            .size_in_bytes > 0 and .size_in_bytes <= 134217728
+          ' "$RUNNER_TEMP/xcb-signed-metadata.json" > /dev/null
+          listing="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/artifacts?per_page=100")"
+          if [[ "$(jq -r '.total_count' <<<"$listing")" -gt 100 ]]; then
+            echo "::error::This run has more artifacts than one listing page"
+            exit 1
+          fi
+          # Darwin is bound to the signing job output, never a name search.
+          ids=("$MACOS_ARTIFACT_ID")
+          for platform in linux-x86_64 linux-aarch64 windows-x86_64; do
+            id="$(jq -r --arg platform "$platform" '[.artifacts[] | select(.expired == false and (.name | test("^xcb-native-" + $platform + "-[1-9][0-9]*$")))] | max_by(.id) | .id // empty' <<<"$listing")"
+            if [[ ! "$id" =~ ^[1-9][0-9]*$ ]]; then
+              echo "::error::No native $platform asset artifact exists in this run"
+              exit 1
+            fi
+            echo "xcb-native-$platform: artifact $id"
+            ids+=("$id")
+          done
+          if [[ "${#ids[@]}" -ne 4 ]]; then
+            echo "::error::Expected 4 native asset artifacts, found ${#ids[@]}"
+            exit 1
+          fi
+          (IFS=,; echo "ids=${ids[*]}") >> "$GITHUB_OUTPUT"
+      - name: Download the exact native assets by numeric artifact ID
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.native_ids.outputs.ids }}
+          merge-multiple: true
+          path: native-artifacts
+      - name: Require exact signed macOS archive and checksum bytes
+        env:
+          MACOS_ARCHIVE_SHA256: ${{ needs.macos_sign.outputs.archive_sha256 }}
+          MACOS_CHECKSUM_SHA256: ${{ needs.macos_sign.outputs.checksum_sha256 }}
+        run: |
+          set -euo pipefail
+          archive="native-artifacts/xcb-${VERIFIED_TAG#v}-darwin-aarch64.tar.gz"
+          if [[ ! "$MACOS_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ || ! "$MACOS_CHECKSUM_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Signing job did not supply exact macOS byte digests"
+            exit 1
+          fi
+          [[ -f "$archive" && ! -L "$archive" && -f "$archive.sha256" && ! -L "$archive.sha256" ]] || exit 1
+          [[ "$(sha256sum "$archive" | cut -d ' ' -f 1)" == "$MACOS_ARCHIVE_SHA256" ]] || exit 1
+          [[ "$(sha256sum "$archive.sha256" | cut -d ' ' -f 1)" == "$MACOS_CHECKSUM_SHA256" ]] || exit 1
       - name: Prove immutable Latest GitHub Release exact-byte parity
-        run: bun run ./scripts/check-github-release.ts artifacts/*.tgz artifacts/SHA256SUMS package.json
+        run: bun run ./scripts/check-github-release.ts artifacts/*.tgz artifacts/SHA256SUMS package.json native-artifacts
+      # npm-only: with vars.XCB_PUBLISH_NPM unset the GitHub parity check above
+      # is the terminal gate and no npm retry state exists to admit.
       - name: Admit absent or exact same-run npm state
         id: npm_state
+        if: vars.XCB_PUBLISH_NPM == 'true'
         run: |
           set -euo pipefail
           bun run ./scripts/check-npm-retry-state.ts artifacts/*.tgz package.json
@@ -357,6 +812,7 @@ jobs:
 
   publish_npm:
     name: Publish exact npm package through OIDC only
+    if: vars.XCB_PUBLISH_NPM == 'true'
     needs:
       - verify
       - pre_npm
@@ -364,7 +820,8 @@ jobs:
       contents: none
       id-token: write
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # npm publish (2 minutes) plus the 25-minute visibility window.
+    timeout-minutes: 35
     outputs:
       npm_completion: ${{ steps.npm_publish.outputs.npm_completion }}
       npm_completion_run_attempt: ${{ steps.npm_publish.outputs.npm_completion_run_attempt }}
@@ -387,13 +844,13 @@ jobs:
           node-version: "24.19.0"
           registry-url: https://registry.npmjs.org
       - name: Download the validated release bytes by numeric artifact ID
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           artifact-ids: ${{ needs.verify.outputs.release_artifact_id }}
           merge-multiple: true
           path: artifacts
       - name: Download the reviewed dependency-free npm writer by numeric artifact ID
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           artifact-ids: ${{ needs.verify.outputs.writer_artifact_id }}
           merge-multiple: true
@@ -418,14 +875,26 @@ jobs:
         run: bun run ./writer/scripts/check-npm-trusted-publishing.ts
       - name: Recheck exact checksum with the reviewed writer
         run: bun run ./writer/scripts/release-artifact-checksum.ts check artifacts/*.tgz artifacts/SHA256SUMS
+      # A first (or repeated-failure) publish attempt proves the OIDC exchange
+      # in a dry run before any bytes are written; a same-run retry only
+      # observes the existing release and never reaches the publisher. A
+      # re-run of this job alone still carries `absent`, so the dry run passes
+      # over a version conflict only when npm serves the reviewed integrity.
+      - name: Prove the npm OIDC exchange without publishing
+        if: env.PRE_NPM_STATE == 'absent'
+        run: bun run ./writer/scripts/check-npm-trusted-publisher-oidc.ts artifacts/*.tgz
       - name: Publish exact tarball through npm trusted publishing
         id: npm_publish
         run: bun run ./writer/scripts/publish-npm-release.ts artifacts/*.tgz
 
   admit:
     name: Admit exact public npm and GitHub distributions
+    # Runs even when publish_npm is skipped (native-only mode): the GitHub
+    # verification half still applies, and the run must stay green.
+    if: ${{ !failure() && !cancelled() }}
     needs:
       - verify
+      - publish_github
       - pre_npm
       - publish_npm
     permissions:
@@ -437,7 +906,7 @@ jobs:
       GITHUB_REPOSITORY: ${{ github.repository }}
       GITHUB_TOKEN: ${{ github.token }}
       NPM_WRITER_RESULT: ${{ needs.publish_npm.outputs.npm_completion }}
-      NPM_WRITER_RESULT_REQUIRED: "true"
+      NPM_WRITER_RESULT_REQUIRED: ${{ vars.XCB_PUBLISH_NPM == 'true' }}
       NPM_COMPLETION_RUN_ATTEMPT: ${{ needs.publish_npm.outputs.npm_completion_run_attempt }}
       NPM_COMPLETION_RUN_ID: ${{ needs.publish_npm.outputs.npm_completion_run_id }}
       VERIFIED_SHA: ${{ needs.verify.outputs.verified_sha }}

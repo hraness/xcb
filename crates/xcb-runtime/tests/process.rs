@@ -1,6 +1,9 @@
+// These tests drive Unix permission bits, symlinks, or /bin/sh fixtures;
+// the Windows custody rules are covered by the platform tests.
+#![cfg(unix)]
 use std::time::Duration;
 use tokio::process::Command;
-use xcb_runtime::process::capture;
+use xcb_runtime::process::{StreamProcess, capture};
 
 #[tokio::test]
 async fn finite_output_is_collected_and_oversized_output_is_refused() {
@@ -16,6 +19,22 @@ async fn finite_output_is_collected_and_oversized_output_is_refused() {
 }
 
 #[tokio::test]
+async fn a_clean_exit_after_stream_close_is_not_reaped_as_a_kill() {
+    // EOF on the pipes only proves the descriptors closed; the leader can
+    // still be finishing its own exit. Sweeping the process group before the
+    // leader's status is known turned that clean exit into a signal kill —
+    // the `provider command failed` CI flake.
+    let mut command = Command::new("/bin/sh");
+    command
+        .args(["-c", "echo hello; exec 1>&- 2>&-; sleep 0.05"])
+        .env_clear();
+    assert_eq!(
+        capture(command, 128, Duration::from_secs(2)).await.unwrap(),
+        b"hello\n"
+    );
+}
+
+#[tokio::test]
 async fn a_stalled_owned_process_is_terminated_at_its_deadline() {
     let mut command = Command::new("/bin/sleep");
     command.arg("10").env_clear();
@@ -24,4 +43,28 @@ async fn a_stalled_owned_process_is_terminated_at_its_deadline() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn cooperative_provider_exits_on_stdin_close_without_a_kill() {
+    // `cat` ends on stdin EOF, so the graceful settle never reaches for the
+    // process-group kill; the reaped status proves it exited on its own.
+    let mut command = Command::new("/bin/cat");
+    command.env_clear();
+    let mut process = StreamProcess::spawn(command).unwrap();
+    assert!(process.join_graceful(Duration::from_secs(2)).await);
+    let status = process.exit_status().expect("child reaped");
+    assert!(status.success());
+}
+
+#[tokio::test]
+async fn provider_ignoring_stdin_close_still_settles_under_kill() {
+    // `sleep` never reads stdin, so the grace window expires and the
+    // process-group kill must still produce the same settled proof.
+    let mut command = Command::new("/bin/sleep");
+    command.arg("60").env_clear();
+    let mut process = StreamProcess::spawn(command).unwrap();
+    assert!(process.join_graceful(Duration::from_millis(200)).await);
+    let status = process.exit_status().expect("child reaped");
+    assert!(!status.success());
 }

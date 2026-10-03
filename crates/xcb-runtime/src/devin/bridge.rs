@@ -1,17 +1,23 @@
-use crate::{Error, Result, private};
+#[cfg(unix)]
+use crate::private;
+use crate::{Error, Result};
 use serde_json::{Value, json};
+#[cfg(unix)]
 use std::{
     io::{BufRead, BufReader as StdReader, Write},
     os::unix::fs::PermissionsExt,
+};
+use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::UnixListener,
+    io::AsyncBufReadExt,
     sync::{mpsc, oneshot, watch},
     task::JoinHandle,
 };
+#[cfg(unix)]
+use tokio::{io::BufReader, net::UnixListener};
 use xcb_core::MAX_JSON_BYTES;
 
 pub(crate) struct Request {
@@ -20,6 +26,7 @@ pub(crate) struct Request {
     pub reply: oneshot::Sender<Option<Value>>,
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) struct DevinBridge {
     path: PathBuf,
     token: String,
@@ -28,31 +35,28 @@ pub(crate) struct DevinBridge {
     task: Option<JoinHandle<()>>,
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) async fn frame<R: AsyncBufReadExt + Unpin>(reader: &mut R) -> Result<Option<Vec<u8>>> {
-    let mut out = Vec::new();
-    loop {
-        let available = reader.fill_buf().await?;
-        if available.is_empty() {
-            return if out.is_empty() {
-                Ok(None)
-            } else {
-                Err(Error::Protocol("incomplete Devin bridge frame"))
-            };
-        }
-        let end = available.iter().position(|b| *b == b'\n');
-        let count = end.map_or(available.len(), |i| i + 1);
-        if out.len() + count > MAX_JSON_BYTES {
-            return Err(Error::Protocol("Devin bridge frame bound"));
-        }
-        out.extend_from_slice(&available[..count]);
-        reader.consume(count);
-        if end.is_some() {
-            return Ok(Some(out));
-        }
-    }
+    crate::wire_helpers::frame(
+        reader,
+        &mut Vec::new(),
+        MAX_JSON_BYTES,
+        "Devin bridge frame bound",
+        "incomplete Devin bridge frame",
+    )
+    .await
 }
 
 impl DevinBridge {
+    /// The broker bridge is a Unix socket into the provider's sandbox;
+    /// Windows never launches Devin.
+    #[cfg(windows)]
+    #[allow(dead_code)]
+    pub(crate) fn bind(_path: &Path) -> Result<Self> {
+        Err(Error::providers_unsupported())
+    }
+
+    #[cfg(unix)]
     #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
     pub(crate) fn bind(path: &Path) -> Result<Self> {
         let parent = path.parent().ok_or(Error::PrivateState)?;
@@ -108,13 +112,13 @@ impl DevinBridge {
                         .await
                         .map_err(|_| Error::Protocol("Devin bridge reply absent"))?
                     {
-                        let mut bytes = serde_json::to_vec(&response)?;
-                        if bytes.len() > MAX_JSON_BYTES {
-                            return Err(Error::Protocol("Devin bridge reply bound"));
-                        }
-                        bytes.push(b'\n');
-                        write.write_all(&bytes).await?;
-                        write.flush().await?;
+                        crate::wire_helpers::write_frame(
+                            &mut write,
+                            &response,
+                            MAX_JSON_BYTES,
+                            "Devin bridge reply bound",
+                        )
+                        .await?;
                     }
                 }
                 Err(Error::Protocol("Devin bridge request bound"))
@@ -130,7 +134,7 @@ impl DevinBridge {
         })
     }
 
-    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "macos", all(test, unix))), allow(dead_code))]
     pub(crate) fn configuration(&self, helper: &Path) -> Result<Value> {
         let helper = helper
             .to_str()
@@ -167,29 +171,18 @@ impl Drop for DevinBridge {
     }
 }
 
+#[cfg(unix)]
 fn copy_lines(mut from: impl BufRead, mut to: impl Write) -> Result<()> {
     for _ in 0..4096 {
-        let mut bytes = Vec::new();
-        loop {
-            let available = from.fill_buf()?;
-            if available.is_empty() {
-                return if bytes.is_empty() {
-                    Ok(())
-                } else {
-                    Err(Error::Protocol("incomplete MCP stdio frame"))
-                };
-            }
-            let end = available.iter().position(|b| *b == b'\n');
-            let count = end.map_or(available.len(), |i| i + 1);
-            if bytes.len() + count > MAX_JSON_BYTES {
-                return Err(Error::Protocol("MCP stdio frame bound"));
-            }
-            bytes.extend_from_slice(&available[..count]);
-            from.consume(count);
-            if end.is_some() {
-                break;
-            }
-        }
+        let Some(bytes) = crate::wire_helpers::frame_sync(
+            &mut from,
+            MAX_JSON_BYTES,
+            "MCP stdio frame bound",
+            "incomplete MCP stdio frame",
+        )?
+        else {
+            return Ok(());
+        };
         let _: Value = serde_json::from_slice(&bytes)?;
         to.write_all(&bytes)?;
         to.flush()?;
@@ -199,18 +192,27 @@ fn copy_lines(mut from: impl BufRead, mut to: impl Write) -> Result<()> {
 
 /// Hidden child-process entry point; this relay never executes a tool. Its
 /// process is covered by the provider process-group join before lease release.
+#[cfg(windows)]
 pub async fn broker_stdio(path: &Path, token: &str) -> Result<()> {
-    if !path.is_absolute() || token.len() != 64 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
+    let _ = (path, token);
+    Err(Error::providers_unsupported())
+}
+
+#[cfg(unix)]
+pub async fn broker_stdio(path: &Path, token: &str) -> Result<()> {
+    if !path.is_absolute() || !xcb_core::hex64_any(token) {
         return Err(Error::Protocol("invalid broker connection"));
     }
     let path = path.to_owned();
     let token = token.to_owned();
     tokio::task::spawn_blocking(move || {
         let mut socket = std::os::unix::net::UnixStream::connect(path)?;
-        let mut hello = serde_json::to_vec(&json!({"token":token}))?;
-        hello.push(b'\n');
-        socket.write_all(&hello)?;
-        socket.flush()?;
+        crate::wire_helpers::write_frame_sync(
+            &mut socket,
+            &json!({"token":token}),
+            MAX_JSON_BYTES,
+            "broker hello bound",
+        )?;
         let input_socket = socket.try_clone()?;
         let input = std::thread::spawn(move || {
             let result = copy_lines(std::io::stdin().lock(), &input_socket);
@@ -228,16 +230,18 @@ pub async fn broker_stdio(path: &Path, token: &str) -> Result<()> {
     .map_err(|_| Error::Protocol("broker relay task failed"))?
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use tokio::net::UnixStream;
+    use tokio::{io::AsyncWriteExt, net::UnixStream};
 
     #[tokio::test]
     async fn authenticated_bridge_preserves_the_exact_request_and_reply() {
         let directory = tempfile::tempdir_in("/tmp").unwrap();
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let path = directory.path().canonicalize().unwrap().join("broker.sock");
+        let path = xcb_core::canonical(directory.path())
+            .unwrap()
+            .join("broker.sock");
         let mut bridge = DevinBridge::bind(&path).unwrap();
         let config = bridge.configuration(Path::new("/synthetic/xcb")).unwrap();
         assert_eq!(config["mcpServers"]["xcb"]["args"], json!(["broker-stdio"]));
@@ -266,7 +270,9 @@ mod tests {
     async fn wrong_token_never_reaches_the_broker() {
         let directory = tempfile::tempdir_in("/tmp").unwrap();
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let path = directory.path().canonicalize().unwrap().join("broker.sock");
+        let path = xcb_core::canonical(directory.path())
+            .unwrap()
+            .join("broker.sock");
         let mut bridge = DevinBridge::bind(&path).unwrap();
         let mut client = UnixStream::connect(path).await.unwrap();
         client.write_all(b"{\"token\":\"wrong\"}\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n").await.unwrap();
@@ -283,7 +289,9 @@ mod tests {
     async fn shutdown_joins_a_partial_frame_without_waiting_on_peer_input() {
         let directory = tempfile::tempdir_in("/tmp").unwrap();
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let path = directory.path().canonicalize().unwrap().join("broker.sock");
+        let path = xcb_core::canonical(directory.path())
+            .unwrap()
+            .join("broker.sock");
         let mut bridge = DevinBridge::bind(&path).unwrap();
         let mut client = UnixStream::connect(path).await.unwrap();
         client.write_all(b"{\"token\":").await.unwrap();

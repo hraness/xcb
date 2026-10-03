@@ -1,0 +1,929 @@
+{
+  "schema": 2,
+  "passed": true,
+  "observed_at": "2026-09-26T05:27:58.196Z",
+  "host": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "release": "25.5.0"
+  },
+  "credential_free": true,
+  "live_provider_qualification": false,
+  "candidate": false,
+  "runtime_version": "3000.11.3",
+  "provider_sha256": "7ef3859e68d4eabc0115e51898fcd4eab1edde753c27a472349ef551180b38ff",
+  "inventory_sha256": "408e89758cd4dd470aa26018973250233fd5208d079eaf3919bb67787fb94ba8",
+  "helper_sha256": "c06960be09a2ee8e9bcb10b496feaa0a8318b68b81af9bc66e7b4019c6c96206",
+  "fixture_binary_sha256": "44edb2d2711ae408adf13e64f6eb17658f5d2be847a4b6ebb942017445e5e789",
+  "harness_sha256": "ad177e6c24ef75150fcf00e017b9ab7d28fae197e31ab509826d699f99fca0d9",
+  "scenarios": [
+    {
+      "scenario": "broker",
+      "passed": true,
+      "status": "passed",
+      "process_joined": true,
+      "bridge_joined": true,
+      "provider_sha256": "7ef3859e68d4eabc0115e51898fcd4eab1edde753c27a472349ef551180b38ff",
+      "helper_sha256": "c06960be09a2ee8e9bcb10b496feaa0a8318b68b81af9bc66e7b4019c6c96206",
+      "production_policy_sha256": "95e00f814de126fa8c3cf659dbe5e58295937a500bf07a3e4bd9a95c40dc9b8a",
+      "fixture_policy_sha256": "3dfbcff2549990fa7729e695f5e63526928aa25573c93829b61bf23b9c087038",
+      "calls": [
+        {
+          "name": "workspace_write",
+          "arguments": {
+            "path": "fixture.txt",
+            "expectedRevision": null,
+            "text": "SYNTHETIC_BROKER_WRITE"
+          }
+        },
+        {
+          "name": "workspace_read",
+          "arguments": {
+            "path": "fixture.txt"
+          }
+        }
+      ],
+      "native_calls": [
+        {
+          "name": "notebook_read",
+          "finished": true,
+          "approved": false
+        },
+        {
+          "name": "notebook_read",
+          "finished": true,
+          "approved": false
+        },
+        {
+          "name": "notebook_read",
+          "finished": true,
+          "approved": false
+        },
+        {
+          "name": "notebook_read",
+          "finished": true,
+          "approved": false
+        },
+        {
+          "name": "read",
+          "finished": true,
+          "approved": false
+        },
+        {
+          "name": "mcp_list_tools",
+          "finished": true,
+          "approved": false
+        }
+      ],
+      "denials": 0,
+      "image_prompt": true,
+      "mcp_proposed_version": "2025-11-25",
+      "mcp_metadata_seen": true,
+      "unexpected_notification": null,
+      "compaction_observations": [],
+      "checks": {
+        "capture_error": null,
+        "no_canary_leak": true,
+        "no_native_webfetch": true,
+        "exact_inventory": true,
+        "steps": 9,
+        "tool_free_requests": 1,
+        "expected_steps": true,
+        "no_overflow": true,
+        "compaction_verified": true
+      },
+      "inventory_sha256": [
+        "aa0d4699f680ab978d58e0cf0d4ddb070aa3d9b17bd32a9543eb507138d87804"
+      ],
+      "stdout_sha256": "fabe4dc1ac1e0cb56f5dfa01b0f6bf2ddbd4243116ffb801a4a2d82b9f6a6dfd",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "requests": [
+        {
+          "method": "GetUserStatus",
+          "bytes": 479,
+          "sha256": "672597c8a206376c8bbb0465e9daf1869667adac456c45dbc88b77840f8b6311"
+        },
+        {
+          "method": "GetCliModelConfigs",
+          "bytes": 487,
+          "sha256": "9ee6bc3c95bdd61581a17db9a15853fe94e4567db8061fc080bbf6d597f75bb7"
+        },
+        {
+          "method": "GetUserStatus",
+          "bytes": 479,
+          "sha256": "9ed3a2b5c692fc80812f7601e763c011d5ce6478e39ac4174425d81468624e00"
+        },
+        {
+          "method": "GetUserStatus",
+          "bytes": 479,
+          "sha256": "2096caa98e71f7eaccb6e702fe56a02f0828eac47491e25094f3214276271677"
+        },
+        {
+          "method": "GetCliTeamSettings",
+          "bytes": 487,
+          "sha256": "805a2da6ad6107b9580aac6abdc44e8a4d32d61df188a183f7fdc11c0c317336"
+        },
+        {
+          "method": "GetUserStatus",
+          "bytes": 479,
+          "sha256": "061a6ef07201928c86a5b6df91d2d9805dac7c2829402bba17c498c8a8e37888"
+        },
+        {
+          "method": "GetUserStatus",
+          "bytes": 485,
+          "sha256": "0dc63399a8d69dfc776283443fbbc92f83cf410776ba267d5837cfebcfe97a16"
+        },
+        {
+          "method": "GetCliTeamSettings",
+          "bytes": 493,
+          "sha256": "5f99cf69cb1c650c531fecc97992297aa8fba1c8a7cc72b233e8636244730dfb"
+        },
+        {
+          "method": "GetCliModelConfigs",
+          "bytes": 493,
+          "sha256": "4778e9177f72e2d8cf96b1606fbb6d5c70a6908b8efd288daa5376a9fe82a038"
+        },
+        {
+          "method": "GetUserStatus",
+          "bytes": 485,
+          "sha256": "fac3a98da9d0d66f0d16287a85ac0a41b5b28eff0a50fa6ce14d03322cb81d58"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 42657,
+          "sha256": "1ecce355c918f586468824989a470b3d463b11ce951178d92bc955277507e446"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 1132,
+          "sha256": "1e34bb6ab227075dbbb08f2d3d986544cc31796df7751c1cc21f5c76fa6eed36"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 43090,
+          "sha256": "f170bb8042a5a5a16020ca6037feacf8de5a685b66e8710e473d1b131279101e"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 43509,
+          "sha256": "be5d618bd721142a69285dd717e5c567cbf9c89c53dcc2d802b13ea2cd087abc"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 43952,
+          "sha256": "e9f62feac70d894f31890329b8e02c3b6b5f49d36a4bd63e1688248eba93e490"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 44387,
+          "sha256": "22ede50e9ecf4e7d8986621400c14fc6d3ae4eea1c5119df446e67eb86cccc01"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 44889,
+          "sha256": "d86ccce76d98e7cec4db233d9b08b912dafacddbd70d71a4d0f4ccaae110f01f"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 55300,
+          "sha256": "e16f00aeeaced7386383d5c7932e43162ea0856650a0165e45a1ebe078876866"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 55666,
+          "sha256": "eb3d3206b7cc696f234f32f54d5e89fa95de38b0582adc3b7aa80f5647c8f855"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 56005,
+          "sha256": "98e78f6d5cd7c37068fd265d95f45d96b4bf3eb0e58d7d89bac5a75f935bd95f"
+        }
+      ],
+      "stopped": {
+        "code": 0,
+        "signal": null
+      }
+    },
+    {
+      "scenario": "exec",
+      "passed": true,
+      "status": "passed",
+      "process_joined": true,
+      "bridge_joined": true,
+      "provider_sha256": "7ef3859e68d4eabc0115e51898fcd4eab1edde753c27a472349ef551180b38ff",
+      "helper_sha256": "c06960be09a2ee8e9bcb10b496feaa0a8318b68b81af9bc66e7b4019c6c96206",
+      "production_policy_sha256": "b8b657c49fc4f1270e5e083b4adaccf9e744ceb93a521931b1f8b8438928fcc8",
+      "fixture_policy_sha256": "952bce4512dec6f1acb275e73c0fca78b288c951038dbcfa48f49d8a92bc0a2f",
+      "calls": [],
+      "native_calls": [
+        {
+          "name": "exec",
+          "finished": true,
+          "approved": false
+        }
+      ],
+      "denials": 0,
+      "image_prompt": true,
+      "mcp_proposed_version": null,
+      "mcp_metadata_seen": false,
+      "unexpected_notification": null,
+      "compaction_observations": [],
+      "checks": {
+        "capture_error": null,
+        "no_canary_leak": true,
+        "no_native_webfetch": true,
+        "exact_inventory": true,
+        "steps": 1,
+        "tool_free_requests": 1,
+        "expected_steps": true,
+        "no_overflow": true,
+        "compaction_verified": true
+      },
+      "inventory_sha256": [
+        "aa0d4699f680ab978d58e0cf0d4ddb070aa3d9b17bd32a9543eb507138d87804"
+      ],
+      "stdout_sha256": "ca6c739fc5d8dd0ee3da7c58114bd0fdcac909bca5344a4ab4b765d633251561",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "requests": [
+        {
+          "method": "GetUserStatus",
+          "bytes": 479,
+          "sha256": "8e5f9db820eb03ba03b84629ccc8351fb5329b9d21ea91a5d0624850dbc5f47c"
+        },
+        {
+          "method": "GetCliTeamSettings",
+          "bytes": 487,
+          "sha256": "985d07d0257dfb01676ef62757f3e0ecb90bcabdd5805239427f7eaeb7661b99"
+        },
+        {
+          "method": "GetUserStatus",
+          "bytes": 479,
+          "sha256": "e6a2b2ca3a6dad96fd1cbf3469ee9de8ff1107cb96b38da20078db3098f1a277"
+        },
+        {
+          "method": "GetUserStatus",
+          "bytes": 479,
+          "sha256": "8c2868568b63a62736eeb928763972816e89ce417285193e87d42f18b3566c01"
+        },
+        {
+          "method": "GetCliModelConfigs",
+          "bytes": 487,
+          "sha256": "c228c41ad37f2aa9c4a0a62b2d1bc357d158468b06856eac3e2a592e00dcd211"
+        },
+        {
+          "method": "GetUserStatus",
+          "bytes": 479,
+          "sha256": "336d74e3219d785454ec9cbedbd38bae21a4f2f38e0789a51f8989e59f6af9f0"
+        },
+        {
+          "method": "GetUserStatus",
+          "bytes": 485,
+          "sha256": "68ad6d5e09427face530f02c73ad73974bd8560e16fed85714cd3922dc7e38f3"
+        },
+        {
+          "method": "GetUserStatus",
+          "bytes": 485,
+          "sha256": "2b4bdce614b5e2ffd2448d1ac8e9f3949d57c2096c027e36f740e72fd6ce0f84"
+        },
+        {
+          "method": "GetCliModelConfigs",
+          "bytes": 493,
+          "sha256": "91c86d73f40c666fdb5b25ba6e6aa24a9d1a3d4701c7e18b764380ff2076f769"
+        },
+        {
+          "method": "GetCliTeamSettings",
+          "bytes": 493,
+          "sha256": "0ff51fe2bfb9174d3bb758db01e995e01e29be95ad1a03185d72310c39f744c0"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 42656,
+          "sha256": "22e6488e89f03d68ff7fffa41a08916861de3d56d02142fd5868fb6d05b4f7ed"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 1131,
+          "sha256": "bb762f7921e1d0ee3ae6f74b29e8802e9bac40a9b26953a40bedcf0e3b1e9c29"
+        }
+      ],
+      "stopped": {
+        "code": 0,
+        "signal": null
+      }
+    },
+    {
+      "scenario": "write",
+      "passed": true,
+      "status": "passed",
+      "process_joined": true,
+      "bridge_joined": true,
+      "provider_sha256": "7ef3859e68d4eabc0115e51898fcd4eab1edde753c27a472349ef551180b38ff",
+      "helper_sha256": "c06960be09a2ee8e9bcb10b496feaa0a8318b68b81af9bc66e7b4019c6c96206",
+      "production_policy_sha256": "52e7f2bc0561639bb0fe1a9554289c95c644af3a758dc8f23e463a6c4b62ca6c",
+      "fixture_policy_sha256": "da554d64d133918f0dbb819b2e85b4a9c93488ab29f6ceaabf8b317c1b44862b",
+      "calls": [],
+      "native_calls": [
+        {
+          "name": "write",
+          "finished": true,
+          "approved": false
+        }
+      ],
+      "denials": 0,
+      "image_prompt": true,
+      "mcp_proposed_version": null,
+      "mcp_metadata_seen": false,
+      "unexpected_notification": null,
+      "compaction_observations": [],
+      "checks": {
+        "capture_error": null,
+        "no_canary_leak": true,
+        "no_native_webfetch": true,
+        "exact_inventory": true,
+        "steps": 1,
+        "tool_free_requests": 1,
+        "expected_steps": true,
+        "no_overflow": true,
+        "compaction_verified": true
+      },
+      "inventory_sha256": [
+        "aa0d4699f680ab978d58e0cf0d4ddb070aa3d9b17bd32a9543eb507138d87804"
+      ],
+      "stdout_sha256": "2229d9ab48bd83802172d8afb9aadbce38874d7bec5c5277d1750fcf85b38c29",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "requests": [
+        {
+          "method": "GetUserStatus",
+          "bytes": 479,
+          "sha256": "186b1946251f2dce20abd3e7ac344ccc35e8b16dc5583d0dcf2d6d5b43072485"
+        },
+        {
+          "method": "GetCliTeamSettings",
+          "bytes": 487,
+          "sha256": "693f103a860c5221b9c2c112bf0f946dbb2f7c1c7fdd0835945e0acaa6369415"
+        },
+        {
+          "method": "GetUserStatus",
+          "bytes": 479,
+          "sha256": "2284e6f2285da657805de794abeea09321b2a0247af4cf51105d46bdd8ef9d3f"
+        },
+        {
+          "method": "GetUserStatus",
+          "bytes": 479,
+          "sha256": "13a3dfdfe1ad86f77cf353b854d204678f72d53f758caa62604f9c0174fb31ab"
+        },
+        {
+          "method": "GetCliModelConfigs",
+          "bytes": 487,
+          "sha256": "baceeb1db64c277fce8a18900d210abd5b2a53c668734fe7fbfcb111a9b248b9"
+        },
+        {
+          "method": "GetUserStatus",
+          "bytes": 479,
+          "sha256": "8831744dbbea8cbfb497b8f71e831c8bbbbf7f5ed31519b723619702730c9fa8"
+        },
+        {
+          "method": "GetCliTeamSettings",
+          "bytes": 493,
+          "sha256": "c6316a884f7d53fad67e82a9a389dfd762533c20d7f5a2e71c14296effad1f9b"
+        },
+        {
+          "method": "GetUserStatus",
+          "bytes": 485,
+          "sha256": "eb6ecf5465ff4006e64b8fd07bdcc3319a5c8f875d288b343bf37f712b850bed"
+        },
+        {
+          "method": "GetCliModelConfigs",
+          "bytes": 493,
+          "sha256": "0539de9b544aeee6b00848cc93afc8ba42ececbde6797fb2205718d48137b539"
+        },
+        {
+          "method": "GetUserStatus",
+          "bytes": 485,
+          "sha256": "dd831a0d327ee5a692107fa2bfb48bfa304b0636bad9abdf49a14ae1058f5058"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 42658,
+          "sha256": "47094c57b1d67e95ab9e9fe0e31001d6399abfc1e9c0cdcc1581a9cff371afb0"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 1133,
+          "sha256": "140656a833350234ee1fb08f4cd6c3acdc1b36913c5ee1d80c37016a3c9cd8b5"
+        }
+      ],
+      "stopped": {
+        "code": 0,
+        "signal": null
+      }
+    },
+    {
+      "scenario": "config_write",
+      "passed": true,
+      "status": "passed",
+      "process_joined": true,
+      "bridge_joined": true,
+      "provider_sha256": "7ef3859e68d4eabc0115e51898fcd4eab1edde753c27a472349ef551180b38ff",
+      "helper_sha256": "c06960be09a2ee8e9bcb10b496feaa0a8318b68b81af9bc66e7b4019c6c96206",
+      "production_policy_sha256": "1e83a735ea7378c14bd31acadb76c963bd7cc5f5d70bfeb5afe606fdf13a304e",
+      "fixture_policy_sha256": "8d3c5d813b61bc77f665ddc05597708d80b2e0260c55a47964b70f83e6e79bc3",
+      "calls": [],
+      "native_calls": [
+        {
+          "name": "write",
+          "finished": true,
+          "approved": false
+        }
+      ],
+      "denials": 0,
+      "image_prompt": true,
+      "mcp_proposed_version": null,
+      "mcp_metadata_seen": false,
+      "unexpected_notification": null,
+      "compaction_observations": [],
+      "checks": {
+        "capture_error": null,
+        "no_canary_leak": true,
+        "no_native_webfetch": true,
+        "exact_inventory": true,
+        "steps": 1,
+        "tool_free_requests": 1,
+        "expected_steps": true,
+        "no_overflow": true,
+        "compaction_verified": true
+      },
+      "inventory_sha256": [
+        "aa0d4699f680ab978d58e0cf0d4ddb070aa3d9b17bd32a9543eb507138d87804"
+      ],
+      "stdout_sha256": "ca6c739fc5d8dd0ee3da7c58114bd0fdcac909bca5344a4ab4b765d633251561",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "requests": [
+        {
+          "method": "GetUserStatus",
+          "bytes": 479,
+          "sha256": "78d3b7df93d7d4be07b5bfffeb95f0cb96c0e444e09a499dc59485a423b46831"
+        },
+        {
+          "method": "GetCliTeamSettings",
+          "bytes": 487,
+          "sha256": "5f2535c185f24bbad9b31111be1cc479b1222e780498238217d76df375721814"
+        },
+        {
+          "method": "GetUserStatus",
+          "bytes": 479,
+          "sha256": "52ebc4eab97c5a27ce0de778834529d64a2680b652fa02780fd97b9d373cfe7d"
+        },
+        {
+          "method": "GetUserStatus",
+          "bytes": 479,
+          "sha256": "106ab9163c15e7d4844c1d1da96b0f2e36bf631e4cc1d1b42b73815c8e3681bf"
+        },
+        {
+          "method": "GetCliModelConfigs",
+          "bytes": 487,
+          "sha256": "22b6624280da8d6db42f187562d79f64607673a0246271b0f44b2ff00198b025"
+        },
+        {
+          "method": "GetUserStatus",
+          "bytes": 479,
+          "sha256": "f539ee952bba0ddeacae1f98cc5905559ef8bc71559efec734967aefd21874e5"
+        },
+        {
+          "method": "GetUserStatus",
+          "bytes": 485,
+          "sha256": "9292f4162fffa8ef766ad92b6961280088b45aeacce54c5e70855321fbf6b9e2"
+        },
+        {
+          "method": "GetUserStatus",
+          "bytes": 485,
+          "sha256": "0c8b967db0a022050be8401713720d695a0e89ed757cc7bca2c071bfb7404756"
+        },
+        {
+          "method": "GetCliModelConfigs",
+          "bytes": 493,
+          "sha256": "e5862c3bdb8ad7353b641d39bacf49073763dd277bd2bb4746744d75c3a0010d"
+        },
+        {
+          "method": "GetCliTeamSettings",
+          "bytes": 493,
+          "sha256": "430f5456a16931c42631595643e23ed748e4fb465a079af84433a1d507a6e2be"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 42659,
+          "sha256": "a227d4f5f2bec4d4c2c616dacdd5a79724d56cb9221ca5dfebb791727787a3d1"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 1134,
+          "sha256": "0bcda0e336ff1df22dd901a32c4153e729e3ac1fa86c1181125caaf567e016a8"
+        }
+      ],
+      "stopped": {
+        "code": 0,
+        "signal": null
+      }
+    },
+    {
+      "scenario": "webfetch",
+      "passed": true,
+      "status": "passed",
+      "process_joined": true,
+      "bridge_joined": true,
+      "provider_sha256": "7ef3859e68d4eabc0115e51898fcd4eab1edde753c27a472349ef551180b38ff",
+      "helper_sha256": "c06960be09a2ee8e9bcb10b496feaa0a8318b68b81af9bc66e7b4019c6c96206",
+      "production_policy_sha256": "3a9bedfb7dbb962a398112eb6f1263955b11a0150e141f92406424b124253f7c",
+      "fixture_policy_sha256": "2a6b03fd83bd42e5bf970b74bbec91d8ce411e0bbe7370ab863857fcf5861f8e",
+      "calls": [],
+      "native_calls": [
+        {
+          "name": "webfetch",
+          "finished": true,
+          "approved": false
+        }
+      ],
+      "denials": 1,
+      "image_prompt": true,
+      "mcp_proposed_version": null,
+      "mcp_metadata_seen": false,
+      "unexpected_notification": null,
+      "compaction_observations": [],
+      "checks": {
+        "capture_error": null,
+        "no_canary_leak": true,
+        "no_native_webfetch": true,
+        "exact_inventory": true,
+        "steps": 2,
+        "tool_free_requests": 1,
+        "expected_steps": true,
+        "no_overflow": true,
+        "compaction_verified": true
+      },
+      "inventory_sha256": [
+        "aa0d4699f680ab978d58e0cf0d4ddb070aa3d9b17bd32a9543eb507138d87804"
+      ],
+      "stdout_sha256": "1ec75edebc9868d79d6bfe626aa28f788e97c2538c768dbdf464a3de9be7268e",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "requests": [
+        {
+          "method": "BatchRecordAnalyticsEvents",
+          "bytes": 301,
+          "sha256": "ad3e67ec66cb41f8e7eddae8ea0b9fc1f5cad0f35fe85ae8165adb4b2ce5b786"
+        },
+        {
+          "method": "GetUserStatus",
+          "bytes": 479,
+          "sha256": "a122de345bb41c0786c8af516453e521a53d4ae000fca199d2e7fcf2ab349b30"
+        },
+        {
+          "method": "GetCliTeamSettings",
+          "bytes": 487,
+          "sha256": "437852eb0abe2fc3d33c423cfbe053b0cb5b805031595a06821f0c34269f4231"
+        },
+        {
+          "method": "GetUserStatus",
+          "bytes": 479,
+          "sha256": "fce167227b9fd16ba38ccd35125fd7222b5a42a94de959556846534f93fddfe1"
+        },
+        {
+          "method": "GetUserStatus",
+          "bytes": 479,
+          "sha256": "bd9139822c4e72cb17ceffb89f25d4ca3e9642a182fd928c82efab4d4416e1b7"
+        },
+        {
+          "method": "GetCliModelConfigs",
+          "bytes": 487,
+          "sha256": "5fd03c82421589bfb1da16dfc54e1b7d1074e9d5db501e188083a573596f2326"
+        },
+        {
+          "method": "GetUserStatus",
+          "bytes": 479,
+          "sha256": "01bc3984024dd15845f15c209ec1218a673ea07082efd053edbb7c3104492f00"
+        },
+        {
+          "method": "GetUserStatus",
+          "bytes": 485,
+          "sha256": "1f0ee3367ea91b417397eec4c2b2a25cb431d4bc680b49a5f8935af48f8523c5"
+        },
+        {
+          "method": "GetUserStatus",
+          "bytes": 485,
+          "sha256": "3d5aed4cc3162ba6ae303e2701e021f5368074ae6e03df98b241f534aac1e177"
+        },
+        {
+          "method": "GetCliModelConfigs",
+          "bytes": 493,
+          "sha256": "1bcc304e680a3da2a09bada1664bed4da8ebbc840d97e7554abd084bb02c7a58"
+        },
+        {
+          "method": "GetCliTeamSettings",
+          "bytes": 493,
+          "sha256": "4c4ead9376b3818b4e1d9fa856eb6eb9ed55ac1b5f1a2361191637cd461ac910"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 42663,
+          "sha256": "b04719146d4ba8ac57c022e4b2fc5248bef29b03b96618a5e6ecc91f9f43fc82"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 1138,
+          "sha256": "6120cebf782dad2cfc848cf7dfca81cb475922d8540f0f2cc6120bf5e9e22b18"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 42904,
+          "sha256": "bba127a7b7cfd78ca20577d7bce58d01b11eacb5a8a5c1fe78fb033658c62e7e"
+        }
+      ],
+      "stopped": {
+        "code": 0,
+        "signal": null
+      }
+    },
+    {
+      "scenario": "compaction",
+      "passed": true,
+      "status": "passed",
+      "process_joined": true,
+      "bridge_joined": true,
+      "provider_sha256": "7ef3859e68d4eabc0115e51898fcd4eab1edde753c27a472349ef551180b38ff",
+      "helper_sha256": "c06960be09a2ee8e9bcb10b496feaa0a8318b68b81af9bc66e7b4019c6c96206",
+      "production_policy_sha256": "2e0f9d5568a90fe57445c8a39d9fa64906c446933349db7df786f4283004de41",
+      "fixture_policy_sha256": "3a3673aee1502b1b2467e47ee26cb35bf443926f46e6eb16d74d7806565609b1",
+      "calls": [
+        {
+          "name": "workspace_write",
+          "arguments": {
+            "path": "fixture.txt",
+            "text": "SYNTHETIC_BROKER_WRITE",
+            "expectedRevision": null
+          }
+        },
+        {
+          "name": "workspace_read",
+          "arguments": {
+            "path": "fixture.txt"
+          }
+        }
+      ],
+      "native_calls": [
+        {
+          "name": "notebook_read",
+          "finished": true,
+          "approved": false
+        },
+        {
+          "name": "notebook_read",
+          "finished": true,
+          "approved": false
+        },
+        {
+          "name": "notebook_read",
+          "finished": true,
+          "approved": false
+        },
+        {
+          "name": "notebook_read",
+          "finished": true,
+          "approved": false
+        },
+        {
+          "name": "read",
+          "finished": true,
+          "approved": false
+        },
+        {
+          "name": "mcp_list_tools",
+          "finished": true,
+          "approved": false
+        }
+      ],
+      "denials": 0,
+      "image_prompt": true,
+      "mcp_proposed_version": "2025-11-25",
+      "mcp_metadata_seen": true,
+      "unexpected_notification": null,
+      "compaction_observations": [
+        {
+          "status": "started",
+          "summary_bytes": null,
+          "session_matched": true
+        },
+        {
+          "status": "completed",
+          "summary_bytes": 207,
+          "session_matched": true
+        },
+        {
+          "status": "started",
+          "summary_bytes": null,
+          "session_matched": true
+        },
+        {
+          "status": "completed",
+          "summary_bytes": 207,
+          "session_matched": true
+        },
+        {
+          "status": "started",
+          "summary_bytes": null,
+          "session_matched": true
+        },
+        {
+          "status": "completed",
+          "summary_bytes": 207,
+          "session_matched": true
+        },
+        {
+          "status": "started",
+          "summary_bytes": null,
+          "session_matched": true
+        },
+        {
+          "status": "completed",
+          "summary_bytes": 207,
+          "session_matched": true
+        },
+        {
+          "status": "started",
+          "summary_bytes": null,
+          "session_matched": true
+        },
+        {
+          "status": "completed",
+          "summary_bytes": 207,
+          "session_matched": true
+        },
+        {
+          "status": "started",
+          "summary_bytes": null,
+          "session_matched": true
+        },
+        {
+          "status": "completed",
+          "summary_bytes": 207,
+          "session_matched": true
+        }
+      ],
+      "checks": {
+        "capture_error": null,
+        "no_canary_leak": true,
+        "no_native_webfetch": true,
+        "exact_inventory": true,
+        "steps": 9,
+        "tool_free_requests": 7,
+        "expected_steps": true,
+        "no_overflow": true,
+        "compaction_verified": true
+      },
+      "inventory_sha256": [
+        "aa0d4699f680ab978d58e0cf0d4ddb070aa3d9b17bd32a9543eb507138d87804"
+      ],
+      "stdout_sha256": "36e50025800152c44427fa63f5b6bd117686a3f4dcd7191c0024ad4d8ce2bbf2",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "requests": [
+        {
+          "method": "BatchRecordAnalyticsEvents",
+          "bytes": 301,
+          "sha256": "fda08f993172c690c6ffdcb1d7659958dacf3d3456608cb152303a995361ea13"
+        },
+        {
+          "method": "GetUserStatus",
+          "bytes": 479,
+          "sha256": "21316a3e5ce70fe3881f2e6ff479ce0654670008ea566ff46badd06188df890e"
+        },
+        {
+          "method": "GetCliModelConfigs",
+          "bytes": 487,
+          "sha256": "d23c48ab5a809712c50ec01cc1f22912d12c83911f7ea9cf3c840c2b107c5aa4"
+        },
+        {
+          "method": "GetUserStatus",
+          "bytes": 479,
+          "sha256": "d537b41a8f6b37ddda8ab61a05f1e8b22b296428efdbb079844a555a3ff8d974"
+        },
+        {
+          "method": "GetUserStatus",
+          "bytes": 479,
+          "sha256": "8b28ad5c3538e1071fb2eaa0e36e5deeee420f2cfd8815e24fba9e0b0de0ea82"
+        },
+        {
+          "method": "GetCliTeamSettings",
+          "bytes": 487,
+          "sha256": "4049b492d7282469083daf458f3d5f7e587fe6ba2e19dc40a13df54c2647d1e3"
+        },
+        {
+          "method": "GetUserStatus",
+          "bytes": 479,
+          "sha256": "02a23ee96fd1e7cbcdf0a97335d54b8ce42d61202b1afb324ffef6696176f6f3"
+        },
+        {
+          "method": "GetUserStatus",
+          "bytes": 485,
+          "sha256": "3c67d3fae4f4c450661a790c33c5d5a66faa50b3f202ce9f69cae9b40a1ceee5"
+        },
+        {
+          "method": "GetUserStatus",
+          "bytes": 485,
+          "sha256": "671bf3bfa50ecfb215042d5759d511aa7ddd60719a62107646ae47c1310d0c41"
+        },
+        {
+          "method": "GetCliModelConfigs",
+          "bytes": 493,
+          "sha256": "a6c708c64821f93a0648d852342109a988aace6a4cda5001bf59cd8ebf3eb72f"
+        },
+        {
+          "method": "GetCliTeamSettings",
+          "bytes": 493,
+          "sha256": "4def74c32efeab0e52cbb0c8acd8e649f1b1f6b63be7ac1d55f1b567b62b5a4d"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 42659,
+          "sha256": "ab2fd02ad3f9607a17ed1b1d4fe5e121eb19a31cca7a60586147ae9abb785d8c"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 1134,
+          "sha256": "051beda7314b8c3d8fee0fa93cbf1eb7d79b51664ff310f0d4508ddfc82ad36d"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 43092,
+          "sha256": "7d7ee4244b35695f2e18eef9cea297c5e5c68977d9c8560f64ca72ecfb47c842"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 43511,
+          "sha256": "a3d7ac38068150a44b24a6795f32da7f6e3f60a845e87846225e08e4d9c8156e"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 4165,
+          "sha256": "d2efeb2e87a2d97d94ac4e03844b9a84594d7d8e7056c74b6b4261ab0d28c8ce"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 43832,
+          "sha256": "cba47a7cde2cad2a893e51ca932b3a3e7d2fd45b5dffbd13a66a89d0db0fa6cd"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 4371,
+          "sha256": "0b024e52c65a7f371a12356185499a1b9e4b1903efbdd0c176be994a58c3ef63"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 43834,
+          "sha256": "b7dc661f4bb2007069cee582769a87e2b5f1e63c052a00e313a346c286dacd35"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 4364,
+          "sha256": "0121dae162444ffcb5f2173cbd173b95880883e4ff25f5b90c5b7d2a8f8c57b7"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 43917,
+          "sha256": "a6c0e9ebf7345b9012623e528e8dd39e6d9c4fbdb556335077cac50fe569b3eb"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 4376,
+          "sha256": "a5f6f78bc73fac33b6664ec441f151970be8e7fa4f5b324d073579e6dbcb0f2c"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 53885,
+          "sha256": "c67826dfe4ce63d2976d5beded2c9a6769af9806ec03145e568e949768b2973e"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 4372,
+          "sha256": "0552a8971cdae4c9b4c6a445db8a8f41af9ac68d0cb1e1090d8dd6277f8986e9"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 53816,
+          "sha256": "0c9877bc8e5e759b95a5bd4c4b4eda2e00483604ddc7add9d4f02a99ebaf3aa1"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 4460,
+          "sha256": "e322c8cde186b3ea788aa8cff74fd58f710cd5dc1c783e8f462cd7dee6a8ba10"
+        },
+        {
+          "method": "GetChatMessage",
+          "bytes": 53653,
+          "sha256": "f2694cd425aed79b65cc2404d2e56f12a623114f5538ea20860f3777d1e18b22"
+        }
+      ],
+      "stopped": {
+        "code": 0,
+        "signal": null
+      }
+    }
+  ]
+}

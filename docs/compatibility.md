@@ -1,13 +1,14 @@
 # TypeScript compatibility reference
 
-This is the retained library and compatibility CLI reference. For the native
-Rust application, start with the [README](../README.md). Code snippets using
-application-owned ports illustrate host integration; they do not qualify a
-provider or establish a live production boundary. Devin and Codex task execution
-remain disabled in the TypeScript standalone CLI. The native Rust Codex and Devin
-candidates, credential imports, and supervised Codex sign-in are separate paths;
-see the [native setup](../README.md#connect-codex-on-macos). Native admission does
-not qualify these compatibility adapters.
+This is the reference for the TypeScript package, `@hraness/xcb`, and its
+`xcb-compat` CLI. For the native `xcb` command, start with the
+[README](../README.md); for a first embedding example, see the
+[SDK quickstart](sdk.md). Code snippets using application-owned ports show host
+integration; they don't approve a provider or prove a production sandbox. Devin
+and Codex task execution stay disabled in the `xcb-compat` CLI. The native Codex
+and Devin support, credential imports, and supervised Codex sign-in are separate;
+see [accounts and models](https://xcb.sh/docs/providers). Native support doesn't
+approve these compatibility adapters.
 
 ## TypeScript compatibility
 
@@ -22,14 +23,15 @@ The retained application package provides:
 
 `src/index.ts` exports the complete current interface. `createPublicWeb()` provides bounded public HTTPS GETs with address pinning, redirect checks, no ambient authentication, a 15-second deadline, and a 256 KiB maximum text response. Run `bun test` from the repository root.
 
+Install the package with `npm install @hraness/xcb` or `bun add @hraness/xcb`.
+Each [GitHub release](https://github.com/hraness/xcb/releases) also includes
+the same package as `hraness-xcb-<version>.tgz`; see the
+[SDK quickstart](sdk.md#install) for archive installation. Releases tagged `v0.3.0` and earlier are
+AgentMixer and keep that package name.
+
 ## Build from source
 
-This reference describes the TypeScript compatibility source, whose CLI differs
-from the native Rust CLI in the [quick start](../README.md). No `@hraness/xcb`
-registry package or xcb release archive is currently published. The existing
-`v0.3.0` release is AgentMixer and retains its original package identity.
-
-With Bun 1.3.14, run from the repository root:
+Run this from the repository root with Bun 1.3.14:
 
 ```sh
 bun install --frozen-lockfile
@@ -37,8 +39,8 @@ bun scripts/build-dist.ts
 bun src/cli.ts --help
 ```
 
-Use `bun src/cli.ts` in place of `xcb` in the compatibility examples below.
-Keep the native and compatibility state roots separate.
+Use `bun src/cli.ts` in place of `xcb-compat` in the compatibility examples
+below. Keep the native and compatibility state roots separate.
 
 ## Standalone package
 
@@ -60,37 +62,68 @@ pinning is an admission invariant, not a portability gap. The repository gate
 packs the tarball, scans its contents, verifies the manifest contract and
 dependency completeness, installs it into an isolated consumer, and executes
 the public entry — including an account-lease custody round trip — under both
-runtimes. The planned release pipeline uses the repository's
-`v<version>` tag channel: an immutable GitHub Release tarball is the
-canonical artifact and `@hraness/xcb` on npm is an exact-byte mirror
-to be published with OIDC provenance. See [publishing](publishing.md) for the release
-contract.
+runtimes. Each `v<version>` GitHub release carries the package archive. The
+release workflow publishes the same package to npm with signed provenance;
+see [publishing](publishing.md) for the release process.
 
 ## Command-line interface
 
-The compatibility build includes an `xcb` executable that drives the library
-task runtime. These commands describe that executable, not the native Rust CLI.
-Use the source invocation above until a verified xcb package is published:
+The compatibility build installs an `xcb-compat` executable that drives the
+library task runtime, so a global `npm install` can never shadow the native
+`xcb` binary. These commands describe that executable, not the native Rust
+CLI. Use the source invocation above when no verified xcb package is
+installed:
 
 ```sh
-xcb doctor            # inspect provider binaries, admit this runtime
-xcb auth claude       # sign in with a Claude subscription
-xcb auth status       # show stored sign-in state
-xcb auth logout       # remove the stored credential
-xcb                   # open the chat in the current directory
-xcb run -p "task"     # one headless turn (--cwd picks the workspace)
-xcb sessions          # list local sessions
-xcb sessions rm <id>  # remove a session and its transcript
-xcb sessions prune    # drop sessions idle over 30 days (or N days)
-xcb resume [id]       # continue a session (default: most recent)
+xcb-compat doctor            # inspect provider binaries, admit this runtime
+xcb-compat auth claude       # sign in with a Claude subscription
+xcb-compat auth status       # show stored sign-in state
+xcb-compat auth logout       # remove the stored credential
+xcb-compat                   # open the chat in the current directory
+xcb-compat run -p "task"     # one headless turn (--cwd picks the workspace)
+xcb-compat sessions          # list local sessions
+xcb-compat sessions rm <id>  # remove a session and its transcript
+xcb-compat sessions prune    # drop sessions idle over 30 days (or N days)
+xcb-compat resume [id]       # continue a session (default: most recent)
+xcb-compat update            # install the latest compatibility release
+xcb-compat update check      # check without installing (--json is available)
+xcb-compat update status     # show the installation and update preference
+xcb-compat update disable    # turn off automatic updates
+xcb-compat update enable     # turn them on, including for an exact-version install
 ```
+
+Verified Bun and npm global installs on macOS and Linux update automatically
+before interactive chat, run, resume, and doctor commands, at most once a day.
+Updates use the immutable `hraness/xcb` GitHub release archive, check its digest
+and package identity, and install through the manager that owns the running
+command. Install the GitHub CLI (`gh`) and authenticate it with
+`gh auth login --hostname github.com` to download the verified archive.
+If the installed CLI has no `update` command, repeat the documented global
+installation once to add update support.
+Package install scripts stay disabled. Other commands using the global
+installation must finish before it can change; an update starts the new CLI
+before running your requested command.
+
+Canonical GitHub release archive installs track newer releases by default.
+Bun installs requested with an exact version remain pinned until
+`xcb-compat update enable`. npm does not reliably retain the original version
+request; use `xcb-compat update disable` to keep a global npm copy fixed.
+`XCB_VERSION` preserves a product version binding. `HRANESS_NO_UPDATE=1` or
+`XCB_NO_UPDATE=1` skips automatic updates for one invocation.
+
+CI, noninteractive commands, agent invocations, help, and version output do not
+trigger automatic checks. Source checkouts, project dependencies, temporary `bunx` or
+`npx` installs, and Windows package-manager shims keep their existing update
+process. SDK imports never check for updates or install code. Update preferences
+are separate from the `~/.xcb` application state; update commands do not open
+sessions or provider credentials.
 
 Assistant text streams into the chat as the provider completes each content
 block, and provider-declared errors (for example a plan's session limit) print
 their own message next to the typed outcome code. Piped output stays clean:
 streaming, spinners and ANSI styling only engage on a TTY.
 
-`xcb` is the kernel layer: one local CLI that keeps provider account
+`xcb-compat` is the kernel layer: one local CLI that keeps provider account
 custody, process lifecycle, brokered workspace tools, and unified responses on
 this machine. Cloud sync and orchestration belong to higher-level products
 built on this package; sessions are local-only.
@@ -99,7 +132,9 @@ The chat keeps the model's entire tool surface inside the opened directory:
 `workspace.list`, `workspace.read`, `workspace.search`, `workspace.write`, and
 bounded public `web.fetch`. There is no shell, process, or arbitrary-path
 operation. Writes are atomic and require the file's current revision, so a
-stale or speculative edit fails instead of clobbering. `/help` lists the
+stale or speculative edit fails instead of clobbering. Reads are limited to
+128 KiB per file with a guided error, and listings or searches that reach
+their bounds report `truncated` instead of failing. `/help` lists the
 in-session commands; Ctrl-C cancels a running turn and Ctrl-D exits.
 
 State lives under `~/.xcb` (mode `0700`, override with
@@ -107,7 +142,7 @@ State lives under `~/.xcb` (mode `0700`, override with
 per-provider config directories, the local admission records `doctor` writes,
 and the subscription credential `auth` stores.
 
-`xcb auth claude` runs `claude setup-token` to mint a long-lived
+`xcb-compat auth claude` runs `claude setup-token` to mint a long-lived
 (one-year) subscription OAuth token, captured and stored mode-0600 in the
 private state root — not the shared login keychain, so it cannot overwrite or
 be overwritten by a normal `claude` sign-in. The token reaches the provider
@@ -128,8 +163,9 @@ session's unix-socket bridge via the shipped in-namespace CONNECT forwarder
 (`sandbox/loopback-forwarder.cjs`), which hands the provider standard
 `HTTPS_PROXY` semantics on a loopback port — no provider cooperation needed.
 When that surface cannot be admitted (no bwrap, or a host that refuses
-unprivileged user namespaces — stock Ubuntu 23.10+ requires
-`sysctl kernel.apparmor_restrict_unprivileged_userns=0`), the CLI refuses to
+unprivileged user namespaces — stock Ubuntu 23.10+ needs xcb's exact-path
+AppArmor profile for `/usr/bin/bwrap`, shipped as
+`crates/xcb-runtime/src/qualification/xcb-bwrap.apparmor`), the CLI refuses to
 run rather than fall back unsandboxed. Unsupported platforms refuse execution
 without an admitted OS-confinement boundary. The sandbox adds enforcement to
 the broker boundary.
@@ -154,7 +190,7 @@ that evidence. Selecting either unqualified provider fails closed.
 
 ### Judged routing, continuation, and compaction (optional)
 
-`xcb` can ask a judgment service — the jev interface — to pick among admitted
+`xcb-compat` can ask a judgment service — the jev interface — to pick among admitted
 routes, advise whether a safely stopped turn remains unfinished, or veto
 Gobstopper elision of stale tool results that remain important. The port is
 provider-neutral: `ask(state, questions)` returns typed answers (`noul`,
@@ -167,15 +203,15 @@ advice sends at most 8 KiB each of the original task and last response. Judged
 compaction sends the current task, an ≤ 88 KiB fitted view of recent non-tool
 messages, and up to 64 old tool names and byte counts — never the tool-result
 bodies themselves. Every call allows ≤ 128 KiB total state, ≤ 64 questions, a
-≤ 256 KiB response, and one 15-second HTTPS POST. `xcb run --provider auto` is
+≤ 256 KiB response, and one 15-second HTTPS POST. `xcb-compat run --provider auto` is
 itself the opt-in on the compatibility surface — the flag names the behavior,
 and it needs a key:
 
 ```sh
-xcb judge token < /secure/path/to/judge-key   # pipe the key on stdin — never an argument
-xcb judge status            # where the key resolves from (never prints it)
-xcb judge test              # one live bounded batch (noul, choice, score)
-xcb judge logout            # remove the vaulted key
+xcb-compat judge token < /secure/path/to/judge-key   # pipe the key on stdin — never an argument
+xcb-compat judge status            # where the key resolves from (never prints it)
+xcb-compat judge test              # one live bounded batch (noul, choice, score)
+xcb-compat judge logout            # remove the vaulted key
 ```
 
 The key vaults mode-0600 under the private state root; `XCB_JEV_API_KEY` or
@@ -203,35 +239,13 @@ original in local history. Missing or malformed compaction advice falls back
 to the deterministic Gobstopper plan; unasked candidates beyond the 64-question
 bound remain verbatim.
 
-## Migrating from AgentMixer
-
-The unreleased 0.4.0 source renames the compatibility package's public identifiers from
-AgentMixer to xcb: `@hraness/agentmixer` → `@hraness/xcb`, the `agentmixer`
-executable → `xcb`, `~/.agentmixer` → `~/.xcb`, `AGENTMIXER_*` environment
-variables → `XCB_*`, `agentmixer.*` schema ids → `xcb.*`, `agentmixer_*`
-SQLite tables → `xcb_*`, and the `AgentMixer` runtime class → `Xcb`.
-
-Existing state is never renamed or overwritten silently:
-
-- Run `xcb migrate` once to copy `~/.agentmixer` (or `$AGENTMIXER_STATE`) into
-  the canonical root. The target must be empty; the legacy directory is left
-  untouched so an older install still works — remove it yourself when ready.
-- Alternatively, point `XCB_STATE` at the existing directory; the
-  `agentmixer_*` SQLite tables rename to `xcb_*` lazily on first open either
-  way.
-- `AGENTMIXER_CLAUDE` / `AGENTMIXER_CODEX` binary pins are still honored when
-  the `XCB_*` variable is unset; rename them when convenient.
-- Update dependents: package imports use `@hraness/xcb`, the runtime class is
-  `Xcb`, and shell invocations use `xcb`. The last AgentMixer release line is
-  `@hraness/agentmixer@0.3.0` under tag `v0.3.0`.
-
 ## Application-owned capability profiles
 
 An application can define its own tools with `createCapabilityProfile()` and
 bind them to one host-selected workspace and run with `createCapabilityBroker()`.
 The host supplies every descriptor, input parser and handler. Model arguments
 cannot replace the bound workspace, credentials or handler implementation. This
-separate interface leaves Textbutler's existing contact broker and
+separate interface leaves TextButler's existing contact broker and
 `Xcb.run()` path unchanged.
 
 For example, this host stores bounded notes in memory:
@@ -298,7 +312,9 @@ provider or establish account availability.
 
 `createSubscriptionRouter()` is the packaged entry point for the same path: it
 bundles the account lease store and qualified task adapters into one object so
-a host does not rewire `Xcb` internals.
+a host does not rewire `Xcb` internals. The host names the account and model
+for each task; the router doesn't choose them. The [SDK quickstart](sdk.md) has
+a complete example that runs with a stand-in adapter.
 
 ```ts
 import { openAccountDatabase, SqliteAccountLeases, createSubscriptionRouter } from "@hraness/xcb";
@@ -349,7 +365,7 @@ tool is exposed. Unknown tool names receive a denied result; unexpected response
 capabilities fail the run. Classification sends an empty tool array.
 
 This adapter admits its code-enforced execution profile after checking the pinned
-Anthropic SDK 0.125.0 and verifying the compiled runtime's exact bytes. The
+Anthropic SDK 0.127.0 and verifying the compiled runtime's exact bytes. The
 24-hour runtime qualification describes that local authority boundary; it does
 not attest live account availability or messaging delivery. Recreate an expired
 adapter and refresh model availability before continuing. Native fixture receipts
@@ -456,8 +472,8 @@ qualification for the exact native executable and SDK digest. No production
 qualification receipt is bundled. The default provider adapters continue to refuse
 execution. `createProviderLaunchPlan()` is descriptive configuration, not a sandbox.
 
-The installed versions are Claude Agent SDK **0.3.268**, bundled native Claude Code
-**2.1.268**, Anthropic SDK **0.125.0**, MCP SDK **1.30.0**, and Zod **4.6.2**.
+The installed versions are Claude Agent SDK **0.3.278**, bundled native Claude Code
+**2.1.278**, Anthropic SDK **0.127.0**, MCP SDK **1.30.0**, and Zod **4.6.5**.
 `inspectClaudeSdkRuntime()` checks the installed SDK version, the admitted CLI
 version the host inspected (`>= 2.1.268` within major 2), native binary owner,
 mode, link count and SHA-256, and returns the composite qualification identity
@@ -768,10 +784,14 @@ socket-set and path removal — against a synthetic dialer, with no resolver
 or provider endpoint involved. `qualification/linux-loopback.ts` completes
 the chain: a stock `curl` under `HTTPS_PROXY` traverses forwarder → bridge →
 a local `openssl s_server`, proving the stock-binary path without provider
-cooperation. The `Qualification` workflow runs all three on `ubuntu-24.04`
-CI and uploads the JSON evidence — including the recorded fact that Ubuntu's
-default AppArmor user-namespace restriction blocks bwrap entirely until the
-host lifts it (`kernel.apparmor_restrict_unprivileged_userns=0`).
+cooperation. The `Check` workflow's `Linux kernel-boundary probes` job runs
+all three on `ubuntu-24.04` CI when the probes or sandbox sources change and
+uploads the JSON evidence. That job leaves Ubuntu's AppArmor user-namespace
+restriction on and installs xcb's exact-path bwrap profile instead; it also
+runs the native test (`xcb doctor --provider claude --qualify-sandbox`),
+which ports the same three probes into the xcb binary and writes the receipt
+the Linux launcher requires. The receipt records the AppArmor restriction,
+so a reboot that turns it back on after a `sysctl` workaround invalidates it.
 
 ## Ownership boundaries
 
@@ -795,9 +815,9 @@ semantics. These are source integration seams: no shared native artifact, native
 managed launcher or new production qualification is bundled or implicitly enabled.
 
 The application owns its daemon, contact enrollment, message classification policy,
-conversation history, memory format, prefix formatting and Ghostget/Linq access.
-Xcb owns the execution seam. The model cannot choose a workspace or contact
-in broker input. `WorkspaceFiles` and `PublicWeb` are trusted host ports. Textbutler supplies its confined file implementation and uses `createPublicWeb()` by default. Custom replacements must preserve file confinement and public-network policy across DNS and every redirect. URL syntax validation alone is insufficient. The supplied web client admits public unicast addresses, rejects mixed public/private DNS answers, pins the selected address while preserving TLS hostname verification, and validates each redirect anew. It fetches bounded UTF-8 text only; it does not carry account cookies or authorization headers.
+conversation history, memory format, prefix formatting and GhostGet/Linq access.
+xcb owns the execution seam. The model cannot choose a workspace or contact
+in broker input. `WorkspaceFiles` and `PublicWeb` are trusted host ports. TextButler supplies its confined file implementation and uses `createPublicWeb()` by default. Custom replacements must preserve file confinement and public-network policy across DNS and every redirect. URL syntax validation alone is insufficient. The supplied web client admits public unicast addresses, rejects mixed public/private DNS answers, pins the selected address while preserving TLS hostname verification, and validates each redirect anew. It fetches bounded UTF-8 text only; it does not carry account cookies or authorization headers.
 
 Messaging ports only stage proposed actions and return an intent ID. They must never
 submit a message during composition. The application must recheck current enrollment, exact recipient/message ownership,
@@ -825,7 +845,7 @@ the old process/controller stopped, followed by an exact generation-conditional
 release. `AbortSignal` alone does not prove process exit. A successful adapter result
 must assert `processStopped: true` only after obtaining that evidence.
 
-The current AI Charts CLI collects usage and does not execute agents, so its likely
+The current aicharts CLI collects usage and does not execute agents, so its likely
 future shared interface is sanitized usage/account metadata, not this execution
 port. Account sign-in and product-provider terms need separate qualification;
 [Anthropic's SDK overview](https://code.claude.com/docs/en/agent-sdk/overview) directs
@@ -983,7 +1003,7 @@ The adapter defaults to unqualified. `Xcb.runTask()` refuses it before
 account acquisition or process launch unless the trusted host supplies current
 qualification for the exact route, runtime and capability profile. Direct
 adapter calls also require qualification and a runtime-admitted request. Synthetic fixtures are not
-qualification evidence and do not enable the route in Textbutler or another app.
+qualification evidence and do not enable the route in TextButler or another app.
 
 The managed session checks ChatGPT account type, the public baseline configuration
 projection and native thread settings before sending the task. `config/read`

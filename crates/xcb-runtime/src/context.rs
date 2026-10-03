@@ -298,6 +298,12 @@ pub fn prompt(messages: &[Message], current: &str) -> Result<String> {
             previous = Some(provenance);
         }
         output.push_str(&format!("\n--- {:?} ---\n{}\n", message.role, message.text));
+        for attachment in &message.attachments {
+            output.push_str(&format!(
+                "Stored image {} ({}×{} {}); reopen with xcb_tools_image.\n",
+                attachment.digest, attachment.width, attachment.height, attachment.media_type
+            ));
+        }
         if output.len() > 1024 * 1024 {
             return Err(xcb_core::Error::Limit(
                 "context; use a new session or compact retained context",
@@ -407,6 +413,8 @@ mod tests {
     #[tokio::test]
     async fn judged_projection_only_elides_deterministic_tool_candidates() {
         let session = Session {
+            route_pins: Default::default(),
+            requirements: Default::default(),
             id: xcb_core::Id::new("session").unwrap(),
             account: xcb_core::Id::new("account").unwrap(),
             model: xcb_core::models::ModelChoice {
@@ -422,6 +430,7 @@ mod tests {
             title: "Session".to_owned(),
             pane: xcb_core::Id::new("focus").unwrap(),
             state: xcb_core::session::State::Idle,
+            managed_task: None,
             revision: 1,
             created_at_ms: 1,
             last_active_at_ms: 1,

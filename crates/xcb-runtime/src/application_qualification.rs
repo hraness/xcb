@@ -16,24 +16,29 @@
 //! Generate must call `load` again after reserving its account, not reuse a
 //! capabilities result. The producer must not expose a generic bypass of normal
 //! application admission, arbitrary JSON import, or an expiry-renewal endpoint.
+//!
+//! A published receipt has no time limit. Its binding names the exact
+//! executable, provider pin, platform, policy, configuration, sign-in
+//! generation and models, and a change to any of them invalidates it at once.
+//! Rerunning unchanged source gates on unchanged bytes proves nothing new.
 
 use crate::{Error, Result, application::ApplicationQualification, digest, private, process::Pin};
 use serde::{Deserialize, Serialize};
 use std::{
-    fs::{self, File, Metadata},
+    fs::File,
     io::Read,
-    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
 use xcb_core::{Id, Provider};
 
+/// Longest span from the first prerequisite observation to publication.
 pub(crate) const MAX_AGE_MS: u64 = 24 * 60 * 60 * 1000;
 const MAX_MODELS: usize = 64;
 const MAX_RECEIPT: usize = 64 * 1024;
 const MAX_BOUNDARY: usize = 64 * 1024;
 const MAX_GATE_OUTPUT: usize = 4 * 1024 * 1024;
 const MAX_LIVE: usize = 16 * 1024;
-const UNAVAILABLE: &str = "application qualification missing, expired, or invalid";
+const UNAVAILABLE: &str = "application qualification missing or invalid";
 
 /// All values come from current host state, never the application's request.
 /// Policy/config digests cover normalized effective application settings,
@@ -79,8 +84,9 @@ pub(crate) struct CredentialGeneration {
 pub(crate) struct Receipt {
     pub version: u32,
     pub binding: Binding,
-    /// Collection start and fixed expiration, both Unix milliseconds. Reading
-    /// a receipt never changes either, including when no account is available.
+    /// Collection start and the deadline every observation had to finish by,
+    /// both Unix milliseconds. The deadline bounds collection only: a published
+    /// receipt stays valid until its binding changes.
     pub observed_at_ms: u64,
     pub expires_at_ms: u64,
     pub boundary_sha256: String,
@@ -158,7 +164,6 @@ pub(crate) struct LiveEvidence {
 pub(crate) struct Admission {
     binding: Binding,
     receipt_sha256: String,
-    expires_at_ms: u64,
 }
 impl Admission {
     pub(crate) fn covers(&self, full_model_key: &str) -> bool {
@@ -169,7 +174,7 @@ impl Admission {
             runtime_version: self.binding.runtime_version.clone(),
             runtime_digest: self.binding.runtime_sha256.clone(),
             evidence_digest: self.receipt_sha256.clone(),
-            expires_at: self.expires_at_ms,
+            expires_at: None,
         }
     }
 }
@@ -205,7 +210,6 @@ fn load_verified(root: &Path, expected: &Expected<'_>, now_ms: u64) -> Result<Ad
     validate_binding(&receipt.binding, expected, &generation.generation)?;
     require(receipt.version == 1)?;
     require(receipt.observed_at_ms > 0 && receipt.observed_at_ms <= now_ms)?;
-    require(receipt.expires_at_ms > now_ms)?;
     require(
         receipt.expires_at_ms > receipt.observed_at_ms
             && receipt.expires_at_ms - receipt.observed_at_ms <= MAX_AGE_MS,
@@ -250,7 +254,6 @@ fn load_verified(root: &Path, expected: &Expected<'_>, now_ms: u64) -> Result<Ad
     Ok(Admission {
         binding: receipt.binding,
         receipt_sha256: digest(raw),
-        expires_at_ms: receipt.expires_at_ms,
     })
 }
 
@@ -390,10 +393,7 @@ fn interval(start: u64, finish: u64, receipt: &Receipt, now: u64) -> Result<()> 
     )
 }
 fn sha256(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    xcb_core::hex64(value)
 }
 fn require(condition: bool) -> Result<()> {
     if condition {
@@ -403,33 +403,7 @@ fn require(condition: bool) -> Result<()> {
     }
 }
 
-#[derive(PartialEq, Eq)]
-struct FileIdentity {
-    dev: u64,
-    ino: u64,
-    mode: u32,
-    uid: u32,
-    gid: u32,
-    links: u64,
-    bytes: u64,
-    mtime: (i64, i64),
-    ctime: (i64, i64),
-}
-impl From<&Metadata> for FileIdentity {
-    fn from(metadata: &Metadata) -> Self {
-        Self {
-            dev: metadata.dev(),
-            ino: metadata.ino(),
-            mode: metadata.mode(),
-            uid: metadata.uid(),
-            gid: metadata.gid(),
-            links: metadata.nlink(),
-            bytes: metadata.len(),
-            mtime: (metadata.mtime(), metadata.mtime_nsec()),
-            ctime: (metadata.ctime(), metadata.ctime_nsec()),
-        }
-    }
-}
+type FileIdentity = xcb_core::FileIdentity;
 struct OpenEvidence {
     path: PathBuf,
     file: File,
@@ -439,8 +413,8 @@ struct OpenEvidence {
 impl OpenEvidence {
     fn verify(&self) -> Result<()> {
         private::check_file(&self.file, self.maximum as u64)?;
-        require(FileIdentity::from(&self.file.metadata()?) == self.identity)?;
-        require(FileIdentity::from(&fs::symlink_metadata(&self.path)?) == self.identity)
+        require(FileIdentity::of_file(&self.file)? == self.identity)?;
+        require(FileIdentity::of_path(&self.path)? == self.identity)
     }
 }
 #[derive(Default)]
@@ -451,13 +425,12 @@ struct Reader {
 impl Reader {
     fn directory(&mut self, path: &Path) -> Result<()> {
         let meta = read_directory(path)?;
-        self.directories
-            .push((path.to_owned(), meta.dev(), meta.ino()));
+        self.directories.push((path.to_owned(), meta.dev, meta.ino));
         Ok(())
     }
     fn read(&mut self, path: &Path, maximum: usize) -> Result<Vec<u8>> {
         let file = private::open_file(path, maximum as u64)?;
-        let identity = FileIdentity::from(&file.metadata()?);
+        let identity = FileIdentity::of_file(&file)?;
         let mut bytes = Vec::new();
         (&file).take(maximum as u64 + 1).read_to_end(&mut bytes)?;
         require(!bytes.is_empty() && bytes.len() <= maximum)?;
@@ -483,19 +456,19 @@ impl Reader {
         }
         for (path, dev, ino) in self.directories {
             let meta = read_directory(&path)?;
-            require(meta.dev() == dev && meta.ino() == ino)?;
+            require(meta.dev == dev && meta.ino == ino)?;
         }
         Ok(())
     }
 }
-fn read_directory(path: &Path) -> Result<Metadata> {
-    let meta = fs::symlink_metadata(path)?;
+fn read_directory(path: &Path) -> Result<crate::os::Stamp> {
+    let meta = crate::os::lstat(path)?;
     require(
         path.is_absolute()
-            && path.canonicalize()? == path
-            && meta.is_dir()
-            && meta.uid() == rustix::process::getuid().as_raw()
-            && meta.mode() & 0o077 == 0,
+            && xcb_core::canonical(path)? == path
+            && meta.dir
+            && meta.owned
+            && meta.private,
     )?;
     Ok(meta)
 }
@@ -698,7 +671,12 @@ fn generation(
     };
     let mut random = [0u8; 32];
     // Read the OS CSPRNG without UUID format bits or a dependency/entropy fallback.
+    #[cfg(unix)]
     File::open("/dev/urandom")?.read_exact(&mut random)?;
+    // Windows has no /dev/urandom: ProcessPrng through getrandom.
+    #[cfg(windows)]
+    getrandom::fill(&mut random)
+        .map_err(|_| Error::Unavailable("the OS random number generator is unavailable"))?;
     let record = CredentialGeneration {
         version: 1,
         account: run.account.clone(),
@@ -720,16 +698,18 @@ fn generation(
     Ok(record)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use serde_json::{Value, json};
-    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::fs;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 
     #[test]
     fn quota_availability_generation_reader_validates_parents_without_creation() {
         let temp = tempfile::tempdir().unwrap();
-        let root = private::directory(&temp.path().canonicalize().unwrap().join("state")).unwrap();
+        let root =
+            private::directory(&xcb_core::canonical(temp.path()).unwrap().join("state")).unwrap();
         let accounts = private::directory(&root.join("accounts")).unwrap();
         let account = Id::new("synthetic").unwrap();
         let directory = private::directory(&accounts.join(account.as_str())).unwrap();
@@ -776,8 +756,8 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             let temp = tempfile::tempdir().unwrap();
-            let root =
-                private::directory(&temp.path().canonicalize().unwrap().join("state")).unwrap();
+            let root = private::directory(&xcb_core::canonical(temp.path()).unwrap().join("state"))
+                .unwrap();
             let account = Id::new("a_synthetic").unwrap();
             let account_dir =
                 private::directory(&root.join("accounts").join(account.as_str())).unwrap();
@@ -952,7 +932,7 @@ mod tests {
     fn synthetic_receipt_is_read_only_and_exposes_only_four_fixed_public_fields() {
         let fixture = Fixture::new();
         let path = fixture.directory.join("receipt.json");
-        let before = FileIdentity::from(&fs::metadata(&path).unwrap());
+        let before = FileIdentity::of(&fs::metadata(&path).unwrap());
         let bytes = fs::read(&path).unwrap();
         let admitted = fixture.read().unwrap();
         assert!(admitted.covers("claude/synthetic-model"));
@@ -962,12 +942,12 @@ mod tests {
         assert_eq!(public["runtimeDigest"], fixture.binding.runtime_sha256);
         assert_eq!(public["evidenceDigest"], digest(&bytes));
         assert_eq!(public["runtimeVersion"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(public["expiresAt"], NOW + 1000);
+        assert_eq!(public["expiresAt"], serde_json::Value::Null);
         assert_eq!(
             serde_json::to_value(fixture.read().unwrap().public()).unwrap(),
             public
         );
-        assert!(FileIdentity::from(&fs::metadata(path).unwrap()) == before);
+        assert!(FileIdentity::of(&fs::metadata(path).unwrap()) == before);
         // Production admission still requires actual verified host/provider bytes.
         assert!(load(&fixture.root, &fixture.expected(), NOW).is_err());
     }
@@ -1011,10 +991,24 @@ mod tests {
     }
 
     #[test]
-    fn expiry_is_fixed_and_future_or_overlong_evidence_is_rejected() {
+    fn a_published_receipt_outlives_its_collection_deadline() {
+        let mut fixture = Fixture::new();
+        fixture.receipt.expires_at_ms = NOW - 5;
+        fixture.publish();
+        assert!(fixture.read().is_ok());
+        let mut fixture = Fixture::new();
+        fixture.receipt.expires_at_ms = NOW - 20;
+        fixture.publish();
+        assert!(
+            fixture.read().is_err(),
+            "live check finished after deadline"
+        );
+    }
+
+    #[test]
+    fn future_or_overlong_collection_is_rejected() {
         for (start, end) in [
             (NOW + 1, NOW + 1000),
-            (NOW - 100, NOW),
             (0, NOW + 1000),
             (NOW - 100, NOW - 100 + MAX_AGE_MS + 1),
         ] {
@@ -1223,7 +1217,8 @@ mod tests {
     fn generation_creation_is_explicit_owned_and_rotation_revokes_old_identity() {
         let temp = tempfile::tempdir().unwrap();
         let store =
-            crate::store::Store::open(&temp.path().canonicalize().unwrap().join("state")).unwrap();
+            crate::store::Store::open(&xcb_core::canonical(temp.path()).unwrap().join("state"))
+                .unwrap();
         let account = store
             .add_account(Provider::Claude, "Synthetic", NOW, None)
             .unwrap();
@@ -1237,13 +1232,13 @@ mod tests {
         assert!(sha256(&record.generation));
         assert_eq!(record.account, account.id);
         let bytes = fs::read(&path).unwrap();
-        let identity = FileIdentity::from(&fs::metadata(&path).unwrap());
+        let identity = FileIdentity::of(&fs::metadata(&path).unwrap());
         assert_eq!(
             ensure_generation(&store, &run).unwrap().generation,
             record.generation
         );
         assert_eq!(fs::read(&path).unwrap(), bytes);
-        assert!(FileIdentity::from(&fs::metadata(&path).unwrap()) == identity);
+        assert!(FileIdentity::of(&fs::metadata(&path).unwrap()) == identity);
         let other = crate::store::Store::open(store.root()).unwrap();
         assert!(ensure_generation(&other, &run).is_err());
         assert!(rotate_generation(&other, &run).is_err());

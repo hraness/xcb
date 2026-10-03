@@ -5,8 +5,8 @@ checks a default-deny macOS Seatbelt profile using only synthetic files and a
 local endpoint:
 
 ```sh
-oompa-host-run --mode=shared --lane=mac-native --label=xcb-kernel-boundary-probe -- bun qualification/macos-sandbox.ts
-oompa-host-run --mode=shared --lane=mac-native --label=xcb-native-claude-os-scope -- bun qualification/claude-native.ts --os-sandbox
+host-run --mode=shared --lane=mac-native --label=xcb-kernel-boundary-probe -- bun qualification/macos-sandbox.ts
+host-run --mode=shared --lane=mac-native --label=xcb-native-claude-os-scope -- bun qualification/claude-native.ts --os-sandbox
 ```
 
 The second command applies that same experimental profile to the actual native
@@ -41,7 +41,7 @@ native production qualification.
 Run the explicit fixture on macOS ARM64 through the installed host scheduler:
 
 ```sh
-oompa-host-run --mode=shared --lane=mac-native --label=xcb-native-claude-scope -- bun qualification/claude-native.ts
+host-run --mode=shared --lane=mac-native --label=xcb-native-claude-scope -- bun qualification/claude-native.ts
 ```
 
 It runs the actual pinned native Claude Code binary through the real Agent SDK,
@@ -70,7 +70,7 @@ without reviewing the deployment's remaining requirements and evidence.
 
 The fixture uses the vendored `contact-workspace.ts` synthetic contact
 workspace, a copy of the consumer's confined file boundary, because consumers
-supply the filesystem enforcement. Xcb itself continues
+supply the filesystem enforcement. xcb itself continues
 to depend only on its generic file broker port.
 
 The pinned native runtime retains `doctor` in its discovery catalog with only an
@@ -81,6 +81,16 @@ restrictive settings and keeps the empty catalog assertion intact. The
 why discovery metadata and execution authority are different.
 
 ## Live Claude subscription smoke
+
+`2026-09-24-live-claude-subscription.json` records the runtime boundary holding
+on Claude Code **2.1.282** (and 2.1.281 earlier the same session) after 2.1.281
+began listing its builtin `agents-md` plugin at session start. Without the
+launch setting that disables that plugin, the per-run boundary assertion failed
+closed on every native Claude route; with it, an automatically routed coding
+turn from a disposable scratch repository completed with settled effects, the
+provider joined before the completion was persisted, and the requested file was
+written. The receipt names the runtime, the boundary assertions, the prior
+failure, and what it does not establish.
 
 `2026-09-22-live-claude-subscription.json` supplements the 2026-09-17 receipt
 below rather than replacing it. It answers one question the earlier one cannot:
@@ -156,9 +166,9 @@ from native tool inventory, authentication and live-provider qualification.
 `application-prerequisites.py` collects actual native validation output and
 prepares the private input for `xcb --json qualify-application`. It does not
 perform authenticated inference or activate application access. Python 3.9 or
-newer, Git, Cargo, the final release XCB executable, and that executable's current
+newer, Git, Cargo, the final release xcb executable, and that executable's current
 doctor pins and account/model catalog are required. The `--state` directory is
-existing private XCB state; the script inspects it through the read-only CLI and
+existing private xcb state; the script inspects it through the read-only CLI and
 never reads credential files itself.
 
 Freeze the source and build `cargo build --release --locked -p xcb-cli`. Use the
@@ -167,7 +177,7 @@ application. Run the following through the installed host scheduler, with one
 integration owner. Replace every example path and the account/model selection:
 
 ```sh
-/absolute/path/to/hra-host-run --mode=exclusive --lane=mac-native --label=xcb-application-prerequisites -- \
+/absolute/path/to/host-run --mode=exclusive --lane=mac-native --label=xcb-application-prerequisites -- \
   /usr/bin/python3 /absolute/xcb/qualification/application-prerequisites.py collect \
   --xcb /absolute/xcb/target/release/xcb --state /absolute/private/xcb-state \
   --source /absolute/xcb --provider claude --account a_selected --model claude/sonnet/low \
@@ -182,7 +192,7 @@ output directories and targets. The actual
 workspace test log supplies the mandatory application unit and contract cases,
 so those tests are not run twice. Native source files, embedded fixtures, Cargo
 manifests/lockfile, local Cargo configuration, toolchain and compiler environment
-are checked before and after collection. XCB's inspection command supplies the
+are checked before and after collection. xcb's inspection command supplies the
 exact compiled policy/configuration, executable and provider identities.
 
 For Claude, collection runs the current credential-free kernel probe and checks
@@ -191,7 +201,7 @@ process joins. It does not execute Claude. Codex and Devin instead require an
 explicit `--provider-boundary /absolute/current-native-boundary.json` from their
 separate reviewed fixtures; the script checks the supported receipt schema,
 current binary/source bindings and successful observations. Devin's helper must
-match the final XCB binary. Run those fixtures again when their bindings change.
+match the final xcb binary. Run those fixtures again when their bindings change.
 Keep their original observation times; a boundary receipt is never refreshed by
 copying it into a new bundle.
 
@@ -208,7 +218,7 @@ After collection, use the same final executable for the separate fixed live
 challenge, also through the scheduler:
 
 ```sh
-/absolute/path/to/hra-host-run --mode=shared --lane=mac-native --label=xcb-application-live-qualification -- \
+/absolute/path/to/host-run --mode=shared --lane=mac-native --label=xcb-application-live-qualification -- \
   /absolute/xcb/target/release/xcb --json --state /absolute/private/xcb-state \
   qualify-application --account a_selected --model claude/sonnet/low \
   --evidence /absolute/private/new-application-evidence
@@ -232,4 +242,4 @@ evidence or turn a failed command into a success.
 Run `python3 qualification/application-prerequisites.py --self-test` through the
 host scheduler for the hermetic parser, custody and bundle regressions. These
 checks use only synthetic files and a bounded Python signal-mask child; they do
-not run Cargo, XCB or providers.
+not run Cargo, xcb or providers.

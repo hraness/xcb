@@ -148,9 +148,82 @@ impl Message {
     }
 }
 
+/// Explicit user route restrictions; automatic choices are not pins.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoutePins {
+    pub provider: Option<crate::Provider>,
+    pub account: Option<Id>,
+    pub model: Option<String>,
+}
+impl RoutePins {
+    pub fn is_empty(&self) -> bool {
+        self.provider.is_none() && self.model.is_none() && self.account.is_none()
+    }
+}
+
+/// Hard execution capabilities; once required they survive turns and reroutes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskRequirements {
+    #[serde(default)]
+    pub signed_in_browser: bool,
+    /// Operating native desktop applications, beyond browser-page controls.
+    #[serde(default)]
+    pub desktop: bool,
+    /// A native Codex tool was used; retain that provider without inferring
+    /// whether the operation needed a signed-in page or a desktop application.
+    #[serde(default)]
+    pub codex_native: bool,
+}
+impl TaskRequirements {
+    pub fn is_empty(&self) -> bool {
+        !self.requires_codex()
+    }
+    pub fn requires_codex(self) -> bool {
+        self.signed_in_browser || self.desktop || self.codex_native
+    }
+    pub fn merge(self, other: Self) -> Self {
+        Self {
+            signed_in_browser: self.signed_in_browser || other.signed_in_browser,
+            desktop: self.desktop || other.desktop,
+            codex_native: self.codex_native || other.codex_native,
+        }
+    }
+    pub fn allows(self, provider: crate::Provider) -> bool {
+        !self.requires_codex() || provider == crate::Provider::Codex
+    }
+}
+
+#[cfg(test)]
+mod task_requirement_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_browser_requirements_merge_without_inventing_desktop_intent() {
+        let old: TaskRequirements = serde_json::from_str(r#"{"signed_in_browser":true}"#).unwrap();
+        assert!(old.signed_in_browser && !old.desktop && !old.codex_native);
+        let native = TaskRequirements {
+            codex_native: true,
+            ..Default::default()
+        };
+        let merged = old.merge(native).merge(Default::default());
+        let saved: TaskRequirements =
+            serde_json::from_value(serde_json::to_value(merged).unwrap()).unwrap();
+        assert!(saved.signed_in_browser && saved.codex_native && !saved.desktop);
+        assert!(saved.allows(crate::Provider::Codex));
+        assert!(!saved.allows(crate::Provider::Claude));
+        assert!(!saved.allows(crate::Provider::Devin));
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Session {
+    #[serde(default, skip_serializing_if = "RoutePins::is_empty")]
+    pub route_pins: RoutePins,
+    #[serde(default, skip_serializing_if = "TaskRequirements::is_empty")]
+    pub requirements: TaskRequirements,
     pub id: Id,
     pub account: Id,
     pub model: ModelChoice,
@@ -158,6 +231,12 @@ pub struct Session {
     pub title: String,
     pub pane: Id,
     pub state: State,
+    /// The managed task this session was created for, recorded atomically at
+    /// creation so startup reconciliation can prove managed custody of a
+    /// session that never reached `prepare` (an orphan). `None` means the
+    /// session is unmanaged/direct and must never be swept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_task: Option<Id>,
     pub revision: u64,
     pub created_at_ms: u64,
     pub last_active_at_ms: u64,

@@ -1,13 +1,16 @@
+use std::collections::BTreeSet;
 use std::{
     fs,
     sync::{Arc, mpsc::sync_channel},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use xcb_core::{
     Id, Provider,
     models::{Mode, ModelChoice},
+    policy::Failure,
     session::{Attachment, State},
-    ui::{Intent, Update},
+    ui::{AccountRow, Intent, Update, View},
+    usage::Estimate,
 };
 use xcb_runtime::{kernel, store::Store};
 
@@ -42,7 +45,7 @@ fn image() -> Attachment {
 #[tokio::test]
 async fn a_rejected_submission_returns_the_full_draft() {
     let dir = root();
-    let base = dir.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(dir.path()).unwrap();
     // No accounts exist, so every submission is rejected before it can run.
     let store = Arc::new(Store::open(&base.join("state")).unwrap());
     let (updates, display) = sync_channel(256);
@@ -55,44 +58,57 @@ async fn a_rejected_submission_returns_the_full_draft() {
         updates,
     ));
 
+    let submission_id = Id::new("m_task").unwrap();
+    let prompt = format!(
+        "{}\nPreserve the final line: λ 🇵🇷",
+        "do the whole thing\n".repeat(512)
+    );
     commands
         .send(Intent::Submit {
-            id: Id::new("m_task").unwrap(),
-            text: "do the thing".into(),
+            id: submission_id.clone(),
+            text: prompt.clone(),
             attachments: vec![image()],
         })
         .unwrap();
     let collected = tokio::task::spawn_blocking(move || {
-        let mut draft = None;
-        let mut notice = None;
-        for _ in 0..64 {
-            match display.recv_timeout(Duration::from_secs(10)) {
-                Ok(Update::Draft { text, attachments }) => draft = Some((text, attachments)),
-                Ok(Update::Notice(text)) => notice = Some(text),
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or_else(|| "timed out waiting for the rejection response".to_owned())?;
+            match display.recv_timeout(remaining) {
+                Ok(Update::SubmitRejected {
+                    id,
+                    context,
+                    text,
+                    attachments,
+                    reason,
+                }) => return Ok((id, context, text, attachments, reason)),
+                Ok(Update::Submitted { .. }) => {
+                    return Err("a submission without an account was accepted".to_owned());
+                }
                 Ok(_) => (),
-                Err(error) => panic!("update channel failed: {error}"),
-            }
-            if draft.is_some() && notice.is_some() {
-                break;
+                Err(error) => return Err(format!("update channel failed: {error}")),
             }
         }
-        (draft, notice)
     })
-    .await
-    .unwrap();
+    .await;
     drop(commands);
     serve.await.unwrap().unwrap();
 
-    let (text, attachments) = collected
-        .0
+    let (id, context, text, attachments, reason) = collected
+        .unwrap()
         .expect("a rejected submission returns the draft");
-    assert_eq!(text, "do the thing");
+    assert_eq!(id, submission_id);
+    assert_eq!(
+        context, None,
+        "no session could be created without an account"
+    );
+    assert_eq!(text, prompt);
     assert_eq!(attachments, vec![image()]);
     assert!(
-        collected
-            .1
-            .expect("the rejection is explained")
-            .contains("account")
+        reason.contains("account"),
+        "the rejection is explained: {reason}"
     );
 }
 
@@ -101,7 +117,7 @@ async fn a_rejected_submission_returns_the_full_draft() {
 #[tokio::test]
 async fn a_run_owned_by_a_sibling_terminal_is_remote_not_recovery() {
     let dir = root();
-    let base = dir.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(dir.path()).unwrap();
     let path = base.join("state");
     // Terminal one opens the state root and starts a run on the session.
     let owner = Store::open(&path).unwrap();
@@ -147,7 +163,7 @@ async fn a_run_owned_by_a_sibling_terminal_is_remote_not_recovery() {
 #[test]
 fn explicit_model_selects_its_provider_instead_of_an_unrelated_default_account() {
     let dir = root();
-    let base = dir.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(dir.path()).unwrap();
     let store = Store::open(&base.join("state")).unwrap();
     let claude = store
         .add_account(Provider::Claude, "Test", 1, None)
@@ -175,6 +191,7 @@ fn explicit_model_selects_its_provider_instead_of_an_unrelated_default_account()
         &config,
         None,
         Some(&codex_model.key()),
+        None,
     )
     .unwrap();
     assert_eq!(session.account, codex.id);
@@ -185,14 +202,88 @@ fn explicit_model_selects_its_provider_instead_of_an_unrelated_default_account()
             &base.join("work"),
             &config,
             Some(&claude.id),
-            Some(&codex_model.key())
+            Some(&codex_model.key()),
+            None
         )
         .is_err()
     );
     store.set_account_enabled(&claude.id, false).unwrap();
-    let session = kernel::new_session(&store, &base.join("work"), &config, None, None).unwrap();
+    let session =
+        kernel::new_session(&store, &base.join("work"), &config, None, None, None).unwrap();
     assert_eq!(session.account, codex.id);
     assert!(
-        kernel::new_session(&store, &base.join("work"), &config, Some(&claude.id), None).is_err()
+        kernel::new_session(
+            &store,
+            &base.join("work"),
+            &config,
+            Some(&claude.id),
+            None,
+            None
+        )
+        .is_err()
     );
+}
+
+/// When a usage limit stops a turn and nothing else can take the task, the
+/// terminal is told so in public words: the limited account, why each other
+/// account was passed over, and the earliest known reset.
+#[test]
+fn a_usage_limit_without_a_fallback_is_explained_not_silent() {
+    let now = 1_700_000_000_000;
+    let row = |id: &str, provider: Provider| AccountRow {
+        id: Id::new(id).unwrap(),
+        provider,
+        name: format!("{provider}/{id}"),
+        email: None,
+        subscription: "Max".into(),
+        remaining_percent: None,
+        resets_at_ms: None,
+        quota_blocked_until_ms: None,
+        runway: Estimate::unknown("quota_or_burn_unmeasured"),
+        busy: false,
+        active_runs: 0,
+        enabled: true,
+        authentication_required: false,
+    };
+    let view = View {
+        accounts: vec![
+            AccountRow {
+                remaining_percent: Some(0.0),
+                resets_at_ms: Some(now + 90 * 60_000),
+                ..row("limited", Provider::Claude)
+            },
+            AccountRow {
+                busy: true,
+                active_runs: 1,
+                ..row("working", Provider::Claude)
+            },
+            AccountRow {
+                enabled: false,
+                ..row("parked", Provider::Codex)
+            },
+        ],
+        models: vec![choice()],
+        ..View::default()
+    };
+    let credentialed = view.accounts.iter().map(|row| row.id.clone()).collect();
+    let notice = kernel::failover_unavailable_notice(&kernel::FailoverNoticeInput {
+        view: &view,
+        account: &Id::new("limited").unwrap(),
+        model: &choice(),
+        failure: Failure::AccountQuota,
+        tried: &BTreeSet::new(),
+        limited_accounts: &BTreeSet::new(),
+        admitted: &Provider::ALL.into_iter().collect(),
+        credentialed: &credentialed,
+        required_provider: None,
+        run_limit: 1,
+        now,
+    });
+    assert_eq!(
+        notice,
+        "Usage limit on claude · claude/limited · no other account is able to take the task now · 1 at its run limit · 1 disabled · earliest known reset in ~1h 30m"
+    );
+    for internal in ["lease", "custody", "eligible", "admitted", "credential"] {
+        assert!(!notice.contains(internal), "{notice}");
+    }
 }

@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
@@ -54,8 +54,8 @@ async function readBoundedCommandOutput(
   return Buffer.concat(chunks, length);
 }
 
-async function run(command: readonly string[], cwd: string): Promise<string> {
-  const child = Bun.spawn([...command], { cwd, stderr: "pipe", stdout: "pipe" });
+async function run(command: readonly string[], cwd: string, env?: NodeJS.ProcessEnv): Promise<string> {
+  const child = Bun.spawn([...command], { cwd, ...(env === undefined ? {} : { env }), stderr: "pipe", stdout: "pipe" });
   const kill = () => child.kill(9);
   let timedOut = false;
   const timer = setTimeout(() => {
@@ -191,8 +191,10 @@ export async function packageSmoke(tarballArgument?: string): Promise<void> {
       } catch { /* absent as required */ }
     }
     const bin = record(manifest.bin ?? {}, "packed bin");
-    if (Reflect.ownKeys(bin).length !== 1 || bin.xcb !== "dist/cli.js") {
-      problems.push(`packed bin must be exactly { xcb: "dist/cli.js" }`);
+    // The compatibility bin is deliberately not named `xcb`: a global install must
+    // never shadow the native binary that owns that name.
+    if (Reflect.ownKeys(bin).length !== 1 || bin["xcb-compat"] !== "dist/cli.js") {
+      problems.push(`packed bin must be exactly { "xcb-compat": "dist/cli.js" }`);
     }
     const exportsField = record(manifest.exports, "packed exports")["."];
     const exportPaths = typeof exportsField === "string" ? [exportsField] : Object.values(record(exportsField, "packed export entry"));
@@ -246,7 +248,8 @@ export async function packageSmoke(tarballArgument?: string): Promise<void> {
     await writeFile(
       join(consumer, "smoke.mjs"),
       [
-        `import { ${REQUIRED_EXPORTS.join(", ")} } from "${PACKAGE_NAME}";`,
+        `globalThis.fetch = async () => { throw new Error("SDK import attempted a network request"); };`,
+        `const { ${REQUIRED_EXPORTS.join(", ")} } = await import("${PACKAGE_NAME}");`,
         `const built = codexManagedStaticCatalog({ model: "smoke-model", catalog: { models: [{`,
         `  slug: "smoke-model", display_name: "Smoke", description: "Synthetic",`,
         `  supported_reasoning_levels: [{ effort: "medium", description: "Normal work" }],`,
@@ -293,11 +296,33 @@ export async function packageSmoke(tarballArgument?: string): Promise<void> {
       const installedCli = join(modules, "@hraness/xcb/dist/cli.js");
       const version = (await run([executable, installedCli, "--version"], consumer)).trim();
       if (version !== manifest.version) {
-        throw new Error(`Installed xcb --version returned ${version}, expected ${String(manifest.version)}`);
+        throw new Error(`Installed xcb-compat --version returned ${version}, expected ${String(manifest.version)}`);
       }
       const help = await run([executable, installedCli, "--help"], consumer);
-      if (!help.includes("xcb auth claude") || !help.includes("xcb doctor")) {
-        throw new Error("Installed xcb --help did not print the usage surface");
+      if (!help.includes("xcb-compat auth claude") || !help.includes("xcb-compat doctor") || help.includes("  xcb ")) {
+        throw new Error("Installed xcb-compat --help did not print the usage surface");
+      }
+      const productState = join(consumer, `update-must-not-open-${expectedRuntime}`);
+      // The real installed updater must work even when the product graph is
+      // unavailable. This detects an accidental eager import in a built shim.
+      const programs = (await readdir(dirname(installedCli))).filter(name => /^cli-program-[A-Za-z0-9]+\.js$/u.test(name));
+      if (programs.length !== 1) throw new Error("Expected one lazy compatibility product module");
+      const program = join(dirname(installedCli), programs[0]!);
+      const heldProgram = join(consumer, "held-cli-program.js");
+      await rename(program, heldProgram);
+      let update: Record<string, unknown>;
+      try {
+        update = record(JSON.parse(await run([executable, installedCli, "update", "status", "--json"], consumer,
+          { ...process.env, XCB_STATE: productState, HOME: consumer })), "installed update status");
+      } finally {
+        await rename(heldProgram, program);
+      }
+      if (update.package !== PACKAGE_NAME || update.currentVersion !== manifest.version
+        || update.status !== "unsupported" || update.supported !== false) {
+        throw new Error("Packed CLI must report a project installation without attempting to update it");
+      }
+      if (await access(productState).then(() => true, () => false)) {
+        throw new Error("The packed update command opened product state");
       }
     }
     console.log("XCB standalone package boundary verified under Bun and Node.");

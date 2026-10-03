@@ -24,7 +24,7 @@ export const CLI_CODEX_RUNTIME_VERSION = `codex-app-server:${CODEX_NATIVE_VERSIO
 /** The managed Codex boundary is qualified against this exact parent runtime. */
 export function cliCodexHostDiagnostic(): string | null {
   if (typeof Bun === "undefined" || Bun.version !== "1.3.14") {
-    return "Codex managed mode requires Bun 1.3.14. Launch xcb with Bun 1.3.14, then run `xcb doctor`; Node cannot run this qualified route.";
+    return "Codex managed mode requires Bun 1.3.14. Launch xcb-compat with Bun 1.3.14, then run `xcb-compat doctor`; Node cannot run this qualified route.";
   }
   if (process.platform !== "darwin" || process.arch !== "arm64") {
     return "Codex managed mode requires macOS arm64; this host has no qualified Codex sandbox.";

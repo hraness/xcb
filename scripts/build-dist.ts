@@ -1,4 +1,4 @@
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, readFile, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 const PACKAGE_ROOT = resolve(import.meta.dir, "..");
@@ -26,6 +26,9 @@ export async function buildDist(): Promise<void> {
   const outdir = join(PACKAGE_ROOT, "dist");
   await rm(outdir, { recursive: true, force: true });
   await mkdir(outdir, { recursive: true });
+  const manifest = JSON.parse(await readFile(join(PACKAGE_ROOT, "package.json"), "utf8")) as {
+    dependencies: Record<string, string>;
+  };
   // Node-targeted ESM also runs under Bun; the package keeps no runtime-specific imports.
   await run([
     process.execPath,
@@ -42,7 +45,10 @@ export async function buildDist(): Promise<void> {
     "esm",
     "--splitting",
     "--packages",
-    "external",
+    "bundle",
+    // Bundle the reviewed updater into the executable. The existing runtime
+    // packages retain their exact registry pins and external import boundary.
+    ...Object.keys(manifest.dependencies).flatMap(name => ["--external", name, "--external", `${name}/*`]),
   ]);
   await run([
     process.execPath,

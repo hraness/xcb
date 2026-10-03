@@ -2,7 +2,7 @@
 """Prepare public locked dependencies in the separately qualified XCB guest.
 
 The default is a no-download plan. No host package manager, Git, workspace code,
-configuration or credential is executed/read. Run through hra-host-run on macOS.
+configuration or credential is executed/read. Run through host-run on macOS.
 """
 import argparse
 import base64

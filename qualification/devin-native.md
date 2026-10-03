@@ -1,13 +1,13 @@
 # Native Devin boundary fixture
 
-This credential-free macOS fixture exercises Devin 3000.11.1, the native xcb
+This credential-free macOS fixture exercises Devin 3000.11.3, the native xcb
 stdio MCP helper, the real Rust ACP codec, and the production Seatbelt profile.
 Only the network clause changes: the fixture replaces provider TCP 443 and DNS
 with one loopback-only fake control plane. It never reads existing Devin account
 state, resumes a session, opens authentication, or sends traffic to a provider.
 
 Build the helper and the ignored runtime test using the repository's configured
-Rust toolchain (through `hra-host-run` when installed):
+Rust toolchain (through `host-run` when installed):
 
 ```sh
 cargo build -p xcb-cli --locked
@@ -47,12 +47,22 @@ and config writes, and web fetches. A positive scenario requires a brokered
 workspace write and read to succeed. Each permission-denied native effect gets
 a separate disposable process because Devin can end its turn immediately when
 permission is denied; the fixture still requires the failed native call to be
-observed. Every tool-bearing model request must advertise the exact checked-in
-native tool schemas. Automatic title requests advertise no tools and receive
+observed. xcb answers a permission request it refuses with Devin's offered
+`reject_once` choice; ACP's `cancelled` outcome is reserved for a cancelled
+prompt turn and is sent only when no one-time reject is offered. Each
+scenario's `permission_observations` records the offered option identities
+and kinds and the selected answer, never option names or tool details. Every
+tool-bearing model request must advertise the exact checked-in native tool
+schemas. Automatic title requests advertise no tools and receive
 static text without advancing the probes. The harness checks canaries never
 reach requests, native effects never appear, the immutable configuration
 survives, a PNG prompt is accepted, and every provider process group and bridge
 handler joins.
+
+A low-context-budget scenario also exercises Devin's started and completed
+compaction notifications during brokered tool calls. It verifies the same
+native denials and broker effects while treating compaction as informational:
+summaries never become task output, and pending calls retain their custody.
 
 In this exact Devin build, `notebook_read` can run without an ACP permission
 callback. Credentials therefore enter through the trusted environment adapter;
@@ -69,8 +79,17 @@ live acceptance before making daily-driver claims.
 
 ## Recorded boundary result
 
+The [2026-09-26 receipt](devin-native-3000.11.3-macos-arm64.json) passed all
+six scenarios for exact build 3000.11.3. Its complete observed native tool
+inventory matches the previously reviewed 3000.11.1 schemas. Candidate checks
+passed before admission changed; the recorded receipt then reran the default
+admitted path with freshly built helper and fixture binaries. Production keeps
+all three reviewed version/hash pairs, with no cross-version digest
+substitutions. This is credential-free boundary evidence, not live coding
+acceptance.
+
 The [2026-09-22 receipt](devin-native-3000.11.1-macos-arm64.json) passed all
-five scenarios for exact build 3000.11.1. Its complete observed native tool
+six scenarios for exact build 3000.11.1. Its complete observed native tool
 inventory matches the previously reviewed 3000.10.31 schemas. Candidate checks
 passed before admission changed; the recorded receipt then reran the default
 admitted path with freshly built helper and fixture binaries. Production keeps

@@ -1,13 +1,205 @@
+// These tests drive Unix permission bits, symlinks, or /bin/sh fixtures;
+// the Windows custody rules are covered by the platform tests.
+#![cfg(unix)]
 use std::{
     fs,
     os::unix::fs::{PermissionsExt, symlink},
+    path::Path,
 };
 use xcb_runtime::broker::Workspace;
+
+/// The mode a plain `File::create` takes under the test process umask —
+/// the same kernel-applied derivation workspace writes should use.
+fn default_file_mode(dir: &Path) -> u32 {
+    let probe = dir.join(".xcb-umask-probe");
+    fs::File::create(&probe).unwrap();
+    let mode = fs::metadata(&probe).unwrap().permissions().mode() & 0o777;
+    fs::remove_file(&probe).unwrap();
+    mode
+}
+
+/// The mode a plain `create_dir` takes under the test process umask.
+fn default_dir_mode(dir: &Path) -> u32 {
+    let probe = dir.join(".xcb-umask-probe-dir");
+    fs::create_dir(&probe).unwrap();
+    let mode = fs::metadata(&probe).unwrap().permissions().mode() & 0o777;
+    fs::remove_dir(&probe).unwrap();
+    mode
+}
+
+#[test]
+fn created_workspace_entries_take_the_process_umask() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = xcb_core::canonical(dir.path()).unwrap();
+    let root = base.join("work");
+    fs::create_dir(&root).unwrap();
+    let workspace = Workspace::open_with_coordination(&root, &base.join("coordination")).unwrap();
+    let file_mode = default_file_mode(&base);
+    let dir_mode = default_dir_mode(&base);
+    workspace.write("created.txt", "new", None).unwrap();
+    workspace.mkdir("made", false).unwrap();
+    workspace.mkdir("a/b", true).unwrap();
+    assert_eq!(
+        fs::metadata(root.join("created.txt"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        file_mode
+    );
+    for path in ["made", "a", "a/b"] {
+        assert_eq!(
+            fs::metadata(root.join(path)).unwrap().permissions().mode() & 0o777,
+            dir_mode,
+            "{path}"
+        );
+    }
+    // Replacing a file preserves its permission bits instead of
+    // re-deriving them from the umask.
+    fs::set_permissions(root.join("created.txt"), fs::Permissions::from_mode(0o640)).unwrap();
+    let read = workspace.read("created.txt").unwrap();
+    workspace
+        .write("created.txt", "again", Some(&read.revision))
+        .unwrap();
+    assert_eq!(
+        fs::metadata(root.join("created.txt"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o640
+    );
+}
+
+#[test]
+fn a_corrupted_coordination_database_fails_writes_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = xcb_core::canonical(dir.path()).unwrap();
+    let root = base.join("work");
+    fs::create_dir(&root).unwrap();
+    // A garbage file at the workspace's lock-database path must fail the
+    // journal-format check rather than locking an unknown file.
+    let coordination = base.join("coordination");
+    fs::create_dir(&coordination).unwrap();
+    fs::set_permissions(&coordination, fs::Permissions::from_mode(0o700)).unwrap();
+    let database = coordination.join(format!(
+        "{}.sqlite",
+        xcb_runtime::digest(root.to_str().unwrap().as_bytes())
+    ));
+    fs::write(&database, b"not sqlite at all").unwrap();
+    fs::set_permissions(&database, fs::Permissions::from_mode(0o600)).unwrap();
+    let workspace = Workspace::open_with_coordination(&root, &coordination).unwrap();
+    assert!(workspace.write("a.txt", "one", None).is_err());
+    assert!(!root.join("a.txt").exists());
+    assert!(workspace.mkdir("dir", false).is_err());
+    assert!(!root.join("dir").exists());
+    // Reads never needed the lock and keep working on the same workspace.
+    fs::write(root.join("ok.txt"), "fine").unwrap();
+    assert_eq!(workspace.read("ok.txt").unwrap().text, "fine");
+}
+
+/// A write that cannot be committed on a full filesystem reports an
+/// honest failure: never `Settled`, no staging residue when nothing was
+/// published, and a target that exists only with complete contents.
+#[cfg(target_os = "macos")]
+#[test]
+fn workspace_writes_on_a_full_filesystem_fail_without_false_settlement() {
+    use std::io::Read;
+    if std::process::Command::new("hdiutil")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let base = xcb_core::canonical(dir.path()).unwrap();
+    let image = base.join("full.dmg");
+    let mount = base.join("mount");
+    fs::create_dir(&mount).unwrap();
+    let run = |args: &[&str]| {
+        let output = std::process::Command::new("hdiutil")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "hdiutil {args:?}");
+    };
+    run(&[
+        "create",
+        "-size",
+        "4m",
+        "-fs",
+        "APFS",
+        "-volname",
+        "xcb-full",
+        image.to_str().unwrap(),
+    ]);
+    run(&[
+        "attach",
+        "-nobrowse",
+        "-mountpoint",
+        mount.to_str().unwrap(),
+        image.to_str().unwrap(),
+    ]);
+    let root = mount.join("work");
+    fs::create_dir(&root).unwrap();
+    let coordination = base.join("coordination");
+    let workspace = Workspace::open_with_coordination(&root, &coordination).unwrap();
+    // Fill the volume until small writes themselves fail, so the staged
+    // write or its commit has no space left; random bytes defeat
+    // transparent compression so the space is real.
+    let mut filler = vec![0u8; 64 * 1024];
+    fs::File::open("/dev/urandom")
+        .unwrap()
+        .read_exact(&mut filler)
+        .unwrap();
+    let mut full = false;
+    for index in 0..512 {
+        if fs::write(root.join(format!("filler-{index}")), &filler).is_err() {
+            full = true;
+            break;
+        }
+    }
+    assert!(full, "the test volume never filled");
+    // A failed 64 KiB write can leave nearly a whole chunk of slack; drain
+    // with small writes so less than one KiB remains before the broker write.
+    let tail = vec![0xabu8; 1024];
+    for index in 0..4096 {
+        if fs::write(root.join(format!("tail-{index}")), &tail).is_err() {
+            break;
+        }
+    }
+    let payload = "payload".repeat(1024);
+    let (result, effects) = workspace.call_observed(
+        "workspace_write",
+        &serde_json::json!({"path": "tight.txt", "text": payload}),
+    );
+    let failed = result.is_err();
+    let contents = fs::read_to_string(root.join("tight.txt")).ok();
+    let residue = fs::read_dir(&root).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".xcb-")
+    });
+    // The workspace's directory descriptor keeps the mount busy until it
+    // is dropped.
+    drop(workspace);
+    run(&["detach", mount.to_str().unwrap()]);
+    assert!(failed);
+    assert_ne!(effects, xcb_core::policy::EffectState::Settled);
+    // No staging residue is left behind, whatever the outcome was.
+    assert!(!residue);
+    if let Some(contents) = contents {
+        assert_eq!(contents, "payload".repeat(1024));
+    }
+}
 
 #[test]
 fn workspace_tools_are_descriptor_rooted_and_revision_checked() {
     let dir = tempfile::tempdir().unwrap();
-    let base = dir.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(dir.path()).unwrap();
     let root = base.join("work");
     fs::create_dir(&root).unwrap();
     fs::write(root.join("hello.txt"), "old").unwrap();
@@ -30,7 +222,7 @@ fn workspace_tools_are_descriptor_rooted_and_revision_checked() {
 #[test]
 fn workspace_symlinks_hardlinks_and_parent_paths_do_not_escape() {
     let dir = tempfile::tempdir().unwrap();
-    let base = dir.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(dir.path()).unwrap();
     fs::create_dir(base.join("work")).unwrap();
     fs::write(base.join("private.txt"), "private").unwrap();
     symlink(base.join("private.txt"), base.join("work/link")).unwrap();
@@ -50,7 +242,7 @@ fn workspace_symlinks_hardlinks_and_parent_paths_do_not_escape() {
 #[test]
 fn concurrent_workspace_writers_have_one_winner_and_preserve_permissions() {
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let root = base.join("work");
     fs::create_dir(&root).unwrap();
     for existing in [false, true] {
@@ -81,7 +273,11 @@ fn concurrent_workspace_writers_have_one_winner_and_preserve_permissions() {
         assert_eq!(winners, 1);
         assert_eq!(
             fs::metadata(root.join(name)).unwrap().permissions().mode() & 0o777,
-            if existing { 0o755 } else { 0o600 }
+            if existing {
+                0o755
+            } else {
+                default_file_mode(&base)
+            }
         );
     }
 }
@@ -99,16 +295,17 @@ fn native_mutations_wait_for_bun_and_node_locks_and_survive_owner_exit() {
         .map(move |operation| (runtime, operation))
     }) {
         let directory = tempfile::tempdir().unwrap();
-        let base = directory.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
         let root = base.join("work");
         fs::create_dir(&root).unwrap();
         fs::write(root.join("shared"), "original").unwrap();
         let coordination = base.join("coordination");
         let ready = base.join("ready");
-        let module = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../src/cli/write-coordination.ts")
-            .canonicalize()
-            .unwrap();
+        let module = xcb_core::canonical(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../src/cli/write-coordination.ts"),
+        )
+        .unwrap();
         let script = r#"
             import { pathToFileURL } from 'node:url';
             import { writeFile } from 'node:fs/promises';
@@ -206,7 +403,7 @@ fn native_mutations_wait_for_bun_and_node_locks_and_survive_owner_exit() {
 #[test]
 fn workspace_coordination_cannot_overlap_the_workspace() {
     let directory = tempfile::tempdir().unwrap();
-    let root = directory.path().canonicalize().unwrap();
+    let root = xcb_core::canonical(directory.path()).unwrap();
     assert!(Workspace::open_with_coordination(&root, &root.join("locks")).is_err());
     assert!(Workspace::open_with_coordination(&root, root.parent().unwrap()).is_err());
 }
@@ -214,7 +411,7 @@ fn workspace_coordination_cannot_overlap_the_workspace() {
 #[test]
 fn native_mcp_tool_calls_refuse_unknown_keys_and_tools() {
     let dir = tempfile::tempdir().unwrap();
-    let workspace = Workspace::open(&dir.path().canonicalize().unwrap()).unwrap();
+    let workspace = Workspace::open(&xcb_core::canonical(dir.path()).unwrap()).unwrap();
     assert!(
         workspace
             .call("shell", &serde_json::json!({"command":"true"}))
@@ -235,7 +432,7 @@ fn observed_workspace_effects_distinguish_rejection_from_publication() {
     use serde_json::json;
     use xcb_core::policy::EffectState;
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let root = base.join("work");
     fs::create_dir(&root).unwrap();
     let workspace = Workspace::open_with_coordination(&root, &base.join("coordination")).unwrap();
@@ -265,7 +462,7 @@ fn workspace_directory_and_file_operations_are_durable_revision_checked_and_no_c
     use std::os::unix::fs::MetadataExt;
     use xcb_core::policy::EffectState;
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let root = base.join("work");
     fs::create_dir(&root).unwrap();
     let workspace = Workspace::open_with_coordination(&root, &base.join("coordination")).unwrap();
@@ -318,7 +515,7 @@ fn workspace_mutations_reject_escape_links_special_files_and_stale_revisions_wit
     use serde_json::json;
     use xcb_core::policy::EffectState;
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let root = base.join("work");
     fs::create_dir(&root).unwrap();
     fs::create_dir(base.join("outside")).unwrap();
@@ -419,7 +616,7 @@ fn directory_partial_creation_remains_a_settled_effect_when_a_later_component_is
     use serde_json::json;
     use xcb_core::policy::EffectState;
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let root = base.join("work");
     fs::create_dir(&root).unwrap();
     let workspace = Workspace::open_with_coordination(&root, &base.join("coordination")).unwrap();
@@ -444,7 +641,7 @@ fn new_workspace_tool_schemas_are_closed_and_require_explicit_mutation_precondit
     use serde_json::json;
     use xcb_core::policy::EffectState;
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let root = base.join("work");
     fs::create_dir(&root).unwrap();
     let workspace = Workspace::open_with_coordination(&root, &base.join("coordination")).unwrap();
@@ -486,7 +683,7 @@ fn new_workspace_tool_schemas_are_closed_and_require_explicit_mutation_precondit
 #[test]
 fn concurrent_renames_never_clobber_the_destination_or_lose_a_losing_source() {
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let root = base.join("work");
     fs::create_dir(&root).unwrap();
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(12));
@@ -533,7 +730,7 @@ fn workspace_mutations_refuse_a_replaced_root_without_touching_either_tree() {
     use serde_json::json;
     use xcb_core::policy::EffectState;
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let root = base.join("work");
     fs::create_dir(&root).unwrap();
     fs::write(root.join("file"), "original").unwrap();
@@ -567,4 +764,148 @@ fn workspace_mutations_refuse_a_replaced_root_without_touching_either_tree() {
     );
     assert_eq!(fs::read_dir(root).unwrap().count(), 1);
     assert_eq!(fs::read_dir(base.join("moved")).unwrap().count(), 1);
+}
+
+#[test]
+fn workspace_list_truncates_at_the_entry_bound_instead_of_failing() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
+    let root = base.join("work");
+    fs::create_dir(&root).unwrap();
+    for index in 0..513 {
+        fs::write(root.join(format!("f-{index:04}")), "x").unwrap();
+    }
+    fs::create_dir(root.join("nested")).unwrap();
+    let workspace = Workspace::open_with_coordination(&root, &base.join("coordination")).unwrap();
+    let listing = workspace.list(".").unwrap();
+    assert_eq!(listing.entries.len(), 512);
+    assert!(listing.truncated);
+    // The page is the sorted prefix and includes directory kinds.
+    assert_eq!(listing.entries[0].name, "f-0000");
+    assert_eq!(listing.entries[0].kind, "file");
+    assert_eq!(listing.entries[511].name, "f-0511");
+    let small = workspace.list("nested").unwrap();
+    assert_eq!(small.entries.len(), 0);
+    assert!(!small.truncated);
+    // The tool-level call returns the same {entries, truncated} object.
+    let value = workspace
+        .call("workspace_list", &serde_json::json!({"path":"."}))
+        .unwrap();
+    assert_eq!(value["truncated"], true);
+    assert_eq!(value["entries"].as_array().unwrap().len(), 512);
+}
+
+#[test]
+fn workspace_search_matches_truncates_and_skips_binary_and_vendor_dirs() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
+    let root = base.join("work");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("needle.txt"), "first needle\nsecond needle\n").unwrap();
+    fs::write(root.join("binary.bin"), b"\xff\xfe needle \x00").unwrap();
+    for skipped in [".git", "node_modules", "target"] {
+        fs::create_dir(root.join(skipped)).unwrap();
+        fs::write(root.join(skipped).join("hidden.txt"), "needle").unwrap();
+    }
+    let workspace = Workspace::open_with_coordination(&root, &base.join("coordination")).unwrap();
+    let result = workspace.search(".", "needle").unwrap();
+    assert_eq!(result["truncated"], false);
+    let matches = result["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 2);
+    assert_eq!(matches[0]["path"], "needle.txt");
+    assert_eq!(matches[0]["line"], 1);
+    assert_eq!(matches[1]["line"], 2);
+    // A tree with a >512-entry directory truncates rather than failing.
+    fs::create_dir(root.join("bulk")).unwrap();
+    for index in 0..513 {
+        fs::write(root.join("bulk").join(format!("f-{index:04}")), "plain").unwrap();
+    }
+    let result = workspace.search(".", "needle").unwrap();
+    assert_eq!(result["truncated"], true);
+    assert_eq!(result["matches"].as_array().unwrap().len(), 2);
+    // A query absent everywhere is a settled empty result.
+    let result = workspace.search(".", "absent-everywhere").unwrap();
+    assert_eq!(result["matches"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn workspace_read_rejects_oversized_files_with_a_guided_tool_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
+    let root = base.join("work");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("big.txt"), "\n".repeat(256 * 1024)).unwrap();
+    let workspace = Workspace::open_with_coordination(&root, &base.join("coordination")).unwrap();
+    let error = workspace.read("big.txt").expect_err("oversized read");
+    assert!(
+        error.to_string().contains("exceeds the 128 KiB read limit"),
+        "{error}"
+    );
+    // A file at the read bound still succeeds and reports a revision.
+    fs::write(root.join("edge.txt"), "x".repeat(128 * 1024)).unwrap();
+    let edge = workspace.read("edge.txt").unwrap();
+    assert_eq!(edge.text.len(), 128 * 1024);
+    assert_eq!(edge.revision.len(), 64);
+    // The tool-level call returns the same guided error.
+    let error = workspace
+        .call("workspace_read", &serde_json::json!({"path":"big.txt"}))
+        .expect_err("oversized call");
+    assert!(error.to_string().contains("exceeds the 128 KiB read limit"));
+}
+
+/// Devin shows `tools/list` to its model as indented JSON and moves any tool
+/// output over 10,000 characters into a file that only a denied native tool
+/// could read. The listing it receives stays well inside that limit while
+/// naming the same tools, the same required arguments, and every argument.
+#[test]
+fn compact_tool_listing_fits_devin_output_limit_and_matches_the_broker() {
+    use serde_json::{Value, json};
+    use xcb_runtime::broker::{compact_descriptors, descriptors};
+    let full = descriptors();
+    let compact = compact_descriptors();
+    assert_eq!(compact.len(), full.len());
+    for (full, compact) in full.iter().zip(&compact) {
+        let name = compact["name"].as_str().unwrap();
+        assert_eq!(full["name"], compact["name"]);
+        assert_eq!(compact["inputSchema"]["type"], "object");
+        let required = compact["inputSchema"]
+            .get("required")
+            .cloned()
+            .unwrap_or_else(|| json!([]));
+        assert_eq!(required, full["inputSchema"]["required"], "{name}");
+        let description = compact["description"].as_str().unwrap();
+        assert!(
+            !description.is_empty() && description.len() <= 400,
+            "{name}"
+        );
+        for argument in full["inputSchema"]["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+        {
+            assert!(
+                description.contains(argument.as_str()),
+                "{name} description omits {argument}"
+            );
+        }
+    }
+    let result = serde_json::to_vec(&json!({"tools": compact})).unwrap();
+    assert!(
+        result.len() <= 6144,
+        "tools/list result is {} bytes",
+        result.len()
+    );
+    // The shape Devin's mcp_list_tools prints for one server. The pinned
+    // 3000.11.3 run recorded in commit 49f5453 / PR #247 established its
+    // 10,000-character spill-to-file threshold. Leave at least 1,808 bytes
+    // of headroom with the expanded host-tool inventory and full guidance.
+    let shown = serde_json::to_string_pretty(&json!([{
+        "server_name": "xcb", "tools": compact, "resources": Value::Array(vec![]),
+    }]))
+    .unwrap();
+    assert!(
+        shown.len() <= 8192,
+        "mcp_list_tools output is {} characters",
+        shown.len()
+    );
 }

@@ -1,3 +1,6 @@
+// These tests drive Unix permission bits, symlinks, or /bin/sh fixtures;
+// the Windows custody rules are covered by the platform tests.
+#![cfg(unix)]
 use std::fs;
 use std::io::ErrorKind;
 use std::os::unix::fs::{PermissionsExt, symlink};
@@ -8,7 +11,7 @@ use xcb_runtime::{Error, digest, private};
 
 fn state() -> (tempfile::TempDir, PathBuf) {
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap().join("state");
+    let base = xcb_core::canonical(directory.path()).unwrap().join("state");
     private::directory(&base).unwrap();
     (directory, base)
 }

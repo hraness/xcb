@@ -1,9 +1,12 @@
 # Managed Codex accounts
 
-This document describes the retained TypeScript host-integration API. Native
-Rust xcb uses a separate supervised device sign-in and explicit `auth.json`
-import; follow the [native Codex setup](README.md#connect-codex-on-macos).
-The compatibility CLI's Codex task route remains unqualified and disabled.
+> Maintainer reference for hosts that embed the TypeScript package. To connect a
+> Codex account to the `xcb` command, see
+> [accounts and models](https://xcb.sh/docs/providers#codex).
+
+This document describes the TypeScript host-integration API. Native xcb uses a
+separate supervised device sign-in and explicit `auth.json` import. The
+compatibility CLI's Codex task route is disabled until a host qualifies it.
 
 The managed account controller connects owner account controls to Codex's
 ChatGPT sign-in flow. It keeps account authentication separate from permission
@@ -68,7 +71,7 @@ refused and preserved for explicit recovery.
 A private journal records launch intent before spawning and retains process and
 stream cleanup evidence. Failed cleanup keeps the account lock and recovery state.
 An expired lease or stale lock does not authorize a replacement process. The
-helper is not registered with Textbutler's default host and does not enable replies.
+helper is not registered with TextButler's default host and does not enable replies.
 Filesystem cleanup can finish after the requested wait deadline. The transport
 retains and joins that work before releasing account custody.
 
@@ -119,10 +122,12 @@ variables. `qualification/linux-egress.ts` is the kernel-boundary evidence
 fixture for the bridge path, and `qualification/linux-loopback.ts` exercises
 the shipped forwarder end-to-end with stock `curl`; the `Qualification`
 workflow runs both on `ubuntu-24.04`. Note that Ubuntu's default AppArmor
-user-namespace restriction denies bwrap outright — the host must lift it
-(`kernel.apparmor_restrict_unprivileged_userns=0`) before any plan can run.
+user-namespace restriction denies bwrap outright; install xcb's exact-path
+profile for `/usr/bin/bwrap`
+(`crates/xcb-runtime/src/qualification/xcb-bwrap.apparmor`) before any plan
+can run.
 
-`createManagedCodexAccountFactory()` in Textbutler's `managed-codex.ts` composes
+`createManagedCodexAccountFactory()` in TextButler's `managed-codex.ts` composes
 the controller, stdio transport and process helper. Its admission inputs come
 from trusted host code, never owner JSON or contact files, and preserve the
 explicitly selected v1 or v2 profile. It accepts device-code
@@ -168,9 +173,9 @@ streams, writes, requests and notifications are joined. Lease expiry alone
 does not authorize reuse. An account-control process must finish that handoff
 before a separately admitted task process can reuse the account.
 
-## Textbutler integration and current limits
+## TextButler integration and current limits
 
-Textbutler's `createProviderHost()` and `startDaemon()` accept an optional trusted
+TextButler's `createProviderHost()` and `startDaemon()` accept an optional trusted
 `managedCodex` factory. The factory is called only for an explicit owner account
 operation. When supplied, the local control protocol and Mac account panel expose
 sign-in, cancellation, sign-out and checks. The panel shows authentication state
@@ -211,3 +216,40 @@ generated experimental schema to a `CodexProtocolManifest` using
 versions plus executable, schema and manifest digests. A caller-supplied hash
 alone is not admission evidence; mismatched runtime identity fails before
 initialization.
+
+## Native managed worker host commands
+
+This is a separate native xcb worker tool, not a change to the TypeScript
+account-process helper or the credential-free Codex model relay. The existing
+`workspace_exec` remains an offline staged Linux replay with filtered read-only
+Git and no host credentials. `workspace_host_exec` instead runs `argv` in the
+real worktree on the host with ordinary network access. Its input is
+`{argv,cwd,timeoutMs,network:"host"}` with the same bounded argv, relative cwd
+and 1–600000 ms deadline as `workspace_exec`; it does not accept an environment
+map. Git writes and remote effects happen immediately, not via the VM's
+revision-checked publication. Use this lane only for work the user authorized.
+
+Admission requires an active managed Codex session whose persisted task binding
+and workspace match the run, plus the trusted host process policy
+`XCB_HOST_CREDENTIALS_TASK=<exact task ID>`. The host must set this variable
+before launching xcb for that one task; a prompt, tool argument, workspace file
+or worker cannot set it. Other tasks and direct sessions are refused, including
+when they share an account or project. No fallback from an unavailable VM or a
+failed host command crosses this gate. The provider account's private home and
+authentication are not exported; the host reads its own `gh auth token`, global
+Git author identity and `SSH_AUTH_SOCK` at execution time. It clears the child
+environment and passes only selected host values through a bounded private
+mode-0600 env file, consumes and removes that file before launch, and zeroizes
+its credential buffers. The host GitHub token never belongs in argv, tool
+output or receipts; literal occurrences in successful captured output are
+redacted. Do not put tokens into shell arguments or project files.
+
+The host command is supervised as a process group, with a deadline and bounded
+output. A failed, cancelled or unproven command can have already changed local
+Git state or a remote; its tool intent and account custody remain unresolved
+rather than being retried or treated as a successful publication. Reconcile the
+real worktree and remote before any new write. This lane deliberately abandons
+the VM's filesystem and network confinement: arbitrary commands with host
+credentials can read other host files or send data to the network. The policy
+flag is therefore a trusted owner/operator decision, not a convenience mode
+for untrusted replay or a claim of OS isolation.

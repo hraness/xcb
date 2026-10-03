@@ -28,7 +28,6 @@ SCHEMA = "xcb.application-renewal.v1"
 MAX_JSON = 64 * 1024
 MAX_OUTPUT = 4 * 1024 * 1024
 DAY_MS = 24 * 60 * 60 * 1000
-RENEW_BEFORE_MS = 12 * 60 * 60 * 1000
 MAX_ATTEMPTS = 64
 MAX_EVIDENCE_BYTES = 1024 * 1024 * 1024
 EXPECTED_GENERATION_FLAG = "--expected-generation"
@@ -181,7 +180,7 @@ def group_absent(pid):
 def command(argv, cwd, env, timeout, maximum=MAX_OUTPUT):
     """Bound output, deadline and direct process group; retain failure intent.
 
-    TERM permits native XCB/HRA cleanup. Never signal a reaped, reusable PGID.
+    TERM permits native XCB cleanup. Never signal a reaped, reusable PGID.
     A missing native joined receipt is still uncertain even after wrapper exit.
     """
     mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGINT})
@@ -222,7 +221,9 @@ def command(argv, cwd, env, timeout, maximum=MAX_OUTPUT):
         if not reaped and child.returncode is None:
             try:
                 os.killpg(child.pid, signal.SIGTERM)
-            except ProcessLookupError:
+            except (ProcessLookupError, PermissionError):
+                # macOS answers EPERM, not ESRCH, for a group whose leader
+                # already exited; either way no live member remains to signal.
                 pass
             try:
                 child.wait(timeout=60)
@@ -230,7 +231,7 @@ def command(argv, cwd, env, timeout, maximum=MAX_OUTPUT):
                 # Keep durable intent. A forced exit is never recovery proof.
                 try:
                     os.killpg(child.pid, signal.SIGKILL)
-                except ProcessLookupError:
+                except (ProcessLookupError, PermissionError):
                     pass
                 child.wait(timeout=5)
         child.stdout.close()
@@ -344,8 +345,7 @@ def capabilities(binding, required=False, *, allow_busy=False):
     require(any(model.get("key") == binding["model"] for model in row["models"])
             and qualification.get("runtimeDigest") == binding["files"][binding["xcb"]]
             and digest(qualification.get("evidenceDigest"))
-            and type(qualification.get("expiresAt")) is int
-            and now_ms() < qualification["expiresAt"] <= now_ms() + DAY_MS, "qualification binding or expiry mismatch")
+            and qualification.get("expiresAt") is None, "qualification binding mismatch")
     return qualification
 
 
@@ -479,8 +479,9 @@ def run(directory, renew_now=False):
             record_status(directory, value)
             print(json.dumps(value))
             return
-        if not renew_now and qualification and qualification["expiresAt"] - now_ms() > RENEW_BEFORE_MS:
-            value = {"status": "current", "expires_at_ms": qualification["expiresAt"]}
+        # A qualification lasts until its binding changes, which removes it.
+        if not renew_now and qualification:
+            value = {"status": "current"}
             record_status(directory, value)
             print(json.dumps(value))
             return
@@ -511,14 +512,13 @@ def run(directory, renew_now=False):
                 and receipt["binding"]["credential_generation"] == binding["generation"]
                 and receipt["binding"]["models"] == [binding["model"]]
                 and receipt["observed_at_ms"] >= int(attempt.name.split("-")[0])
-                and receipt["expires_at_ms"] == qualification["expiresAt"]
                 and 0 < receipt["expires_at_ms"] - receipt["observed_at_ms"] <= DAY_MS,
-                "renewed receipt does not bind this attempt/account/expiry")
+                "renewed receipt does not bind this attempt/account")
         write_once(attempt / "result.json", encoded({"status": "renewed", "finished_at_ms": now_ms(),
                    "qualification": qualification, "qualifier_output_sha256": sha(raw)}))
         (directory / "pending.json").unlink()
         sync_directory(directory)
-        value = {"status": "renewed", "expires_at_ms": qualification["expiresAt"]}
+        value = {"status": "renewed"}
         record_status(directory, value)
         print(json.dumps(value))
 

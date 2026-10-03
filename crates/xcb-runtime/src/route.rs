@@ -15,7 +15,7 @@ use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
 use tokio::sync::watch;
 use xcb_core::{
     Id, MAX_TEXT_BYTES, Provider, display_text,
-    policy::{EffectState, Terminal, TurnFacts},
+    policy::{EffectState, Terminal, TurnFacts, no_reply},
     session::State,
 };
 
@@ -37,6 +37,8 @@ pub struct RouteTaskRequest {
     /// Absolute workspace directory for the routed turn.
     pub workspace: String,
     pub task: String,
+    #[serde(default)]
+    pub requirements: xcb_core::session::TaskRequirements,
     #[serde(default)]
     pub provider: Option<Provider>,
     /// Account id or exact observed name; resolved against local accounts.
@@ -221,7 +223,7 @@ impl RouteFailure {
     }
     fn settled_turn(mut self, session: Id, outcome: Outcome) -> Self {
         self.session = Some(session);
-        self.outcome = Some(outcome.facts);
+        self.outcome = Some(outcome.facts.reported(&outcome.text));
         if self.code == RouteCode::NeedsInput {
             self.text_truncated = Some(outcome.text.len() > MAX_TEXT_BYTES);
             self.text = Some(display_text(&outcome.text, MAX_TEXT_BYTES));
@@ -247,8 +249,7 @@ pub async fn dispatch(
     if *cancel.borrow() {
         return Err(Box::new(fail(RouteCode::Cancelled)));
     }
-    let workspace = PathBuf::from(&request.workspace)
-        .canonicalize()
+    let workspace = xcb_core::canonical(PathBuf::from(&request.workspace))
         .ok()
         .filter(|path| path.is_dir())
         .ok_or_else(|| Box::new(fail(RouteCode::InvalidRequest)))?;
@@ -277,6 +278,7 @@ pub async fn dispatch(
         &store,
         &config,
         routing::RouteRequest {
+            requirements: request.requirements,
             task: &request.task,
             required_provider,
             preferred_provider: None,
@@ -312,6 +314,7 @@ pub async fn dispatch(
         &config,
         Some(&route.account),
         Some(&route.model),
+        None,
     )
     .map_err(|error| {
         Box::new(
@@ -322,6 +325,19 @@ pub async fn dispatch(
             .routed(route.clone()),
         )
     })?;
+    store
+        .require_session_capabilities(&session.id, decision.requirements)
+        .map_err(|_| Box::new(fail(RouteCode::Unavailable).routed(route.clone())))?;
+    store
+        .set_session_route_pins(
+            &session.id,
+            xcb_core::session::RoutePins {
+                provider: request.provider,
+                account: account.as_ref().map(|account| account.id.clone()),
+                model: request.model.clone(),
+            },
+        )
+        .map_err(|_| Box::new(fail(RouteCode::Unavailable).routed(route.clone())))?;
     let outcome = kernel::execute_once(
         store,
         session.id.clone(),
@@ -335,7 +351,12 @@ pub async fn dispatch(
 }
 
 /// Classify a finished dispatch. Unsettled custody dominates every other
-/// outcome; a provider asking for input is reported, not answered.
+/// outcome; a provider asking for input is reported, not answered. A turn
+/// the provider completed without answer text or file changes is a
+/// `provider_error` whose outcome reports `failure: no_reply`: nothing says
+/// the task was done, so it must not read as `completed`. A turn that
+/// changed files keeps `completed` even without text, so a caller never
+/// repeats settled effects.
 fn settle(
     id: &Id,
     session: Id,
@@ -347,9 +368,9 @@ fn settle(
         Ok(outcome) => outcome,
         Err(error) => {
             let code = match error {
+                error if error.is_cleanup_unproven() => RouteCode::CustodyUnproven,
                 _ if cancelled => RouteCode::Cancelled,
                 Error::Conflict(_) => RouteCode::Busy,
-                Error::CleanupUnproven => RouteCode::CustodyUnproven,
                 Error::LaunchNotStarted(_)
                 | Error::Protocol(_)
                 | Error::CodexRpc { .. }
@@ -380,6 +401,7 @@ fn settle(
     } else if facts.terminal == Terminal::Completed
         && facts.failure.is_none()
         && outcome.state == State::Idle
+        && !no_reply(&outcome.text, &facts)
     {
         None
     } else {
@@ -423,6 +445,7 @@ mod tests {
 
     fn request() -> RouteTaskRequest {
         RouteTaskRequest {
+            requirements: Default::default(),
             version: 1,
             workspace: "/tmp".into(),
             task: "fix the failing test".into(),
@@ -479,13 +502,110 @@ mod tests {
         assert!(value.validate().is_err());
     }
 
+    fn settled(text: &str, effects: EffectState) -> Outcome {
+        let facts = TurnFacts {
+            terminal: Terminal::Completed,
+            joined: true,
+            effects,
+            pending_attention: false,
+            failure: None,
+        };
+        Outcome {
+            state: xcb_core::session::classify(text, &facts),
+            text: text.into(),
+            facts,
+            tool_calls: Some(1),
+            text_attention: false,
+            diagnostic: None,
+        }
+    }
+
+    fn fixture_route() -> RouteTaken {
+        RouteTaken {
+            provider: Provider::Devin,
+            account: Id::new("a_fixture").unwrap(),
+            model: "devin/swe-2-high".into(),
+            label: "SWE-2".into(),
+            reason: "fixture".into(),
+        }
+    }
+
+    fn settle_turn(outcome: Outcome) -> std::result::Result<RouteResponse, Box<RouteFailure>> {
+        settle(
+            &Id::new("route_fixture").unwrap(),
+            Id::new("s_fixture").unwrap(),
+            fixture_route(),
+            Ok(outcome),
+            false,
+        )
+    }
+
+    #[test]
+    fn uncertain_authentication_custody_dominates_cancellation() {
+        for cancelled in [false, true] {
+            for error in [
+                Error::CleanupUnproven,
+                Error::AuthUnproven("Claude sign-in cancelled"),
+            ] {
+                let failure = settle(
+                    &Id::new("route_fixture").unwrap(),
+                    Id::new("s_fixture").unwrap(),
+                    fixture_route(),
+                    Err(error),
+                    cancelled,
+                )
+                .unwrap_err();
+                assert_eq!(failure.code, RouteCode::CustodyUnproven);
+                let wire = serde_json::to_value(&failure).unwrap();
+                assert_eq!(wire["code"], "custody_unproven");
+                assert_eq!(wire["session"], "s_fixture");
+                assert!(wire.get("joined").is_none());
+                assert!(wire.get("effects").is_none());
+            }
+        }
+        let failure = settle(
+            &Id::new("route_fixture").unwrap(),
+            Id::new("s_fixture").unwrap(),
+            fixture_route(),
+            Err(Error::Unavailable("Claude sign-in cancelled before launch")),
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(failure.code, RouteCode::Cancelled);
+    }
+
+    #[test]
+    fn a_completed_turn_without_a_reply_or_changes_is_a_provider_error() {
+        for text in ["", "  \n"] {
+            let failure = settle_turn(settled(text, EffectState::None)).unwrap_err();
+            assert_eq!(failure.code, RouteCode::ProviderError);
+            assert_eq!(failure.status, "failed");
+            assert_eq!(failure.session.as_ref().unwrap().as_str(), "s_fixture");
+            let reported = serde_json::to_value(&failure.outcome).unwrap();
+            assert_eq!(reported["terminal"], "completed");
+            assert_eq!(reported["effects"], "none");
+            assert_eq!(reported["failure"], "no_reply");
+            // Only needs_input carries text; custody facts come from the turn.
+            assert!(failure.text.is_none() && failure.joined.is_none());
+        }
+        // Settled file changes without text, and a reply without changes,
+        // both remain completed.
+        let changed = settle_turn(settled("", EffectState::Settled)).unwrap();
+        assert_eq!(changed.status, "completed");
+        assert_eq!(changed.outcome.unwrap().failure, None);
+        let answered = settle_turn(settled("Fixed add.js.", EffectState::None)).unwrap();
+        assert_eq!(answered.status, "completed");
+        assert_eq!(answered.text.as_deref(), Some("Fixed add.js."));
+    }
+
     #[tokio::test]
     async fn an_empty_store_reports_no_eligible_route() {
         let directory = tempfile::tempdir().unwrap();
         let workspace = directory.path().join("work");
         std::fs::create_dir(&workspace).unwrap();
-        let store =
-            Arc::new(Store::open(&directory.path().canonicalize().unwrap().join("state")).unwrap());
+        let store = Arc::new(
+            Store::open(&xcb_core::canonical(directory.path()).unwrap().join("state")).unwrap(),
+        );
         let (_send, cancel) = watch::channel(false);
         let observer: Observer = Arc::new(|_| ());
         let mut request = request();
@@ -500,8 +620,9 @@ mod tests {
     #[tokio::test]
     async fn a_missing_workspace_is_an_invalid_request() {
         let directory = tempfile::tempdir().unwrap();
-        let store =
-            Arc::new(Store::open(&directory.path().canonicalize().unwrap().join("state")).unwrap());
+        let store = Arc::new(
+            Store::open(&xcb_core::canonical(directory.path()).unwrap().join("state")).unwrap(),
+        );
         let (_send, cancel) = watch::channel(false);
         let observer: Observer = Arc::new(|_| ());
         let mut request = request();

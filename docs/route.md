@@ -1,25 +1,26 @@
 # Route one task through xcb
 
-`xcb --json route` is the machine contract for another program — typically a
-coding agent — to hand xcb one task and get back one settled, routed turn. The
-caller chooses eligibility constraints only. Provider admission, account
-custody, workspace confinement and process settlement stay with the runtime.
+`xcb --json route` lets another program, usually a coding agent, hand xcb one
+task. xcb picks an account and model that can take it, runs one provider turn
+in the project folder you name, and prints one JSON result. The caller can
+narrow the choice; checking the provider build, holding the account, keeping
+the provider inside the folder, and confirming the provider stopped all stay
+with xcb.
 
-This is a different surface from `xcb run` and `xcb --json generate`:
+Three commands run one task at a time:
 
-- `run` is the human-facing one-shot: flags on the command line, saved direct
-  session, configured continuation and failover behavior.
-- `route` is the agent-facing one-shot: a closed JSON document on stdin,
-  account/model selection performed per request, exactly one provider turn,
-  no continuation.
-- `generate` is the application-facing contract: bounded ephemeral text with
-  no tools, workspace, or session at all.
+- `xcb run` is for people: flags on the command line, a saved direct session,
+  and your configured continuation and [failover](failover.md).
+- `xcb --json route` is for programs: one JSON request on stdin, account and
+  model chosen per request, exactly one provider turn, no continuation.
+- `xcb --json generate` is for applications: one model response with no tools,
+  folder, or session. See the [application API](application-api.md).
 
 ## Request
 
-Write one UTF-8 JSON document to stdin, close stdin, read bounded stdout.
-Unknown fields are rejected; every field except `version`, `workspace` and
-`task` is optional.
+Write one UTF-8 JSON document to stdin, close stdin, and read the result from
+stdout. The request is limited to 1 MiB. Unknown fields are rejected; every
+field except `version`, `workspace`, and `task` is optional.
 
 ```json
 {
@@ -34,30 +35,48 @@ Unknown fields are rejected; every field except `version`, `workspace` and
 }
 ```
 
-- `workspace` must be an existing directory. The routed turn's brokered file
-  tools stay inside it.
-- `provider` is a hard constraint: `claude`, `codex`, or `devin`.
-- `account` names one account by id or exact observed name. A `provider` that
-  disagrees with the account's provider is an `invalid_request`.
-- `model` is a full observed key as printed by `xcb models`; it restricts the
-  route to that model alone.
-- `timeoutMs` is 1,000–3,600,000. On expiry the turn is cancelled and the
-  response is emitted only after custody settles; the code is `deadline`.
-- `dryRun: true` selects and reports the route without creating a session,
-  reserving an account, or launching a provider.
+- `version` is `1`. Pin it: a changed request format ships under a new version.
+- `workspace` must be an existing folder. The provider's file tools stay inside
+  it.
+- `task` is 1 byte to 256 KiB of text without NUL.
+- `provider` is `claude`, `codex`, or `devin`, and requires that provider.
+- `account` names one account by ID or exact name. A `provider` that doesn't
+  match the account's provider is an `invalid_request`.
+- `model` is a full key as printed by `xcb models`, and limits the route to
+  that model.
+- `timeoutMs` is 1,000 to 3,600,000. When it expires, xcb cancels the turn and
+  answers only after the provider has stopped; the code is `deadline`.
+- `dryRun: true` reports the route without creating a session, holding an
+  account, or starting a provider.
+- `requirements: {"signed_in_browser": true}` requires Codex for an existing
+  signed-in browser; `requirements: {"desktop": true}` requires Codex for
+  native desktop application control. Both can be set together. Requirements
+  persist with the saved session, and a conflicting provider, account, or
+  model pin is rejected. See
+  [browser and shared tools](tools.md) for setup and handoff behavior.
 
-With no pins, routing chooses among admitted runtimes, credentialed enabled
-accounts that are idle and not within a known quota-blocked window, and observed
-fresh model entries. Candidates are scored by task class, relative quality,
-cost and latency Pareto layers, remaining usage, configured favorites, and an
-optional judge that can only order already-eligible routes. See
-[quota routing](quota-routing.md) for the selection rules.
+Pins limit the choice; xcb never falls back outside them. With no pins, xcb
+considers accounts with a supported provider build that are signed in,
+enabled, idle, and not at a known usage limit, with a model recently seen in
+the provider's catalog. It orders those models by your
+[preference stack](quota-routing.md#preference-stack), then by task type,
+relative quality, cost, and latency, remaining usage, and your configured
+favorites. An optional judge can require browser or desktop capabilities and
+rank eligible routes; it preserves your pins and the provider checks above.
+A pinned `model` that the stack's `never` list excludes fails with
+`unavailable`. See [quota routing](quota-routing.md) for the rules.
 
 ## Response
 
-A selected route reports `provider`, `account`, the full `model` key, a display
-`label`, and a bounded heuristic `reason` (deterministic or judge-selected, task
-class, Pareto layer, relative profile). A dry run returns:
+Top-level fields are camelCase; the fields inside `outcome` are snake_case.
+A chosen route reports `provider`, `account`, the full `model` key, a display
+`label`, and a short `reason` for a person to read: how xcb classified the
+task, the capability tier (`standard` or `frontier`), the model's relative
+quality, cost, and speed, and the preference-stack tier and pattern position
+that decided (`tier default · stack #1`). The route object has no other
+fields; the stack tier is reported only inside `reason`. It explains the
+choice and is not a price or quality guarantee. A public pricing promotion is named in the reason but never changes
+which route wins. A dry run returns:
 
 ```json
 {
@@ -69,13 +88,14 @@ class, Pareto layer, relative profile). A dry run returns:
     "account": "a_…",
     "model": "claude/sonnet/low",
     "label": "Sonnet · low",
-    "reason": "deterministic · balanced task · Pareto P1 · quality 92 · relative cost 55 · relative latency 50"
+    "reason": "deterministic fallback · classifier not available · standard tier · balanced task · Pareto P1 · quality 92 · relative cost 55 · relative latency 50"
   }
 }
 ```
 
-An executed route returns `status: "completed"` only for a completed, joined,
-settled turn with no pending attention:
+A run returns `status: "completed"` only when the turn completed, the provider
+process has exited, xcb has recorded its effects, nothing is waiting for an
+answer, and the turn produced answer text or file changes:
 
 ```json
 {
@@ -96,11 +116,16 @@ settled turn with no pending attention:
 }
 ```
 
-`session` reopens with `xcb resume <session>`; the routed turn is an ordinary
-saved direct session. `text` is bounded at 256 KiB and flagged with
-`textTruncated` when it exceeded the bound.
+In `outcome`, `joined: true` means the provider's processes have exited, and
+`effects` is `none`, `settled` (changes recorded), or `uncertain`. `session`
+identifies the durable record for later inspection through the JSON task and
+conversation projections; the removed interactive resume command is not part of
+the agent contract. `text` holds up to 256 KiB, and `textTruncated: true` marks
+a longer answer.
 
-Failures return a nonzero exit code and a closed object:
+## Failures
+
+A failure exits 1 and prints one object:
 
 ```json
 {
@@ -113,30 +138,29 @@ Failures return a nonzero exit code and a closed object:
 }
 ```
 
-Codes are `invalid_request`, `unavailable` (no eligible route, unknown account
-or model, unadmitted runtime, missing credentials), `busy` (account custody
-held by live work), `deadline` (the caller's `timeoutMs` expired), `cancelled`,
-`provider_error` (the turn failed or hit a provider limit; `outcome.terminal`
-and `outcome.failure` carry the exact detail, including `account_quota` /
-`model_quota`), `custody_unproven` (process exit or effect settlement could not
-be proven — the account record stays held; do not retry blindly), and
-`needs_input` (the provider stopped with a question; `text` carries it and the
-saved `session` can be resumed by a person).
+| Code | Meaning |
+| --- | --- |
+| `invalid_request` | The request is malformed, the folder doesn't exist, or stdin is a terminal. |
+| `unavailable` | No account can take the task: none qualify, the account or model is unknown, the provider build isn't supported, or credentials are missing. |
+| `busy` | The account is running another task. |
+| `deadline` | The caller's `timeoutMs` expired and the turn was cancelled. |
+| `cancelled` | SIGINT or SIGTERM cancelled the turn. |
+| `provider_error` | The turn failed, hit a provider limit, or ended without a reply or file changes; `outcome.terminal` and `outcome.failure` carry the detail, such as `account_quota`, `model_quota`, or `no_reply`, and a person can reopen `session`. |
+| `custody_unproven` | xcb couldn't confirm that the provider stopped or what it changed, so it keeps the account held. Don't retry blindly; see `xcb recover`. |
+| `needs_input` | The provider stopped with a question; `text` carries it, and a person can reopen `session`. |
 
 `joined: true` and `effects: "none"` appear only when the request provably
-launched no provider process. Once a session exists they come from the recorded
-`outcome` instead. SIGINT and SIGTERM request the same bounded cancellation and
-settlement path as `timeoutMs`; killing xcb does not prove the provider stopped.
+started no provider process. Once a session exists, those facts come from the
+recorded `outcome` instead. SIGINT and SIGTERM cancel the turn the same way
+`timeoutMs` does; killing xcb doesn't prove the provider stopped.
 
 ## Notes for agents
 
-- A `route` call is one turn. Multi-step plans, retries and route exclusion are
-  the caller's loop; quota-failed accounts are excluded by their own recorded
-  evidence on the next call.
-- The contract never accepts tools, hooks, system prompts, credentials, or
-  provider flags. Workspace tools are the brokered set every direct session
-  gets; nothing else crosses the boundary.
-- Discovery of accounts, models, quota state and provider admission uses the
-  existing read-only surfaces: `xcb --json accounts`, `xcb models`,
-  `xcb --json doctor`, and `xcb --json models route --task …` for the managed
-  intake preview.
+- One call is one turn. Multi-step plans, retries, and route exclusion are the
+  caller's loop; an account that failed on a usage limit is skipped on the
+  next call because xcb recorded the limit.
+- A request never carries tools, hooks, system prompts, credentials, or
+  provider flags. The provider gets the same file tools as any direct session.
+- Read accounts, models, usage limits, and provider status with
+  `xcb --json accounts`, `xcb --json models`, and `xcb --json doctor`.
+  `xcb --json models route --task …` previews the route the thread would pick.

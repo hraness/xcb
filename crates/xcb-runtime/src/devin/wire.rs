@@ -3,25 +3,33 @@ use super::{
     config::NATIVE_TOOLS,
 };
 use crate::{
-    Error, Result, broker, now_ms,
+    Error, Result, broker, category, now_ms,
     process::StreamProcess,
-    protocol::{Batch, Event, Prompt, Protocol},
+    protocol::{Batch, Event, INIT_DEADLINE, MAX_TURN_FRAMES, Prompt, Protocol},
+    wire_helpers::require,
 };
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
+    time::Duration,
 };
 use tokio::sync::oneshot;
 use xcb_core::{
     Id, MAX_JSON_BYTES, MAX_TEXT_BYTES, Provider,
     models::{Mode, ModelChoice},
     policy::Terminal,
-    usage::{COUNTER_LIMIT, Counters},
+    usage::Counters,
 };
 
 const MAX_CALLS: usize = 128;
-const MAX_FRAMES: usize = 16384;
+// Server-to-client request ids: every declared call may carry one permission
+// request, and denied foreign requests (any method) are counted here too, so
+// this bound is deliberately wider than MAX_CALLS.
+const MAX_CALLBACKS: usize = 8 * MAX_CALLS;
+// Backstop only: the host ends a turn gracefully at MAX_TURN_FRAMES, and this
+// count also covers initialization traffic, so it must never trip first.
+const MAX_FRAMES: usize = 2 * MAX_TURN_FRAMES;
 // Match the native catalog/store bound; the observed live catalog has 385 choices.
 const MAX_MODEL_CHOICES: usize = 4096;
 // ACP can carry the same 10 MiB image accepted by the attachment importer.
@@ -29,6 +37,13 @@ const MAX_MODEL_CHOICES: usize = 4096;
 const MAX_WIRE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_IMAGE_BASE64: usize = (10 * 1024 * 1024_usize).div_ceil(3) * 4;
 const MAX_PROMPT_BYTES: usize = 1024 * 1024;
+/// Prepended to every tool-enabled prompt so the model has each workspace
+/// tool's call shape before its first call. Devin's own instructions still
+/// ask it to list a server's tools first; [`broker::compact_descriptors`]
+/// keeps that listing short enough to show in full. A denied native tool
+/// ends Devin's turn, so the guide also says those tools are blocked. Each
+/// `name {arguments}` pair lists that tool's required arguments.
+const TOOL_GUIDE: &str = "Use the xcb MCP server for all project access: call mcp_call_tool with server_name \"xcb\", tool_name and arguments. Tools and their required arguments: workspace_list {path} (\".\" is the project root); workspace_read {path} (returns text and revision); workspace_search {path, query}; workspace_write {path, text, expectedRevision} (null for a new file, otherwise the current revision from workspace_read or your last write); workspace_mkdir {path, parents}; workspace_remove {path, expectedRevision}; workspace_rename {from, to, expectedRevision}; workspace_exec {argv, cwd, timeoutMs, network} (network must be \"none\"). Native file, shell and web tools are blocked, and calling one can end your turn. End with a short reply that says what you changed.";
 
 pub(crate) struct DevinOptions {
     /// Disposable empty process directory, never the consumer workspace.
@@ -42,6 +57,7 @@ struct Call {
     name: String,
     arguments: Value,
     approved: bool,
+    denied: bool,
     bridged: bool,
     replied: bool,
     finished: bool,
@@ -73,17 +89,32 @@ pub(crate) struct DevinProtocol {
     mcp_proposed_version: Option<String>,
     #[cfg(test)]
     mcp_metadata_seen: bool,
-    listed: bool,
+    #[cfg(test)]
+    unexpected_notification: Option<String>,
+    #[cfg(test)]
+    compaction_observations: Vec<Value>,
+    /// Offered option identities and kinds with the selected outcome, so the
+    /// native fixture can show which answer Devin continued after.
+    #[cfg(test)]
+    permission_observations: Vec<Value>,
+    #[cfg(test)]
+    mode_observations: Vec<Value>,
+    #[cfg(test)]
+    tool_sequence: Vec<Value>,
+    /// Bypass has not passed native qualification. Only the credential-free
+    /// test fixture may request it; production always selects accept-edits.
+    #[cfg(test)]
+    candidate_bypass: bool,
+    mode: &'static str,
+    mode_confirmed: bool,
     output_tokens: u64,
+    /// A tool call ran since the last answer text, so the next answer text
+    /// starts a new paragraph instead of running into the previous one.
+    text_break: bool,
+    /// Per-request initialization deadline; tests shorten it.
+    init_deadline: Duration,
 }
 
-fn require(ok: bool, reason: &'static str) -> Result<()> {
-    if ok {
-        Ok(())
-    } else {
-        Err(Error::Protocol(reason))
-    }
-}
 // Provider error messages/data may contain credentials or private paths. Only
 // the host-selected operation, numeric code, and fixed category can leave here.
 fn initialization_response(value: &Value, id: u64, method: &'static str) -> Result<Value> {
@@ -104,9 +135,9 @@ fn initialization_response(value: &Value, id: u64, method: &'static str) -> Resu
         let resource_limit = error["code"].as_i64() == Some(-32011)
             || error["data"]["cognition.ai/errorKind"].as_str() == Some("resource_exhausted");
         let category = if resource_limit {
-            "provider quota or resource limit reached"
+            category::DEVIN_RESOURCE_LIMIT
         } else if contains(&["certificate", "tls", "ssl"]) {
-            "TLS certificate or transport failure"
+            category::TLS
         } else if contains(&[
             "unauthorized",
             "unauthenticated",
@@ -116,7 +147,7 @@ fn initialization_response(value: &Value, id: u64, method: &'static str) -> Resu
             "invalid token",
         ]) || error["code"].as_i64() == Some(-32000) && message.contains("auth required")
         {
-            "authentication rejected; reconnect this account"
+            category::AUTHENTICATION
         } else if contains(&["permission denied", "operation not permitted"]) {
             "local provider access denied"
         } else if contains(&[
@@ -127,7 +158,7 @@ fn initialization_response(value: &Value, id: u64, method: &'static str) -> Resu
             "timed out",
             "timeout",
         ]) {
-            "provider request or network failure"
+            category::NETWORK
         } else {
             "provider rejected the operation"
         };
@@ -141,39 +172,30 @@ fn initialization_response(value: &Value, id: u64, method: &'static str) -> Resu
 }
 
 fn text(value: &Value, max: usize) -> Result<&str> {
-    value
-        .as_str()
-        .filter(|s| s.len() <= max)
-        .ok_or(Error::Protocol("Devin text bound"))
+    crate::wire_helpers::text(value, max, "Devin text bound")
 }
 fn identity(value: &Value) -> Result<String> {
-    let s = text(value, 160)?;
-    require(
-        !s.is_empty() && !s.chars().any(char::is_control),
-        "Devin identity",
-    )?;
-    Ok(s.to_owned())
+    crate::wire_helpers::identity(value, "Devin text bound", "Devin identity")
 }
 fn rpc_key(id: &Value) -> Result<String> {
-    if id.is_string() {
-        identity(id)?;
-    } else {
-        require(id.as_i64().is_some(), "Devin RPC identity")?;
-    }
-    Ok(serde_json::to_string(id)?)
+    crate::wire_helpers::rpc_key(
+        id,
+        "Devin text bound",
+        "Devin identity",
+        "Devin RPC identity",
+    )
 }
 fn closed(value: &Value, keys: &[&str]) -> Result<()> {
-    let o = value.as_object().ok_or(Error::Protocol("Devin object"))?;
-    require(
-        o.len() <= 256 && o.keys().all(|k| keys.contains(&k.as_str())),
+    crate::wire_helpers::closed(
+        value,
+        keys,
+        "Devin object",
+        "Devin unknown field",
         "Devin unknown field",
     )
 }
 fn counter(value: &Value) -> Result<u64> {
-    value
-        .as_u64()
-        .filter(|n| *n <= COUNTER_LIMIT)
-        .ok_or(Error::Protocol("Devin token counter"))
+    crate::wire_helpers::counter(value, "Devin token counter")
 }
 
 pub fn parse_models(result: &Value, observed_at_ms: u64) -> Result<Vec<ModelChoice>> {
@@ -223,7 +245,7 @@ pub fn parse_models(result: &Value, observed_at_ms: u64) -> Result<Vec<ModelChoi
 }
 
 impl DevinProtocol {
-    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    #[cfg_attr(any(windows, not(any(target_os = "macos", test))), allow(dead_code))]
     pub(crate) fn new(options: DevinOptions, bridge: Option<DevinBridge>) -> Result<Self> {
         options.model.validate()?;
         require(
@@ -270,9 +292,32 @@ impl DevinProtocol {
             mcp_proposed_version: None,
             #[cfg(test)]
             mcp_metadata_seen: false,
-            listed: false,
+            #[cfg(test)]
+            unexpected_notification: None,
+            #[cfg(test)]
+            compaction_observations: Vec::new(),
+            #[cfg(test)]
+            permission_observations: Vec::new(),
+            #[cfg(test)]
+            mode_observations: Vec::new(),
+            #[cfg(test)]
+            tool_sequence: Vec::new(),
+            #[cfg(test)]
+            candidate_bypass: false,
+            mode: "accept-edits",
+            mode_confirmed: false,
             output_tokens: 0,
+            text_break: false,
+            init_deadline: INIT_DEADLINE,
         })
+    }
+
+    fn target_mode(&self) -> &'static str {
+        #[cfg(test)]
+        if self.candidate_bypass {
+            return "bypass";
+        }
+        "accept-edits"
     }
     fn prompt_wire(&self, prompt: Prompt, id: u64) -> Result<Value> {
         if prompt.text.len() > MAX_PROMPT_BYTES {
@@ -281,10 +326,7 @@ impl DevinProtocol {
             ));
         }
         let text = if self.options.tools {
-            format!(
-                "{}\n\nUse only the xcb MCP server for workspace access. Native tools have no workspace authority. List the xcb tools before calling them.\n\n{}",
-                self.instructions, prompt.text
-            )
+            format!("{}\n\n{TOOL_GUIDE}\n\n{}", self.instructions, prompt.text)
         } else {
             format!("{}\n\n{}", self.instructions, prompt.text)
         };
@@ -324,6 +366,31 @@ impl DevinProtocol {
             "Devin frame bound",
         )?;
         let value: Value = serde_json::from_slice(bytes)?;
+        #[cfg(test)]
+        if let Some(options) = value
+            .pointer("/result/configOptions")
+            .and_then(Value::as_array)
+            && self.mode_observations.len() < 32
+        {
+            for option in options.iter().filter(|o| o["id"] == "mode") {
+                self.mode_observations.push(json!({
+                    "current": option["currentValue"],
+                    "choices": option["options"].as_array().map(|choices| choices.iter().map(|choice| choice["value"].clone()).collect::<Vec<_>>()),
+                    "current_mode_id": value.pointer("/result/modes/currentModeId"),
+                }));
+            }
+        }
+        #[cfg(test)]
+        if value
+            .pointer("/params/update/sessionUpdate")
+            .and_then(Value::as_str)
+            == Some("current_mode_update")
+            && self.mode_observations.len() < 32
+        {
+            self.mode_observations.push(
+                json!({"current_mode_update": value.pointer("/params/update/currentModeId")}),
+            );
+        }
         closed(
             &value,
             &["jsonrpc", "id", "method", "params", "result", "error"],
@@ -358,27 +425,33 @@ impl DevinProtocol {
         process
             .send(&json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
             .await?;
-        for _ in 0..1024 {
-            let packet = self.packet(process).await?;
-            match packet {
-                Packet::Mcp(request) => {
-                    let events = self.mcp(request)?;
-                    require(events.is_empty(), "Devin tool during initialization")?;
-                }
-                Packet::Acp(bytes) => {
-                    let v = self.envelope(&bytes)?;
-                    if v.get("method").is_none() {
-                        return initialization_response(&v, id, method);
+        // A session that never answers must not hold the account lease for
+        // the whole turn deadline; the caller joins the process afterwards.
+        tokio::time::timeout(self.init_deadline, async {
+            for _ in 0..1024 {
+                let packet = self.packet(process).await?;
+                match packet {
+                    Packet::Mcp(request) => {
+                        let events = self.mcp(request)?;
+                        require(events.is_empty(), "Devin tool during initialization")?;
                     }
-                    let (events, replies) = self.accept(v)?;
-                    require(events.is_empty(), "Devin early event")?;
-                    for reply in replies {
-                        process.send(&reply).await?;
+                    Packet::Acp(bytes) => {
+                        let v = self.envelope(&bytes)?;
+                        if v.get("method").is_none() {
+                            return initialization_response(&v, id, method);
+                        }
+                        let (events, replies) = self.accept(v)?;
+                        require(events.is_empty(), "Devin early event")?;
+                        for reply in replies {
+                            process.send(&reply).await?;
+                        }
                     }
                 }
             }
-        }
-        Err(Error::Protocol("Devin initialization frame bound"))
+            Err(Error::Protocol("Devin initialization frame bound"))
+        })
+        .await
+        .map_err(|_| Error::Unavailable("Devin initialization timed out"))?
     }
     async fn packet(&mut self, process: &mut StreamProcess) -> Result<Packet> {
         if let Some(bridge) = &mut self.bridge {
@@ -415,10 +488,7 @@ impl DevinProtocol {
                     model = true;
                 }
                 "mode" => {
-                    require(
-                        option["currentValue"] == "accept-edits",
-                        "Devin mode changed",
-                    )?;
+                    require(option["currentValue"] == self.mode, "Devin mode changed")?;
                     mode = true;
                 }
                 _ => (),
@@ -426,41 +496,69 @@ impl DevinProtocol {
         }
         require(model && mode, "Devin model/mode metadata missing")
     }
-    fn permission(&mut self, p: &Value) -> Result<bool> {
+    /// Answers one permission request and reports whether it was allowed.
+    /// Only the one-time allow for an exact, still-unapproved broker
+    /// declaration is ever selected. Every other request selects the offered
+    /// one-time reject, so Devin reports the refusal to the model and the
+    /// turn can continue with broker tools. ACP reserves `cancelled` for a
+    /// cancelled prompt turn; it is sent only when no one-time reject is
+    /// offered. `reject_always` is never chosen, because it asks Devin to
+    /// remember a rule in configuration that xcb keeps immutable. A reject
+    /// grants nothing: a rejected declaration stays ineligible, and native
+    /// tools have no workspace access.
+    fn permission(&mut self, p: &Value) -> Result<(bool, Value)> {
         self.session_scope(p)?;
         require(
             self.ready && !self.completed,
             "Devin permission outside turn",
         )?;
         let id = identity(&p["toolCall"]["toolCallId"])?;
+        require(
+            self.calls.contains_key(&id),
+            "Devin permission before declaration",
+        )?;
         let options = p["options"]
             .as_array()
             .filter(|v| v.len() <= 32)
             .ok_or(Error::Protocol("Devin permission options"))?;
         let mut seen = BTreeSet::new();
+        let mut reject = None;
         for option in options {
+            let option_id = identity(&option["optionId"])?;
             require(
-                seen.insert(identity(&option["optionId"])?),
+                seen.insert(option_id.clone()),
                 "Devin duplicate permission choice",
             )?;
+            if reject.is_none() && option["kind"] == "reject_once" {
+                reject = Some(option_id);
+            }
         }
         let allow = options
             .iter()
             .any(|o| o["optionId"] == "allow_once" && o["kind"] == "allow_once");
-        let Some(call) = self.calls.get_mut(&id) else {
-            return Ok(false);
-        };
-        if self.options.tools
+        if let Some(call) = self.calls.get_mut(&id)
+            && self.options.tools
             && self.broker_names.contains(&call.name)
             && !call.approved
+            && !call.denied
             && !call.finished
             && allow
         {
             call.approved = true;
-            Ok(true)
-        } else {
-            Ok(false)
+            return Ok((true, json!({"outcome":"selected","optionId":"allow_once"})));
         }
+        if let Some(call) = self.calls.get_mut(&id)
+            && !call.approved
+        {
+            call.denied = true;
+        }
+        Ok((
+            false,
+            match reject {
+                Some(option_id) => json!({"outcome":"selected","optionId":option_id}),
+                None => json!({"outcome":"cancelled"}),
+            },
+        ))
     }
     /// Pure ACP transition. A model can name a native tool, but this creates
     /// no host capability. Any completed native effect is a protocol failure.
@@ -486,14 +584,29 @@ impl DevinProtocol {
                 Some("refusal") => Terminal::Failed,
                 _ => return Err(Error::Protocol("Devin stop reason")),
             };
+            // A host-side pending reply is never abandoned. Only a completed
+            // turn must have settled every approved call; a cancelled, refused
+            // or limited turn abandons the rest so its real classification
+            // survives instead of becoming a protocol error.
             require(
-                self.pending.is_empty()
-                    && self
-                        .calls
-                        .values()
-                        .all(|c| !c.approved || (c.bridged && c.replied && c.finished)),
+                self.pending.is_empty(),
                 "Devin result before broker settlement",
             )?;
+            let unsettled = self
+                .calls
+                .values()
+                .filter(|c| c.approved && !(c.bridged && c.replied && c.finished))
+                .count();
+            if terminal == Terminal::Completed {
+                require(unsettled == 0, "Devin result before broker settlement")?;
+            } else if unsettled > 0 {
+                for call in self.calls.values_mut() {
+                    call.finished = true;
+                }
+                events.push(Event::Diagnostic(crate::runner::Diagnostic::notice(
+                    "Devin ended the turn with unsettled tool calls; they were abandoned",
+                )));
+            }
             let mut models = Vec::new();
             if let Some(u) = r.get("usage").filter(|v| !v.is_null()) {
                 let input = counter(&u["inputTokens"])?;
@@ -526,13 +639,30 @@ impl DevinProtocol {
         let p = &v["params"];
         if let Some(id) = v.get("id") {
             require(
-                self.callback_ids.len() < 1024 && self.callback_ids.insert(rpc_key(id)?),
+                self.callback_ids.len() < MAX_CALLBACKS && self.callback_ids.insert(rpc_key(id)?),
                 "Devin duplicate callback",
             )?;
             if method == "session/request_permission" {
-                let allow = self.permission(p)?;
-                outgoing.push(json!({"jsonrpc":"2.0","id":id,"result":{"outcome":if allow {json!({"outcome":"selected","optionId":"allow_once"})}else{json!({"outcome":"cancelled"})}}}));
-                if !allow {
+                let (allow, outcome) = self.permission(p)?;
+                #[cfg(test)]
+                if self.permission_observations.len() < 64 {
+                    // `permission` validated these identities; option names
+                    // and tool details stay out of the fixture evidence.
+                    let offered: Vec<Value> = p["options"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|option| json!({"optionId":option["optionId"],"kind":option["kind"].as_str().filter(|kind| kind.len() <= 32)}))
+                        .collect();
+                    self.permission_observations
+                        .push(json!({"offered":offered,"selected":outcome}));
+                }
+                // A one-time reject tells the model and the turn continues, so
+                // its reply decides the outcome. Only a cancelled request ends
+                // the turn waiting on a person.
+                let cancelled = outcome["outcome"] == "cancelled";
+                outgoing.push(json!({"jsonrpc":"2.0","id":id,"result":{"outcome":outcome}}));
+                if !allow && cancelled {
                     events.push(Event::Attention);
                 }
             } else {
@@ -541,7 +671,36 @@ impl DevinProtocol {
             }
             return Ok((events, outgoing));
         }
-        if method == "session/update" {
+        if method == "_cognition.ai/compaction" {
+            self.session_scope(p)?;
+            require(
+                self.ready && !self.completed && self.prompt_id.is_some(),
+                "Devin compaction outside turn",
+            )?;
+            // Exact 3000.11.1 synthetic trace: started carries no summary;
+            // completed carries a bounded summary. These are informational:
+            // never reset tool/callback custody or interpret summary as output.
+            match p["status"].as_str() {
+                Some("started") => closed(p, &["sessionId", "status"])?,
+                Some("completed") => {
+                    closed(p, &["sessionId", "status", "summary"])?;
+                    text(&p["summary"], MAX_TEXT_BYTES)?;
+                }
+                _ => return Err(Error::Protocol("Devin unsupported compaction status")),
+            }
+            #[cfg(test)]
+            {
+                require(
+                    self.compaction_observations.len() < 64,
+                    "fixture compaction bound",
+                )?;
+                self.compaction_observations.push(json!({
+                    "status":p["status"],
+                    "summary_bytes":p["summary"].as_str().map(str::len),
+                    "session_matched":true,
+                }));
+            }
+        } else if method == "session/update" {
             if self.session.is_none() {
                 return Ok((events, outgoing));
             }
@@ -561,8 +720,14 @@ impl DevinProtocol {
                         u["content"]["type"] == "text",
                         "Devin unsupported output content",
                     )?;
-                    let delta = text(&u["content"]["text"], MAX_TEXT_BYTES)?.to_owned();
+                    let mut delta = text(&u["content"]["text"], MAX_TEXT_BYTES)?.to_owned();
                     let thinking = u["sessionUpdate"] == "agent_thought_chunk";
+                    if !thinking && self.text_break && !self.text.is_empty() && !delta.is_empty() {
+                        delta.insert_str(0, "\n\n");
+                    }
+                    if !thinking && !delta.is_empty() {
+                        self.text_break = false;
+                    }
                     if !thinking {
                         require(
                             self.text.len() + delta.len() <= MAX_TEXT_BYTES,
@@ -576,6 +741,7 @@ impl DevinProtocol {
                     });
                 }
                 Some("tool_call") => {
+                    self.text_break = true;
                     require(
                         self.ready && !self.completed && self.calls.len() < MAX_CALLS,
                         "Devin tool outside turn",
@@ -606,12 +772,16 @@ impl DevinProtocol {
                     };
                     let arguments = u.get("rawInput").cloned().unwrap_or_else(|| json!({}));
                     require(arguments.is_object(), "Devin tool argument object")?;
+                    #[cfg(test)]
+                    self.tool_sequence
+                        .push(json!({"event":"declare","id":id,"name":name}));
                     self.calls.insert(
                         id,
                         Call {
                             name,
                             arguments,
                             approved: false,
+                            denied: false,
                             bridged: false,
                             replied: false,
                             finished: false,
@@ -661,7 +831,8 @@ impl DevinProtocol {
                 Some("config_option_update") if self.ready => self.validate_options(u)?,
                 Some("config_option_update") => (),
                 Some("current_mode_update") => {
-                    require(u["currentModeId"] == "accept-edits", "Devin mode drift")?
+                    require(u["currentModeId"] == self.mode, "Devin mode drift")?;
+                    self.mode_confirmed = true;
                 }
                 Some("usage_update") => {
                     if let Some(output) = u.get("outputTokens").filter(|v| !v.is_null()) {
@@ -675,10 +846,15 @@ impl DevinProtocol {
                 _ => return Err(Error::Protocol("Devin unknown session update")),
             }
         // ACP reserves underscore-prefixed methods for extensions and says to
-        // ignore unrecognized notifications. Requests were handled above;
-        // these bounded, id-less frames grant no authority and change no state.
+        // ignore unrecognized notifications. Requests and known compaction
+        // notifications were handled above; these bounded, id-less frames
+        // grant no authority and change no state.
         // https://agentclientprotocol.com/protocol/v1/extensibility
         } else if !method.starts_with('_') {
+            #[cfg(test)]
+            {
+                self.unexpected_notification = Some(method);
+            }
             return Err(Error::Protocol("Devin unsupported notification"));
         }
         Ok((events, outgoing))
@@ -741,13 +917,16 @@ impl DevinProtocol {
             }
             "tools/list" => {
                 require(self.mcp_initialized, "Devin MCP uninitialized")?;
-                self.listed = true;
-                json!({"tools":broker::descriptors()})
+                json!({"tools":broker::compact_descriptors()})
             }
             "ping" => json!({}),
             "tools/call" => {
+                // MCP does not require tools/list before tools/call, and Devin
+                // lists lazily: a model that already knows a tool from the
+                // prompt's guide calls it directly. Authority still comes only
+                // from one exact, approved and unconsumed declaration below.
                 require(
-                    self.ready && !self.completed && self.mcp_initialized && self.listed,
+                    self.ready && !self.completed && self.mcp_initialized,
                     "Devin MCP call before admission",
                 )?;
                 closed(&v["params"], &["name", "arguments", "_meta"])?;
@@ -769,11 +948,16 @@ impl DevinProtocol {
                     self.broker_names.contains(&name) && arguments.is_object(),
                     "Devin MCP tool authority",
                 )?;
+                #[cfg(not(test))]
+                let bypass_fixture = false;
+                #[cfg(test)]
+                let bypass_fixture =
+                    self.candidate_bypass && self.mode == "bypass" && self.mode_confirmed;
                 let matches: Vec<_> = self
                     .calls
                     .iter()
                     .filter(|(_, c)| {
-                        c.approved
+                        (c.approved || bypass_fixture && !c.denied)
                             && !c.bridged
                             && !c.finished
                             && c.name == name
@@ -781,9 +965,15 @@ impl DevinProtocol {
                     })
                     .map(|(id, _)| id.clone())
                     .collect();
+                #[cfg(test)]
+                self.tool_sequence.push(
+                    json!({"event":"bridge","name":name,"eligible_declarations":matches.len()}),
+                );
                 require(matches.len() == 1, "Devin MCP approval correlation")?;
                 let call_id = matches[0].clone();
-                self.calls.get_mut(&call_id).expect("matched call").bridged = true;
+                let call = self.calls.get_mut(&call_id).expect("matched call");
+                call.approved = true;
+                call.bridged = true;
                 self.pending.insert(
                     call_id.clone(),
                     Pending {
@@ -837,7 +1027,12 @@ impl Protocol for DevinProtocol {
             .await?;
         self.session = Some(identity(&result["sessionId"])?);
         let models = parse_models(&result, now_ms())?;
-        if self.options.metadata_only {
+        // A cached route can disappear from this account's current catalog.
+        // Return that catalog to the host before any setter or prompt so it
+        // can persist the observation and reject the stale selection.
+        if self.options.metadata_only
+            || !models.iter().any(|model| model.id == self.options.model.id)
+        {
             return Ok(models);
         }
         let selected = if result["configOptions"].as_array().is_some_and(|options| {
@@ -851,19 +1046,32 @@ impl Protocol for DevinProtocol {
         };
         // Setting the model must echo the complete current mode/model metadata.
         self.validate_options(&selected)?;
+        // A setter may acknowledge an unchanged mode without another update.
+        // The complete metadata above already confirms accept-edits. A
+        // candidate transition to bypass still requires a fresh mode update.
+        self.mode_confirmed = self.mode == self.target_mode();
+        self.mode = self.target_mode();
         let mode = self
             .request(
                 process,
                 "session/set_mode",
-                json!({"sessionId":self.session,"modeId":"accept-edits"}),
+                json!({"sessionId":self.session,"modeId":self.mode}),
             )
             .await?;
-        require(mode.is_object(), "Devin mode acknowledgment")?;
+        require(
+            mode.is_object() && self.mode_confirmed,
+            "Devin mode acknowledgment",
+        )?;
         Ok(models)
     }
     async fn start(&mut self, process: &mut StreamProcess, prompt: Prompt) -> Result<()> {
         require(
-            !self.ready && !self.completed && self.session.is_some() && !self.options.metadata_only,
+            !self.ready
+                && !self.completed
+                && self.session.is_some()
+                && !self.options.metadata_only
+                && self.mode == self.target_mode()
+                && self.mode_confirmed,
             "Devin turn start",
         )?;
         let wire = self.prompt_wire(prompt, self.next_id + 1)?;
@@ -928,6 +1136,15 @@ impl Protocol for DevinProtocol {
         call.replied = true;
         Ok(())
     }
+    /// The ACP `session/cancel` notification the compatibility client also
+    /// sends, naming the admitted session while a prompt is in flight.
+    fn interruption(&mut self) -> Option<Value> {
+        if !self.ready || self.completed {
+            return None;
+        }
+        let session = self.session.as_ref()?;
+        Some(json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":session}}))
+    }
     async fn shutdown(&mut self) -> bool {
         self.pending.clear();
         match &mut self.bridge {
@@ -937,5 +1154,6 @@ impl Protocol for DevinProtocol {
     }
 }
 
-#[cfg(test)]
+// Drives provider or command-runner fixtures, which Windows builds refuse.
+#[cfg(all(test, unix))]
 mod tests;

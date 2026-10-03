@@ -4,7 +4,6 @@ use crate::{
     store::{RunRecord, Store},
 };
 use serde::{Deserialize, Serialize};
-use std::os::unix::fs::MetadataExt;
 use xcb_core::{Id, Provider};
 
 const FILE: &str = "application-diagnostic.json";
@@ -257,11 +256,11 @@ pub fn read(store: &Store, account: &Id, request: &Id) -> Result<Option<Diagnost
     let expected_account = store.account(account)?;
     let parent = store.root().join("accounts").join(account.as_str());
     // Do not use a directory-creation helper on this read-only path.
-    let metadata = std::fs::symlink_metadata(&parent)?;
-    if !metadata.is_dir()
-        || metadata.uid() != rustix::process::getuid().as_raw()
-        || metadata.mode() & 0o077 != 0
-        || parent.canonicalize()? != parent
+    let metadata = crate::os::lstat(&parent)?;
+    if !metadata.dir
+        || !metadata.owned
+        || !metadata.private
+        || xcb_core::canonical(&parent)? != parent
     {
         return Err(Error::PrivateState);
     }
@@ -280,7 +279,7 @@ pub fn read(store: &Store, account: &Id, request: &Id) -> Result<Option<Diagnost
     Ok((&value.request_id == request).then_some(value))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use xcb_core::session::State;
@@ -361,7 +360,7 @@ mod tests {
     #[test]
     fn diagnostics_are_private_bounded_request_bound_and_require_owned_run() {
         let temp = tempfile::tempdir().unwrap();
-        let store = Store::open(&temp.path().canonicalize().unwrap().join("state")).unwrap();
+        let store = Store::open(&xcb_core::canonical(temp.path()).unwrap().join("state")).unwrap();
         let account = store
             .add_account(Provider::Devin, "Synthetic", 1, None)
             .unwrap();
@@ -426,7 +425,7 @@ mod tests {
     fn diagnostic_reads_reject_wrong_provider_extra_fields_and_nonprivate_parent() {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
-        let store = Store::open(&temp.path().canonicalize().unwrap().join("state")).unwrap();
+        let store = Store::open(&xcb_core::canonical(temp.path()).unwrap().join("state")).unwrap();
         let account = store
             .add_account(Provider::Devin, "Synthetic", 1, None)
             .unwrap();

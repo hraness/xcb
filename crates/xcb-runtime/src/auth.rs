@@ -10,6 +10,11 @@ use tokio::{process::Command, sync::watch};
 use xcb_core::{Id, Provider};
 use zeroize::Zeroizing;
 
+mod claude_oauth;
+pub(crate) use claude_oauth::recovery as claude_recovery;
+pub(crate) use claude_oauth::refresh_claude_credentials;
+pub use claude_oauth::{has_claude_browser_credentials, login_claude_browser_with_interaction};
+
 pub fn valid_token(text: &str) -> bool {
     static TOKEN: OnceLock<Regex> = OnceLock::new();
     TOKEN
@@ -44,6 +49,12 @@ struct ClaudeTokenPublication {
 fn claude_token_publication(store: &Store, run: &RunRecord) -> Result<ClaudeTokenPublication> {
     if store.account(&run.account)?.provider != Provider::Claude {
         return Err(Error::Conflict("subscription token provider mismatch"));
+    }
+    if has_claude_browser_credentials(store, &run.account)? {
+        return Err(Error::guided(
+            "this account uses full Claude sign-in; reconnect it to replace its credentials",
+            format!("xcb accounts login {} --browser", run.account),
+        ));
     }
     let path = store.account_root(&run.account)?.join("subscription-token");
     let revision = match private::read(&path, 2048) {
@@ -85,7 +96,11 @@ fn publish_claude_token(
     } else {
         private::create(&plan.path, token.as_bytes())?;
     }
-    store.settle_tool(run, "xcb_claude_auth_store")
+    store.settle_tool(run, "xcb_claude_auth_store")?;
+    if plan.revision.as_deref() != Some(crate::digest(token).as_str()) {
+        store.clear_authentication_failure(run)?;
+    }
+    Ok(())
 }
 
 /// Store or rotate a Claude token only under the account's exclusive lease.
@@ -109,9 +124,23 @@ pub fn store_token(store: &Store, id: &Id, bytes: &[u8]) -> Result<()> {
     result
 }
 
+/// The provider's own subscription meter for browser-signed-in Claude
+/// accounts. `None` means the account holds a setup token, which the usage
+/// endpoint refuses by scope — those accounts stay passively metered by
+/// rate-limit events observed during runs.
+pub(crate) async fn claude_usage(store: &Store, id: &Id) -> Result<Option<serde_json::Value>> {
+    let Some(token) = claude_oauth::cached_token(store, id)? else {
+        return Ok(None);
+    };
+    claude_oauth::fetch_usage(&token).await.map(Some)
+}
+
 pub(crate) fn token(store: &Store, id: &Id) -> Result<Zeroizing<String>> {
     if store.account(id)?.provider != Provider::Claude {
         return Err(Error::Conflict("subscription token provider mismatch"));
+    }
+    if let Some(token) = claude_oauth::cached_token(store, id)? {
+        return Ok(token);
     }
     let bytes = Zeroizing::new(private::read(
         &store.account_root(id)?.join("subscription-token"),
@@ -131,6 +160,9 @@ pub(crate) fn token(store: &Store, id: &Id) -> Result<Zeroizing<String>> {
 pub fn has_token(store: &Store, id: &Id) -> Result<bool> {
     if store.account(id)?.provider != Provider::Claude {
         return Ok(false);
+    }
+    if has_claude_browser_credentials(store, id)? {
+        return Ok(true);
     }
     let path = store.account_root(id)?.join("subscription-token");
     match private::read(&path, 2048) {
@@ -232,6 +264,9 @@ fn finish_claude_login(
         let bytes = output?;
         let value = captured_claude_token(&bytes)?;
         publish_claude_token(store, run, publication, &value, &mut publication_attempted)?;
+        // A successfully joined provider login is stronger evidence than a
+        // token-shaped import, even if it returned the same token material.
+        store.clear_authentication_failure(run)?;
         // The provider wrote this file inside our own launch profile; a
         // missing or unparseable one just leaves the fixed account name.
         let base = artifacts.path();
@@ -264,6 +299,260 @@ pub async fn login_with_cancel(
     pin: &Pin,
     cancel: watch::Receiver<bool>,
 ) -> Result<()> {
+    login_claude(store, id, pin, cancel, None).await
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaudeLoginEvent {
+    AuthorizationUrl(String),
+    CodeRequested,
+}
+
+/// Pinned Claude `auth login` failures are classified only after the helper
+/// stops. Never return captured text: errors can contain tokens, URLs or PII.
+pub(crate) fn claude_auth_failure(stdout: &[u8], stderr: &[u8]) -> &'static str {
+    const UNKNOWN: &str =
+        "Claude sign-in stopped with an error; saved credentials need verification";
+    for bytes in [stderr, stdout] {
+        if bytes.len() > 64 * 1024 {
+            continue;
+        }
+        let Ok(text) = std::str::from_utf8(bytes) else {
+            continue;
+        };
+        for line in text.lines().map(str::trim) {
+            if matches!(
+                line,
+                "Managed settings on this machine configure a Cloud gateway sign-in; run interactive /login to authenticate."
+                    | "Unable to read managed policy settings."
+                    | "Unable to read managed policy settings, which may restrict the API providers this machine may use (allowedProviders). Contact your administrator."
+                    | "forceLoginOrgUUID in managed settings is set to an empty array."
+            ) {
+                return "Claude sign-in stopped: managed policy blocked authentication; saved credentials need verification";
+            }
+            let Some(reason) = line.strip_prefix("Login failed: ") else {
+                continue;
+            };
+            let message = match reason {
+                "Authentication failed: Invalid authorization code" => Some(
+                    "Claude sign-in stopped: the authorization code was rejected; saved credentials need verification",
+                ),
+                "Invalid state parameter" => Some(
+                    "Claude sign-in stopped: the authorization state did not match this attempt; saved credentials need verification",
+                ),
+                "No authorization code received" => Some(
+                    "Claude sign-in stopped: no authorization code was received; saved credentials need verification",
+                ),
+                "Couldn't save your login. Try logging in again."
+                | "Couldn't save your login. If your Mac's keychain is locked, unlock it and log in again." => {
+                    Some(
+                        "Claude sign-in stopped: Claude could not save its credentials; check Keychain access and recover this sign-in",
+                    )
+                }
+                "socket hang up" | "Network Error" => Some(
+                    "Claude sign-in stopped: its network connection failed; saved credentials need verification",
+                ),
+                "Request failed with status code 400" => Some(
+                    "Claude sign-in stopped: the service rejected the request (HTTP 400); saved credentials need verification",
+                ),
+                "Request failed with status code 401" => Some(
+                    "Claude sign-in stopped: the service rejected authorization (HTTP 401); saved credentials need verification",
+                ),
+                "Request failed with status code 403" => Some(
+                    "Claude sign-in stopped: the service refused access (HTTP 403); saved credentials need verification",
+                ),
+                "Request failed with status code 429" => Some(
+                    "Claude sign-in stopped: the service limited requests (HTTP 429); saved credentials need verification",
+                ),
+                _ => None,
+            };
+            if let Some(message) = message {
+                return message;
+            }
+            if [
+                "getaddrinfo ENOTFOUND ",
+                "getaddrinfo EAI_AGAIN ",
+                "connect ECONNREFUSED ",
+                "connect ETIMEDOUT ",
+                "read ECONNRESET",
+            ]
+            .iter()
+            .any(|prefix| reason.starts_with(prefix))
+                || reason
+                    .strip_prefix("timeout of ")
+                    .and_then(|value| value.strip_suffix("ms exceeded"))
+                    .is_some_and(|value| {
+                        !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+                    })
+            {
+                return "Claude sign-in stopped: its network connection failed; saved credentials need verification";
+            }
+            if reason
+                .strip_prefix("Request failed with status code ")
+                .filter(|status| {
+                    status.len() == 3 && status.bytes().all(|byte| byte.is_ascii_digit())
+                })
+                .and_then(|status| status.parse::<u16>().ok())
+                .is_some_and(|status| (500..=599).contains(&status))
+            {
+                return "Claude sign-in stopped: the service returned an error (HTTP 5xx); saved credentials need verification";
+            }
+        }
+    }
+    UNKNOWN
+}
+
+pub async fn login_with_interaction(
+    store: &Store,
+    id: &Id,
+    pin: &Pin,
+    cancel: watch::Receiver<bool>,
+    events: tokio::sync::mpsc::Sender<ClaudeLoginEvent>,
+    codes: tokio::sync::mpsc::Receiver<Zeroizing<String>>,
+) -> Result<()> {
+    #[cfg(not(unix))]
+    {
+        let _ = (store, id, pin, cancel, events, codes);
+        Err(Error::providers_unsupported())
+    }
+    #[cfg(unix)]
+    {
+        let (stdin, terminal) = crate::process::login_terminal()?;
+        let mut observer = ClaudeLoginObserver::default();
+        let interaction = crate::process::LoginInteraction {
+            stdin,
+            terminal,
+            codes,
+            observer: Box::new(move |bytes| {
+                for event in observer.observe(bytes) {
+                    let _ = events.try_send(event);
+                }
+                if observer.failed {
+                    Err(Error::Unavailable(observer.failure_message()))
+                } else {
+                    Ok(())
+                }
+            }),
+        };
+        login_claude(store, id, pin, cancel, Some(interaction)).await
+    }
+}
+
+#[cfg(any(unix, test))]
+#[derive(Default)]
+struct ClaudeLoginObserver {
+    bytes: Zeroizing<Vec<u8>>,
+    url_sent: bool,
+    prompt_sent: bool,
+    prompt_seen: bool,
+    failed: bool,
+    malformed_code: bool,
+}
+
+#[cfg(any(unix, test))]
+fn oauth_url_has_secret(url: &str) -> bool {
+    let mut decoded = Zeroizing::new(url.as_bytes().to_vec());
+    for _ in 0..3 {
+        if decoded.windows(7).any(|window| window == b"sk-ant-") {
+            return true;
+        }
+        let mut next = Zeroizing::new(Vec::with_capacity(decoded.len()));
+        let mut offset = 0;
+        while offset < decoded.len() {
+            if decoded[offset] == b'%' && offset + 2 < decoded.len() {
+                let hex = |b: u8| (b as char).to_digit(16).map(|n| n as u8);
+                if let (Some(a), Some(b)) = (hex(decoded[offset + 1]), hex(decoded[offset + 2])) {
+                    next.push(a * 16 + b);
+                    offset += 3;
+                    continue;
+                }
+            }
+            next.push(decoded[offset]);
+            offset += 1;
+        }
+        if *next == *decoded {
+            return false;
+        }
+        decoded = next;
+    }
+    decoded.windows(7).any(|window| window == b"sk-ant-")
+}
+
+#[cfg(any(unix, test))]
+impl ClaudeLoginObserver {
+    fn failure_message(&self) -> &'static str {
+        if self.malformed_code {
+            "Claude rejected an incomplete sign-in code; retry sign-in and copy the full code"
+        } else {
+            "Claude browser sign-in failed; retry sign-in or paste a setup token"
+        }
+    }
+
+    fn observe(&mut self, bytes: &[u8]) -> Vec<ClaudeLoginEvent> {
+        // Provider output contains the reusable token. It stays private here;
+        // only a known OAuth endpoint and a fixed prompt cross the boundary.
+        if self.bytes.len() + bytes.len() > 128 * 1024 {
+            return Vec::new();
+        }
+        self.bytes.extend_from_slice(bytes);
+        static ANSI: OnceLock<Regex> = OnceLock::new();
+        static OSC: OnceLock<Regex> = OnceLock::new();
+        static URL: OnceLock<Regex> = OnceLock::new();
+        let raw = Zeroizing::new(String::from_utf8_lossy(&self.bytes).into_owned());
+        // Ink wraps visible links in OSC 8 hyperlinks. Remove the control
+        // payload and terminators, retaining only the visible URL. CSI-only
+        // stripping leaves an ESC after the URL, hiding it from the scanner.
+        let without_osc = Zeroizing::new(
+            OSC.get_or_init(|| Regex::new(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)").unwrap())
+                .replace_all(&raw, "")
+                .into_owned(),
+        );
+        let text = Zeroizing::new(
+            ANSI.get_or_init(|| Regex::new(r"\x1b\[[0-9;?]*[ -/]*[@-~]").unwrap())
+                .replace_all(&without_osc, "")
+                .into_owned(),
+        );
+        // The official auth command reports malformed manual input without
+        // exiting. Stop our supervised attempt rather than waiting ten minutes
+        // for an exchange that never started. Only this fixed error escapes.
+        self.malformed_code |=
+            text.contains("Invalid code. Please make sure the full code was copied.");
+        self.failed |= self.malformed_code || text.contains("OAuth error:");
+        let mut events = Vec::new();
+        if !self.url_sent {
+            let urls = URL.get_or_init(|| Regex::new(r"https://(?:claude\.com/cai/oauth/authorize|claude\.ai/oauth/authorize|platform\.claude\.com/oauth/authorize|console\.anthropic\.com/oauth/authorize)\?[A-Za-z0-9_~%=&.+:/-]+[\s]").unwrap());
+            for url in urls.find_iter(&text) {
+                let url = url.as_str().trim();
+                if url.len() <= 8192
+                    && !oauth_url_has_secret(url)
+                    && url.contains("client_id=")
+                    && url.contains("state=")
+                    && url.contains("code_challenge=")
+                {
+                    self.url_sent = true;
+                    events.push(ClaudeLoginEvent::AuthorizationUrl(url.into()));
+                    break;
+                }
+            }
+        }
+        self.prompt_seen |= text.contains("Paste code here if prompted");
+        // A provider may render its prompt before its link. The terminal must
+        // receive the verified URL before waiting for optional manual input.
+        if self.url_sent && self.prompt_seen && !self.prompt_sent {
+            self.prompt_sent = true;
+            events.push(ClaudeLoginEvent::CodeRequested);
+        }
+        events
+    }
+}
+
+async fn login_claude(
+    store: &Store,
+    id: &Id,
+    pin: &Pin,
+    cancel: watch::Receiver<bool>,
+    interaction: Option<crate::process::LoginInteraction>,
+) -> Result<()> {
     let account = store.account(id)?;
     if account.provider != pin.provider {
         return Err(Error::Conflict("login provider mismatch"));
@@ -295,7 +584,12 @@ pub async fn login_with_cancel(
             .arg("setup-token")
             .env_clear()
             .envs(env)
+            .env("COLUMNS", "4096")
             .current_dir(&home);
+        // The provider completes browser sign-in through its own loopback
+        // channel only when it can actually launch a browser; a suppressed
+        // BROWSER leaves the paste prompt as an unmounted fallback that
+        // never reads input, so no BROWSER override is set here.
         Ok::<_, Error>((command, publication, artifacts))
     })();
     let (command, publication, mut artifacts) = match planned {
@@ -306,36 +600,27 @@ pub async fn login_with_cancel(
         }
     };
     artifacts.retain_before_launch();
-    let outcome = capture_supervised(
-        command,
-        64 * 1024,
-        Duration::from_secs(600),
-        cancel,
-        |pid| store.mark_spawned(&run, pid).map(|_| ()),
-    )
-    .await;
+    let outcome = if let Some(interaction) = interaction {
+        crate::process::capture_supervised_interactive(
+            command,
+            64 * 1024,
+            Duration::from_secs(600),
+            cancel,
+            |pid| store.mark_spawned(&run, pid).map(|_| ()),
+            Some(interaction),
+        )
+        .await
+    } else {
+        capture_supervised(
+            command,
+            64 * 1024,
+            Duration::from_secs(600),
+            cancel,
+            |pid| store.mark_spawned(&run, pid).map(|_| ()),
+        )
+        .await
+    };
     finish_claude_login(store, &run, &publication, &mut artifacts, outcome)
-}
-
-/// Explicit legacy import: reads a pre-0.4.0 AgentMixer `claude-oauth-token`
-/// file from `source` and stores it as a new Claude account. The legacy state
-/// root is never a live default; the source directory is left untouched.
-pub fn import_agentmixer_token(store: &Store, source: &Path) -> Result<Id> {
-    private::check_directory(source)?;
-    let bytes = Zeroizing::new(private::read(&source.join("claude-oauth-token"), 2048)?);
-    if !std::str::from_utf8(&bytes).is_ok_and(|text| valid_token(text.trim())) {
-        return Err(Error::Unavailable(
-            "legacy subscription token is missing or invalid",
-        ));
-    }
-    let account = store.add_account(
-        Provider::Claude,
-        "Imported subscription",
-        crate::now_ms(),
-        None,
-    )?;
-    store_token(store, &account.id, &bytes)?;
-    Ok(account.id)
 }
 
 const MAX_CODEX_AUTH_BYTES: usize = 64 * 1024;
@@ -352,13 +637,23 @@ struct CodexAuthFile<'a> {
     last_refresh: Option<&'a str>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct CodexTokens<'a> {
     id_token: &'a str,
     access_token: &'a str,
     refresh_token: &'a str,
     account_id: Option<&'a str>,
+}
+
+fn same_codex_credentials(left: &[u8], right: &[u8]) -> bool {
+    match (
+        serde_json::from_slice::<CodexAuthFile<'_>>(left),
+        serde_json::from_slice::<CodexAuthFile<'_>>(right),
+    ) {
+        (Ok(left), Ok(right)) => left.tokens == right.tokens,
+        _ => false,
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -536,6 +831,14 @@ fn import_codex_bytes(store: &Store, id: &Id, bytes: &[u8]) -> Result<()> {
             Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(error),
         };
+        if let Some(previous) = &previous
+            && codex_identity(previous)?.digest != codex_identity(bytes)?.digest
+        {
+            return Err(Error::Conflict("Codex credential account identity changed"));
+        }
+        let changed = previous
+            .as_ref()
+            .is_none_or(|previous| !same_codex_credentials(previous, bytes));
         store.begin_tool(
             &run,
             "xcb_auth_import",
@@ -550,6 +853,9 @@ fn import_codex_bytes(store: &Store, id: &Id, bytes: &[u8]) -> Result<()> {
             private::create(&target, bytes)?;
         }
         store.settle_tool(&run, "xcb_auth_import")?;
+        if changed {
+            store.clear_authentication_failure(&run)?;
+        }
         // The credential's signed email claim becomes the display identity.
         if let Ok(identity) = codex_identity(bytes) {
             store.set_account_identity(id, identity.email, None)?;
@@ -602,10 +908,9 @@ struct CodexAuthRecovery {
 }
 
 fn directory_identity(path: &Path) -> Result<(u64, u64)> {
-    use std::os::unix::fs::MetadataExt;
     private::check_directory(path)?;
-    let metadata = std::fs::symlink_metadata(path)?;
-    Ok((metadata.dev(), metadata.ino()))
+    let metadata = crate::os::lstat(path)?;
+    Ok((metadata.dev, metadata.ino))
 }
 
 fn recovery_path(root: &Path, run: &Id) -> std::path::PathBuf {
@@ -668,12 +973,7 @@ pub(crate) fn recover_codex_auth(
         .as_ref()
         .ok_or(Error::Conflict("credential recovery owner missing"))?;
     let runs = root.join("runs");
-    let hex_digest = |value: &str| {
-        value.len() == 64
-            && value
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    };
+    let hex_digest = xcb_core::hex64;
     if metadata.version != 1
         || metadata.run != run.id
         || metadata.account != run.account
@@ -733,14 +1033,23 @@ pub(crate) fn recover_codex_auth(
         .as_ref()
         .is_some_and(|expected| *expected != identity.digest)
     {
-        return Err(Error::Conflict("Codex credential account identity changed"));
+        // A stopped login may have completed under another ChatGPT account.
+        // Its isolated profile has no authority to replace the saved account.
+        // Once the saved credential is proven unchanged, reconciliation may
+        // settle the receipt and release the lease without publishing it.
+        if current_revision != metadata.original_revision {
+            return Err(Error::Conflict(
+                "persistent credentials changed during login",
+            ));
+        }
+        return Ok(());
     }
     let refreshed_revision = crate::digest(&refreshed);
     if current_revision.as_ref() == Some(&refreshed_revision) {
         // A prior recovery/normal persistence may have published and crashed
         // before SQLite commit. The exact refreshed bytes make this retry safe.
         private::open_file(&target, MAX_CODEX_AUTH_BYTES as u64)?.sync_all()?;
-        std::fs::File::open(&persistent)?.sync_all()?;
+        private::sync_directory(&persistent)?;
         return Ok(());
     }
     if current_revision != metadata.original_revision {
@@ -782,7 +1091,6 @@ pub fn snapshot_codex_auth(
     run: &crate::store::RunRecord,
     profile: &Path,
 ) -> Result<CodexAuthSnapshot> {
-    use std::os::unix::fs::MetadataExt;
     current_codex_run(store, run)?;
     let runs = store.root().join("runs");
     if !profile.starts_with(&runs) || profile == runs {
@@ -801,13 +1109,13 @@ pub fn snapshot_codex_auth(
     )?);
     let identity = codex_identity(&bytes)?;
     let revision = crate::digest(&bytes);
-    let metadata = std::fs::symlink_metadata(&profile)?;
+    let metadata = crate::os::lstat(&profile)?;
     let snapshot = CodexAuthSnapshot {
         account: run.account.clone(),
         run: run.id.clone(),
         state_root: store.root().to_owned(),
         profile,
-        directory_identity: (metadata.dev(), metadata.ino()),
+        directory_identity: (metadata.dev, metadata.ino),
         original_revision: Some(revision),
         account_identity: Some(identity.digest),
     };
@@ -841,7 +1149,6 @@ pub fn persist_codex_auth(
     snapshot: &CodexAuthSnapshot,
     joined: bool,
 ) -> Result<()> {
-    use std::os::unix::fs::MetadataExt;
     if !joined
         || snapshot.run != run.id
         || snapshot.account != run.account
@@ -853,8 +1160,8 @@ pub fn persist_codex_auth(
     }
     current_codex_run(store, run)?;
     private::check_directory(&snapshot.profile)?;
-    let metadata = std::fs::symlink_metadata(&snapshot.profile)?;
-    if (metadata.dev(), metadata.ino()) != snapshot.directory_identity {
+    let metadata = crate::os::lstat(&snapshot.profile)?;
+    if (metadata.dev, metadata.ino) != snapshot.directory_identity {
         return Err(Error::Conflict("credential snapshot directory changed"));
     }
     let bytes = Zeroizing::new(private::read(
@@ -896,7 +1203,9 @@ pub fn prepare_codex_login(
     pin: &Pin,
     profile: &Path,
 ) -> Result<CodexLoginPlan> {
-    use std::os::unix::{fs::MetadataExt, process::CommandExt};
+    if cfg!(windows) {
+        return Err(Error::providers_unsupported());
+    }
     current_codex_run(store, run)?;
     if pin.provider != Provider::Codex {
         return Err(Error::Conflict("login provider mismatch"));
@@ -942,18 +1251,22 @@ pub fn prepare_codex_login(
         .env_clear()
         .envs(env)
         .current_dir(&home)
-        .stdin(std::process::Stdio::inherit())
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
         .kill_on_drop(true);
-    command.as_std_mut().process_group(0);
-    let metadata = std::fs::symlink_metadata(&profile)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.as_std_mut().process_group(0);
+    }
+    let metadata = crate::os::lstat(&profile)?;
     let credentials = CodexAuthSnapshot {
         account: run.account.clone(),
         run: run.id.clone(),
         state_root: store.root().to_owned(),
         profile,
-        directory_identity: (metadata.dev(), metadata.ino()),
+        directory_identity: (metadata.dev, metadata.ino),
         original_revision,
         account_identity,
     };
@@ -965,13 +1278,406 @@ pub fn prepare_codex_login(
 }
 
 #[cfg(test)]
+mod claude_login_observer_tests {
+    use super::*;
+    const TEST_URL: &str =
+        "https://claude.com/cai/oauth/authorize?client_id=test&state=test&code_challenge=test";
+
+    #[test]
+    fn official_auth_failures_use_static_diagnostics_without_private_output() {
+        let poison = "sk-ant-oat01-private-sentinel secret@example.test https://private.test/code?secret=sentinel";
+        for (line, expected) in [
+            (
+                "Login failed: Invalid state parameter",
+                "authorization state",
+            ),
+            (
+                "Login failed: No authorization code received",
+                "no authorization code",
+            ),
+            (
+                "Login failed: Authentication failed: Invalid authorization code",
+                "authorization code was rejected",
+            ),
+            (
+                "Login failed: Couldn't save your login. Try logging in again.",
+                "could not save its credentials",
+            ),
+            (
+                "Login failed: Couldn't save your login. If your Mac's keychain is locked, unlock it and log in again.",
+                "could not save its credentials",
+            ),
+            (
+                "Login failed: timeout of 30000ms exceeded",
+                "network connection failed",
+            ),
+            ("Login failed: Network Error", "network connection failed"),
+            (
+                "Login failed: getaddrinfo ENOTFOUND private.test",
+                "network connection failed",
+            ),
+            (
+                "Login failed: Request failed with status code 400",
+                "request (HTTP 400)",
+            ),
+            (
+                "Login failed: Request failed with status code 401",
+                "authorization (HTTP 401)",
+            ),
+            (
+                "Login failed: Request failed with status code 403",
+                "access (HTTP 403)",
+            ),
+            (
+                "Login failed: Request failed with status code 429",
+                "requests (HTTP 429)",
+            ),
+            (
+                "Login failed: Request failed with status code 503",
+                "error (HTTP 5xx)",
+            ),
+            (
+                "Unable to read managed policy settings.",
+                "managed policy blocked",
+            ),
+            (
+                "Managed settings on this machine configure a Cloud gateway sign-in; run interactive /login to authenticate.",
+                "managed policy blocked",
+            ),
+        ] {
+            let output = Zeroizing::new(format!("{line}\n{poison}\n"));
+            for (stdout, stderr) in [(output.as_bytes(), &[][..]), (&[][..], output.as_bytes())] {
+                let message = claude_auth_failure(stdout, stderr);
+                assert!(message.contains(expected), "{line}: {message}");
+                let error = Error::AuthUnproven(message);
+                let rendered = format!("{error} {error:?}");
+                for secret in [
+                    "sk-ant-",
+                    "secret@example.test",
+                    "https://",
+                    "private.test",
+                    "sentinel",
+                ] {
+                    assert!(!rendered.contains(secret));
+                }
+                assert!(error.is_cleanup_unproven());
+            }
+        }
+    }
+
+    #[test]
+    fn official_auth_unknown_partial_or_oversize_output_stays_generic() {
+        let generic = claude_auth_failure(&[], &[]);
+        for output in [
+            "Login failed: confidential sk-ant-oat01-private example@example.test https://private.test",
+            "provider body says Login failed: Request failed with status code 403",
+            "Login failed: Request failed with status code 400 confidential",
+            "Login failed: timeout of privatems exceeded",
+            "Invalid code. Please make sure the full code was copied.",
+            "Login failed: Request failed with status code 5999",
+            "Login failed: Request failed with status code +503",
+            "Login failed: Request failed with status code 4",
+        ] {
+            assert_eq!(claude_auth_failure(&[], output.as_bytes()), generic);
+        }
+        let oversized = format!(
+            "Login failed: Invalid state parameter\n{}",
+            "x".repeat(64 * 1024)
+        );
+        assert_eq!(claude_auth_failure(&[], oversized.as_bytes()), generic);
+        assert_eq!(claude_auth_failure(&[], &[0xff]), generic);
+        assert!(
+            !claude_auth_failure(&[], b"Login failed: Request failed with status code 400")
+                .contains("code was rejected")
+        );
+    }
+
+    #[test]
+    fn native_osc_hyperlinks_emit_visible_oauth_link_before_prompt() {
+        for terminator in ["\x07", "\x1b\\"] {
+            let output = format!(
+                "\x1b[32m\x1b]8;;{TEST_URL}{terminator}{TEST_URL}\x1b]8;;{terminator}\x1b[0m\nPaste code here if prompted > "
+            );
+            for split in 0..output.len() {
+                let mut observer = ClaudeLoginObserver::default();
+                let mut events = observer.observe(&output.as_bytes()[..split]);
+                events.extend(observer.observe(&output.as_bytes()[split..]));
+                assert_eq!(
+                    events,
+                    vec![
+                        ClaudeLoginEvent::AuthorizationUrl(TEST_URL.into()),
+                        ClaudeLoginEvent::CodeRequested
+                    ],
+                    "OSC terminator {terminator:?}, split {split}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn prompt_before_url_waits_for_valid_authorization_link() {
+        let mut observer = ClaudeLoginObserver::default();
+        assert!(
+            observer
+                .observe(b"Paste code here if prompted > \n")
+                .is_empty()
+        );
+        assert!(
+            observer
+                .observe(b"https://claude.com/cai/oauth/authorize?client_id=x&state=x\n")
+                .is_empty()
+        );
+        assert_eq!(
+            observer.observe(format!("{TEST_URL}\n").as_bytes()),
+            vec![
+                ClaudeLoginEvent::AuthorizationUrl(TEST_URL.into()),
+                ClaudeLoginEvent::CodeRequested
+            ]
+        );
+        assert!(
+            observer
+                .observe(b"Paste code here if prompted > ")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn hidden_hyperlink_payload_never_becomes_the_visible_sign_in_link() {
+        let mut observer = ClaudeLoginObserver::default();
+        let output =
+            format!("\x1b]8;;{TEST_URL}\x07Sign in\x1b]8;;\x07\nPaste code here if prompted > ");
+        assert!(observer.observe(output.as_bytes()).is_empty());
+    }
+
+    #[test]
+    fn private_provider_errors_fail_without_relaying_details() {
+        let mut observer = ClaudeLoginObserver::default();
+        assert!(
+            observer
+                .observe(b"OAuth error: confidential provider details")
+                .is_empty()
+        );
+        assert!(observer.failed);
+    }
+
+    #[test]
+    fn incomplete_manual_code_rejection_is_private_across_output_fragments() {
+        let output = b"Invalid code. Please make sure the full code was copied.\nprivate-code#private-state private@example.test\n";
+        for split in 0..=output.len() {
+            let mut observer = ClaudeLoginObserver::default();
+            assert!(observer.observe(&output[..split]).is_empty());
+            assert!(observer.observe(&output[split..]).is_empty());
+            assert!(observer.failed, "split {split}");
+            assert_eq!(
+                observer.failure_message(),
+                "Claude rejected an incomplete sign-in code; retry sign-in and copy the full code"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn incomplete_manual_code_stops_and_joins_the_waiting_auth_helper() {
+        let (stdin, terminal) = crate::process::login_terminal().unwrap();
+        let (_codes, receiver) = tokio::sync::mpsc::channel(1);
+        let mut observer = ClaudeLoginObserver::default();
+        let interaction = crate::process::LoginInteraction {
+            stdin,
+            terminal,
+            codes: receiver,
+            observer: Box::new(move |bytes| {
+                observer.observe(bytes);
+                if observer.failed {
+                    Err(Error::Unavailable(observer.failure_message()))
+                } else {
+                    Ok(())
+                }
+            }),
+        };
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args([
+            "-c",
+            // exec keeps the helper a single group member; a forked `sleep`
+            // orphan can outlive the group-absent proof on a loaded host.
+            "printf 'Invalid code. Please make sure the full code was copied.\\n' >&2; exec sleep 30",
+        ]);
+        let (_cancel, cancel) = tokio::sync::watch::channel(false);
+        let outcome = crate::process::capture_supervised_interactive(
+            command,
+            1024,
+            // Below the helper's own 30-second wait; generous enough that a
+            // loaded scheduler cannot race the child into the deadline.
+            std::time::Duration::from_secs(20),
+            cancel,
+            |_| Ok(()),
+            Some(interaction),
+        )
+        .await;
+        let debug = match &outcome {
+            crate::process::CaptureOutcome::Joined(Err(e)) => e.to_string(),
+            crate::process::CaptureOutcome::Joined(Ok(_)) => "joined-ok".into(),
+            crate::process::CaptureOutcome::NeverStarted(e) => format!("never-started:{e}"),
+            crate::process::CaptureOutcome::Unproven => "unproven".into(),
+        };
+        assert!(
+            matches!(
+                outcome,
+                crate::process::CaptureOutcome::Joined(Err(Error::Unavailable(
+                    "Claude rejected an incomplete sign-in code; retry sign-in and copy the full code"
+                )))
+            ),
+            "{debug}"
+        );
+    }
+    /// A provider whose input listener mounts after the paste prompt renders
+    /// can discard a code written during that mount. A silent child must see
+    /// the retained code redelivered without operator action.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn silent_child_after_submit_receives_the_code_again() {
+        let (stdin, terminal) = crate::process::login_terminal().unwrap();
+        let (codes, receiver) = tokio::sync::mpsc::channel(1);
+        let mut observer = ClaudeLoginObserver::default();
+        let interaction = crate::process::LoginInteraction {
+            stdin,
+            terminal,
+            codes: receiver,
+            observer: Box::new(move |bytes| {
+                observer.observe(bytes);
+                Ok(())
+            }),
+        };
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", "sleep 10; head -n 2"]);
+        let (_cancel, cancel) = tokio::sync::watch::channel(false);
+        codes
+            .send(zeroize::Zeroizing::new("resend-code#st".to_string()))
+            .await
+            .unwrap();
+        drop(codes);
+        let outcome = crate::process::capture_supervised_interactive(
+            command,
+            1024,
+            std::time::Duration::from_secs(30),
+            cancel,
+            |_| Ok(()),
+            Some(interaction),
+        )
+        .await;
+        let crate::process::CaptureOutcome::Joined(Ok(output)) = outcome else {
+            panic!("the auth helper must join with captured output")
+        };
+        assert_eq!(
+            String::from_utf8_lossy(&output)
+                .matches("resend-code")
+                .count(),
+            2,
+            "the code is written once at submit and once more while the child stays silent"
+        );
+    }
+
+    #[test]
+    fn only_complete_oauth_links_and_fixed_prompt_leave_capture() {
+        let mut observer = ClaudeLoginObserver::default();
+        assert!(
+            observer
+                .observe(b"secret sk-ant-oat01-neverpublish\nhttps://claude.com/cai/oauth/auth")
+                .is_empty()
+        );
+        let events = observer.observe(
+            b"orize?client_id=test&state=test&code_challenge=test\nPaste code here if prompted > ",
+        );
+        assert_eq!(events, vec![ClaudeLoginEvent::AuthorizationUrl("https://claude.com/cai/oauth/authorize?client_id=test&state=test&code_challenge=test".into()), ClaudeLoginEvent::CodeRequested]);
+        assert!(
+            observer
+                .observe(b"Paste code here if prompted > ")
+                .is_empty()
+        );
+    }
+    #[test]
+    fn untrusted_endpoints_and_missing_pkce_are_not_forwarded() {
+        for text in [
+            "https://claude.com.evil/cai/oauth/authorize?client_id=x&state=x&code_challenge=x\n",
+            "https://claude.com/cai/oauth/authorize/evil?client_id=x&state=x&code_challenge=x\n",
+            "https://claude.com/cai/oauth/authorize?client_id=x&state=x\n",
+            "https://claude.com/cai/oauth/authorize?client_id=x&state=x&code_challenge=x@evil\n",
+            "https://claude.com/cai/oauth/authorize?client_id=x&state=x&code_challenge=sk-ant-oat01-private\n",
+            "https://claude.com/cai/oauth/authorize?client_id=x&state=x&code_challenge=sk%2Dant-oat01-private\n",
+        ] {
+            assert!(
+                ClaudeLoginObserver::default()
+                    .observe(text.as_bytes())
+                    .is_empty()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod auth_custody_tests {
     use super::*;
+    use base64::Engine;
+
+    fn synthetic_codex_auth(account: &str, access: &str) -> Vec<u8> {
+        let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&serde_json::json!({
+                "sub": "synthetic-user",
+                "https://api.openai.com/auth": {"chatgpt_account_id": account}
+            }))
+            .unwrap(),
+        );
+        serde_json::to_vec(&serde_json::json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "id_token": format!("synthetic.{claims}.signature"),
+                "access_token": access,
+                "refresh_token": "synthetic-refresh",
+                "account_id": account,
+            },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn stopped_codex_login_can_discard_a_different_identity_only_with_unchanged_saved_auth() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let account = store
+            .add_account(Provider::Codex, "ChatGPT", 1, None)
+            .unwrap();
+        let saved = synthetic_codex_auth("original-account", "original-access");
+        let other = synthetic_codex_auth("different-account", "other-access");
+        let target = codex_auth_path(&store, &account.id).unwrap();
+        private::create(&target, &saved).unwrap();
+        let run = store.prepare_probe(&account.id, None, 2).unwrap();
+        let profile = store.root().join("runs/synthetic-login");
+        let snapshot = snapshot_codex_auth(&store, &run, &profile).unwrap();
+        private::replace(
+            &snapshot.profile().join("auth.json"),
+            &other,
+            &crate::digest(&saved),
+        )
+        .unwrap();
+        let metadata = private::read(&recovery_path(store.root(), &run.id), 32 * 1024).unwrap();
+        let metadata_digest = crate::digest(&metadata);
+
+        recover_codex_auth(store.root(), &run, &metadata_digest).unwrap();
+        assert_eq!(private::read(&target, MAX_CODEX_AUTH_BYTES).unwrap(), saved);
+
+        let concurrent = synthetic_codex_auth("original-account", "concurrent-access");
+        private::replace(&target, &concurrent, &crate::digest(&saved)).unwrap();
+        assert!(recover_codex_auth(store.root(), &run, &metadata_digest).is_err());
+        assert_eq!(
+            private::read(&target, MAX_CODEX_AUTH_BYTES).unwrap(),
+            concurrent
+        );
+    }
 
     #[test]
     fn claude_unproven_login_capture_retains_account_and_artifacts() {
         let directory = tempfile::tempdir().unwrap();
-        let base = directory.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let original = b"sk-ant-oat01-original_synthetic_fixture_not_real";
@@ -1000,7 +1706,7 @@ mod auth_custody_tests {
     #[test]
     fn unstarted_auth_receipt_cleanup_rejects_started_and_foreign_owned_runs() {
         let directory = tempfile::tempdir().unwrap();
-        let base = directory.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store
             .add_account(Provider::Codex, "ChatGPT", 1, None)

@@ -31,3 +31,11 @@ test("internal dependency version checks are independent of TOML field order", (
     })).toThrow("pins internal xcb version");
   }
 });
+
+test("compatibility CLI cannot report a stale version in a release package", () => {
+  expect(assertReleaseVersionContract(packageSource, cargoSource, manifests, 'const VERSION = "0.4.0";')).toBe("0.4.0");
+  for (const cli of ['const VERSION = "0.3.0";', ""]) {
+    expect(() => assertReleaseVersionContract(packageSource, cargoSource, manifests, cli))
+      .toThrow("Compatibility CLI version");
+  }
+});

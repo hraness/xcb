@@ -7,16 +7,34 @@
 //! pinning, byte bounds, and the `Error` taxonomy callers match on.
 
 use crate::{Error, Result};
+#[cfg(unix)]
 use local_custody::{
     CustodyError, ObjectKind, OwnedPathOptions, assert_owned_fd, atomic_publish,
     atomic_publish_guarded, ensure_private_directory,
 };
+#[cfg(unix)]
 use std::cell::RefCell;
-use std::fs::{self, File, OpenOptions};
+use std::fs::File;
+#[cfg(unix)]
+use std::fs::{self, OpenOptions};
 use std::io::Read;
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::{Component, PathBuf};
+
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use windows::{
+    check_directory, check_file, create, default_root, directory, open_file,
+    open_file_maybe_vanished,
+};
+#[cfg(windows)]
+pub(crate) use windows::{replace_guarded, same_file};
 
 /// Translate a custody-contract failure into xcb's error taxonomy. Violations
 /// of the owned/private contract (symlinks, wrong kind, foreign owner,
@@ -25,6 +43,7 @@ use std::path::{Component, Path, PathBuf};
 /// Genuine filesystem failures keep `Io`; a missing object keeps the
 /// `NotFound` kind that load-dedup callers match; the publish-name grammar is
 /// caller input and maps to `Invalid`; content drift is a `Conflict`.
+#[cfg(unix)]
 fn map_custody_error(error: CustodyError) -> Error {
     match error.code.as_str() {
         "not-found" => Error::Io(std::io::Error::new(
@@ -71,6 +90,7 @@ fn map_custody_error(error: CustodyError) -> Error {
 /// regular file with a single name, owner-only permissions, within `max`
 /// bytes. `assert_owned_fd` fstats the descriptor, so a hot sibling (WAL,
 /// SHM) is judged by the object actually opened, never a re-resolved path.
+#[cfg(unix)]
 fn owned_file(max: u64) -> OwnedPathOptions {
     OwnedPathOptions {
         kind: Some(ObjectKind::File),
@@ -85,6 +105,7 @@ fn owned_file(max: u64) -> OwnedPathOptions {
 /// parent must already be a checked private directory, and the leaf name —
 /// now also bound by the crate's `^[A-Za-z0-9][A-Za-z0-9._-]{0,126}$`
 /// publication grammar — is handed to the atomic publish call.
+#[cfg(unix)]
 fn publish_target(path: &Path) -> Result<(PathBuf, &str)> {
     let parent = check_directory(path.parent().ok_or(Error::PrivateState)?)?;
     let name = path
@@ -94,6 +115,7 @@ fn publish_target(path: &Path) -> Result<(PathBuf, &str)> {
     Ok((parent, name))
 }
 
+#[cfg(unix)]
 pub fn default_root() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("XCB_STATE") {
         return Ok(PathBuf::from(path));
@@ -102,6 +124,17 @@ pub fn default_root() -> Result<PathBuf> {
     Ok(PathBuf::from(home).join(".local/share/xcb"))
 }
 
+/// Make a directory's entry changes durable. Windows cannot open a directory
+/// as a plain file, and NTFS journals its metadata, so there it does nothing.
+pub fn sync_directory(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    std::fs::File::open(path)?.sync_all()?;
+    #[cfg(windows)]
+    let _ = path;
+    Ok(())
+}
+
+#[cfg(unix)]
 pub fn directory(path: &Path) -> Result<PathBuf> {
     if !path.is_absolute()
         || path
@@ -125,6 +158,7 @@ pub fn directory(path: &Path) -> Result<PathBuf> {
     check_directory(path)
 }
 
+#[cfg(unix)]
 pub fn check_directory(path: &Path) -> Result<PathBuf> {
     let meta = fs::symlink_metadata(path)?;
     if meta.file_type().is_symlink() {
@@ -139,11 +173,13 @@ pub fn check_directory(path: &Path) -> Result<PathBuf> {
     Ok(path.to_owned())
 }
 
+#[cfg(unix)]
 pub fn check_file(file: &File, max: u64) -> Result<()> {
     assert_owned_fd(file.as_raw_fd(), &owned_file(max)).map_err(map_custody_error)?;
     Ok(())
 }
 
+#[cfg(unix)]
 pub fn open_file(path: &Path, max: u64) -> Result<File> {
     // A racing private::replace can unlink the name between open and fstat:
     // the descriptor then names an inode with no surviving link. Re-resolve
@@ -174,6 +210,7 @@ pub fn open_file(path: &Path, max: u64) -> Result<File> {
 /// descriptor whose link count reached zero no longer has any name to check:
 /// it is treated exactly like an absent file. A surviving name still gets the
 /// full private-file check, including the single-name requirement.
+#[cfg(unix)]
 pub fn open_file_maybe_vanished(path: &Path, max: u64) -> Result<Option<File>> {
     let file = match OpenOptions::new()
         .read(true)
@@ -231,6 +268,50 @@ pub(crate) fn lock(file: &File) -> Result<()> {
     }
 }
 
+/// A held exclusive advisory lock that releases its open file description
+/// before the descriptor closes.
+///
+/// Dropping a locked `File` only closes this process's descriptor. A child
+/// another thread spawned while the lock was held can carry an inherited
+/// reference to the same open file description through its pre-exec window,
+/// so a close-only release can leave the lock looking held for a few
+/// milliseconds after this process let go — enough for a follow-up `try_lock`
+/// on the same path to refuse a lock nothing owns. `File::unlock`
+/// (`flock(LOCK_UN)`) releases the description itself, which an inherited
+/// reference cannot keep alive. Measured under concurrent spawning on both
+/// supported platforms: close-only release shows transient refusals, an
+/// explicit unlock shows none.
+pub struct ExclusiveLock(File);
+
+impl ExclusiveLock {
+    /// Guard a descriptor whose exclusive lock was just acquired. Construct
+    /// the guard before any early return that would otherwise drop the raw
+    /// `File`, so every release goes through `unlock`.
+    pub fn held(file: File) -> Self {
+        Self(file)
+    }
+
+    /// The locked descriptor, for custody checks such as `same_file`.
+    pub fn file(&self) -> &File {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for ExclusiveLock {
+    type Target = File;
+
+    fn deref(&self) -> &File {
+        &self.0
+    }
+}
+
+impl Drop for ExclusiveLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+#[cfg(unix)]
 pub(crate) fn same_file(path: &Path, file: &File) -> Result<()> {
     let opened = file.metadata()?;
     let named = fs::symlink_metadata(path)?;
@@ -240,6 +321,7 @@ pub(crate) fn same_file(path: &Path, file: &File) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 pub fn create(path: &Path, bytes: &[u8]) -> Result<()> {
     let (parent, name) = publish_target(path)?;
     // create_once commits with link(2): an existing name fails the commit
@@ -256,14 +338,28 @@ pub fn create(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 pub fn replace(path: &Path, bytes: &[u8], expected: &str) -> Result<()> {
+    replace_guarded(path, bytes, expected, || Ok(()))
+}
+
+/// Add an operation's original-object/authority checks to the existing
+/// digest and inode guard, including the final check before publication.
+#[cfg(unix)]
+pub(crate) fn replace_guarded(
+    path: &Path,
+    bytes: &[u8],
+    expected: &str,
+    check: impl Fn() -> Result<()>,
+) -> Result<()> {
     let (parent, name) = publish_target(path)?;
     let current_file = open_file(path, 1024 * 1024)?;
     lock(&current_file)?;
+    let current_file = ExclusiveLock::held(current_file);
     same_file(path, &current_file)?;
     let current = read(path, 1024 * 1024)?;
     if crate::digest(&current) != expected {
         return Err(Error::Conflict("file revision changed"));
     }
+    check()?;
     // The flock on the current inode stays held across the guarded publish:
     // a sibling replace on the same inode serializes here or fails busy,
     // while the commit guard re-verifies digest and identity immediately
@@ -274,6 +370,7 @@ pub fn replace(path: &Path, bytes: &[u8], expected: &str) -> Result<()> {
     let published = {
         let guard = |_: &Path| -> std::result::Result<(), CustodyError> {
             let verdict = (|| -> Result<()> {
+                check()?;
                 if crate::digest(read(path, 1024 * 1024)?) != expected {
                     return Err(Error::Conflict("file revision changed"));
                 }
@@ -295,4 +392,84 @@ pub fn replace(path: &Path, bytes: &[u8], expected: &str) -> Result<()> {
             .unwrap_or_else(|| map_custody_error(error))
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(unix)]
+    use super::ExclusiveLock;
+    #[cfg(unix)]
+    use std::fs::OpenOptions;
+    #[cfg(unix)]
+    use std::process::{Command, Stdio};
+
+    #[test]
+    fn a_publication_time_guard_rejection_preserves_the_target_and_removes_staging() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root =
+            super::directory(&xcb_core::canonical(temp.path()).unwrap().join("state")).unwrap();
+        let target = root.join("guarded.json");
+        super::create(&target, b"original").unwrap();
+        let checks = std::cell::Cell::new(0);
+        let result =
+            super::replace_guarded(&target, b"replacement", &crate::digest(b"original"), || {
+                checks.set(checks.get() + 1);
+                if checks.get() == 2 {
+                    Err(crate::Error::Conflict(
+                        "synthetic publication-time rejection",
+                    ))
+                } else {
+                    Ok(())
+                }
+            });
+        assert!(matches!(
+            result,
+            Err(crate::Error::Conflict(
+                "synthetic publication-time rejection"
+            ))
+        ));
+        assert_eq!(checks.get(), 2);
+        assert_eq!(super::read(&target, 64).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        let file = super::open_file(&target, 64).unwrap();
+        file.try_lock().unwrap();
+        file.unlock().unwrap();
+    }
+
+    /// A child spawned while a lock is held can share its open file
+    /// description through the pre-exec window; here the descriptor is shared
+    /// outright, so under a close-only release the child's copy would keep the
+    /// lock held for its whole life. An explicit `unlock` on drop must free
+    /// the description while the child still runs.
+    #[cfg(unix)]
+    #[test]
+    fn a_released_lock_is_not_held_by_a_shared_descriptor() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("held.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        file.try_lock().unwrap();
+        let lock = ExclusiveLock::held(file);
+        let mut child = Command::new("/bin/sleep")
+            .arg("30")
+            .stdin(Stdio::from(lock.file().try_clone().unwrap()))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        drop(lock);
+        let probe = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let held = probe.try_lock().is_err();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(!held, "an inherited descriptor must not outlive the guard");
+    }
 }
