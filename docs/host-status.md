@@ -2,7 +2,7 @@
 
 The optional host status endpoint records when each of two home laptops last
 reported to the xcb deployment. A website can read it while both laptops or
-their internet connection are down. Each laptop publishes only an anonymous
+their internet connection are down. Each laptop publishes only a bounded
 alias, its current health category and the age of its local observation.
 
 Use this with the [unattended maintenance runner](unattended-maintenance.md).
@@ -17,7 +17,7 @@ the supervisor loop has stopped.
 Deploy the backend through the repository's release and deployment process.
 The existing relay tables, authentication and encrypted fleet data keep their
 current behavior. Host availability uses a separate `xcbHostStatus` table with
-at most two rows, one latest receipt for each fixed alias.
+at most two rows, one latest receipt for each configured alias.
 
 Set `XCB_HOST_STATUS_KEYS` to a JSON array of one or two objects with exactly
 these fields:
@@ -25,7 +25,7 @@ these fields:
 | Field | Value |
 | --- | --- |
 | `id` | `laptop-1` or `laptop-2` |
-| `label` | `laptop 1` or `laptop 2`, matching the id |
+| `label` | `laptop 1` or `laptop 2` matching the id, optionally with ` (name)` where name is lowercase letters, digits and hyphens, up to 24 characters |
 | `tokenSha256` | The token's SHA-256 digest, as 64 lowercase hexadecimal characters |
 
 Give each laptop a different randomly generated token of 64 lowercase
@@ -36,7 +36,7 @@ the sender with the exact endpoint
 `https://<deployment>.convex.site/host-status` without a credential.
 
 The entire configuration is rejected if either entry is malformed, an alias or
-digest is repeated, a label differs from its fixed anonymous name, or there are
+digest is repeated, a label differs from its bounded public form, or there are
 more than two entries. An absent setting or empty array disables ingestion and
 returns an explicit unconfigured public result.
 

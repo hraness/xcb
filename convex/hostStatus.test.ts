@@ -55,11 +55,26 @@ describe("anonymous host availability", () => {
     expect(parseKeys(undefined)).toEqual([]);
     expect(parseKeys("[]")).toEqual([]);
     expect(parseKeys(JSON.stringify(keys()))).toHaveLength(2);
+    expect(parseKeys(JSON.stringify([
+      { ...keys()[0], label: "laptop 1 (jungle)" },
+      { ...keys()[1], label: "laptop 2 (cangrejo)" },
+    ]))).toHaveLength(2);
+    expect(parseKeys(JSON.stringify([{ ...keys()[0], label: "laptop 1 (a-b-2)" }]))).toHaveLength(1);
     for (const invalid of [
       null, {}, [...keys(), keys()[0]], [keys()[0], keys()[0]],
       [{ ...keys()[0], hostname: "private-name" }],
       [{ ...keys()[0], id: "real-hostname" }],
       [{ ...keys()[0], label: "private-name" }],
+      [{ ...keys()[0], label: "laptop 2" }],
+      [{ ...keys()[0], label: "laptop 3" }],
+      [{ ...keys()[0], label: "laptop 1 (Private-Name)" }],
+      [{ ...keys()[0], label: "laptop 1 (host.local)" }],
+      [{ ...keys()[0], label: "laptop 1 ()" }],
+      [{ ...keys()[0], label: "laptop 1 (a b)" }],
+      [{ ...keys()[0], label: "laptop 1 (-lead)" }],
+      [{ ...keys()[0], label: `laptop 1 (${"a".repeat(25)})` }],
+      [{ ...keys()[0], label: "laptop 1 (jungle) extra" }],
+      [{ ...keys()[0], label: "laptop 2 (cangrejo)" }],
       [{ ...keys()[0], tokenSha256: "not-a-hash" }],
       [keys()[0], { ...keys()[1], tokenSha256: HASH_A }],
     ]) expect(() => parseKeys(JSON.stringify(invalid))).toThrow();
