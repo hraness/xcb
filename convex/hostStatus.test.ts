@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, setSystemTime, test } from "bu
 import { convexTest } from "convex-test";
 import { makeFunctionReference } from "convex/server";
 
-import { FRESH_MS, OFFLINE_MS, digestEqual, parseHeartbeat, parseKeys, sha256 } from "./hostStatus";
+import { FRESH_MS, OFFLINE_MS, activityPerMachine, digestEqual, parseHeartbeat, parseKeys, sha256 } from "./hostStatus";
 import schema from "./schema";
 import { modules as relayModules } from "./test.setup";
 
@@ -51,37 +51,71 @@ function post(t: TestWorld, body: unknown = beat(), token = TOKEN_A) {
 }
 
 describe("anonymous host availability", () => {
-  test("configuration is closed, fixed to two anonymous aliases, and all-or-nothing", () => {
+  test("configuration is closed, bounded to 100 slug-id machines with free-form labels, and all-or-nothing", () => {
     expect(parseKeys(undefined)).toEqual([]);
     expect(parseKeys("[]")).toEqual([]);
     expect(parseKeys(JSON.stringify(keys()))).toHaveLength(2);
     expect(parseKeys(JSON.stringify([
-      { ...keys()[0], label: "laptop 1 (jungle)" },
-      { ...keys()[1], label: "laptop 2 (cangrejo)" },
-    ]))).toHaveLength(2);
-    expect(parseKeys(JSON.stringify([{ ...keys()[0], label: "laptop 1 (a-b-2)" }]))).toHaveLength(1);
+      { id: "jungle", label: "Ben's MacBook Pro 🖥", tokenSha256: HASH_A },
+      { id: "office-mini-2", label: "office mini", tokenSha256: HASH_B },
+      { id: "laptop-1", label: "laptop 1 (jungle)", tokenSha256: "c".repeat(64) },
+    ]))).toHaveLength(3);
+    expect(parseKeys(JSON.stringify(Array.from({ length: 100 }, (_, i) => ({
+      id: `machine-${i}`, label: `machine ${i}`, tokenSha256: String(i).padStart(64, "0"),
+    }))))).toHaveLength(100);
     for (const invalid of [
-      null, {}, [...keys(), keys()[0]], [keys()[0], keys()[0]],
+      null, {}, [keys()[0], keys()[0]],
+      Array.from({ length: 101 }, (_, i) => ({ id: `machine-${i}`, label: "m", tokenSha256: String(i).padStart(64, "0") })),
       [{ ...keys()[0], hostname: "private-name" }],
-      [{ ...keys()[0], id: "real-hostname" }],
-      [{ ...keys()[0], label: "private-name" }],
-      [{ ...keys()[0], label: "laptop 2" }],
-      [{ ...keys()[0], label: "laptop 3" }],
-      [{ ...keys()[0], label: "laptop 1 (Private-Name)" }],
-      [{ ...keys()[0], label: "laptop 1 (host.local)" }],
-      [{ ...keys()[0], label: "laptop 1 ()" }],
-      [{ ...keys()[0], label: "laptop 1 (a b)" }],
-      [{ ...keys()[0], label: "laptop 1 (-lead)" }],
-      [{ ...keys()[0], label: `laptop 1 (${"a".repeat(25)})` }],
-      [{ ...keys()[0], label: "laptop 1 (jungle) extra" }],
-      [{ ...keys()[0], label: "laptop 2 (cangrejo)" }],
+      [{ ...keys()[0], id: "" }],
+      [{ ...keys()[0], id: "-lead" }],
+      [{ ...keys()[0], id: "Laptop-1" }],
+      [{ ...keys()[0], id: "host.local" }],
+      [{ ...keys()[0], id: "a b" }],
+      [{ ...keys()[0], id: "a_b" }],
+      [{ ...keys()[0], id: `a${"b".repeat(32)}` }],
+      [{ ...keys()[0], label: "" }],
+      [{ ...keys()[0], label: "   " }],
+      [{ ...keys()[0], label: "x".repeat(49) }],
+      [{ ...keys()[0], label: "bad\ttab" }],
+      [{ ...keys()[0], label: 42 }],
       [{ ...keys()[0], tokenSha256: "not-a-hash" }],
       [keys()[0], { ...keys()[1], tokenSha256: HASH_A }],
     ]) expect(() => parseKeys(JSON.stringify(invalid))).toThrow();
-    expect(() => parseKeys(" ".repeat(1025))).toThrow();
+    expect(() => parseKeys(" ".repeat(32 * 1024 + 1))).toThrow();
     expect(digestEqual(HASH_A, HASH_A)).toBe(true);
     expect(digestEqual(HASH_A, HASH_B)).toBe(false);
     expect(digestEqual(HASH_A, "a")).toBe(false);
+  });
+
+  test("the shared activity budget keeps the payload bounded as the fleet grows", () => {
+    expect(activityPerMachine(1)).toBe(288);
+    expect(activityPerMachine(2)).toBe(288);
+    expect(activityPerMachine(21)).toBe(288);
+    expect(activityPerMachine(22)).toBe(279);
+    expect(activityPerMachine(100)).toBe(61);
+    expect(activityPerMachine(128)).toBe(48);
+    expect(activityPerMachine(1000)).toBe(48);
+  });
+
+  test("a third configured machine beats with its own credential and renders in id order", async () => {
+    const t = convexTest(schema, modules);
+    const third = await sha256(TOKEN_C);
+    process.env[ENV] = JSON.stringify([
+      { id: "zebra", label: "Zebra", tokenSha256: HASH_B },
+      { id: "jungle", label: "Ben's MacBook", tokenSha256: HASH_A },
+      { id: "alpha", label: "alpha host", tokenSha256: third },
+    ]);
+    expect((await post(t, beat(), TOKEN_A)).status).toBe(204);
+    expect((await post(t, beat(7), TOKEN_C)).status).toBe(204);
+    const payload = await (await t.fetch("/host-status")).json();
+    expect(payload.machines.map((m: { id: string }) => m.id)).toEqual(["alpha", "jungle", "zebra"]);
+    expect(payload.machines.map((m: { label: string }) => m.label)).toEqual(["alpha host", "Ben's MacBook", "Zebra"]);
+    expect(payload.machines[1].state).toBe("online");
+    expect(payload.machines[0].state).toBe("online");
+    expect(payload.machines[2].state).toBe("never");
+    const text = JSON.stringify(payload);
+    for (const secret of [TOKEN_A, TOKEN_C, HASH_A, HASH_B, third]) expect(text).not.toContain(secret);
   });
 
   test("a received heartbeat exposes only the fixed public fields", async () => {
