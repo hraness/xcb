@@ -9,8 +9,8 @@ const repository = join(import.meta.dir, "..", "..");
 test("renders the repository README with stable heading fragments and repository-rooted relative links", async () => {
   const source = await readFile(join(repository, "README.md"), "utf8");
   const html = renderReadmeHtml(source);
-  expect(html).toContain('<h2 id="standalone-package">Standalone package</h2>');
-  expect(html).toContain('<h2 id="readiness">Readiness</h2>');
+  expect(html).toContain('<h2 id="install">Install</h2>');
+  expect(html).toContain('<h2 id="use-it-as-your-coding-agent">Use it as your coding agent</h2>');
   expect(html).toContain('href="https://github.com/hraness/xcb/blob/main/docs/compatibility.md"');
   expect(html).toContain('href="https://github.com/hraness/xcb/blob/main/MANAGED-CODEX.md"');
   expect(html).not.toContain("<script");
@@ -21,9 +21,9 @@ test("extracts the landing block between the shared Hraness markers", async () =
   expect(source.indexOf(LANDING_START)).toBeGreaterThanOrEqual(0);
   expect(source.indexOf(LANDING_END)).toBeGreaterThan(source.indexOf(LANDING_START));
   const landing = readmeLanding(source);
-  expect(landing.title).toBe("xcb");
+  expect(landing.title).toBe("Excalibur (xcb)");
   expect(landing.lead).toContain("subscription router");
-  expect(landing.markdown).toContain("customizable panes");
+  expect(landing.markdown).toContain("headless JSON route");
 });
 
 test("rejects unsafe README link targets", () => {
