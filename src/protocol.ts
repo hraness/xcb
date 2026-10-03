@@ -107,7 +107,7 @@ const ERROR_CODES = new Set<XcbProtocolErrorCode>([
   "idempotency_conflict", "not_found", "busy", "internal",
 ]);
 const METHODS = new Set<XcbProtocolMethod>(["initialize", "command/submit"]);
-const fail = (code: string): never => { throw new Error(`XCB_PROTOCOL_${code}`); };
+function fail(code: string): never { throw new Error(`XCB_PROTOCOL_${code}`); }
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
@@ -132,7 +132,7 @@ function unicode(value: string, code: string): void {
 }
 
 function text(value: unknown, maxBytes: number, code: string, empty = false): string {
-  let result: string;
+  let result = "";
   try { result = boundedText(value, maxBytes, empty); } catch { fail(code); }
   unicode(result, code);
   return result;
@@ -168,8 +168,8 @@ function validateCapabilities(value: unknown, code = "CAPABILITIES_INVALID"): Xc
   if (!Array.isArray(fields.versions) || !Array.isArray(fields.features)
     || fields.versions.length === 0 || fields.versions.length > 8
     || fields.features.length > XCB_PROTOCOL_MAX_CAPABILITIES) fail(code);
-  const versions = fields.versions.map(item => protocolText(item, 96, code));
-  const features = fields.features.map(item => protocolText(item, 96, code));
+  const versions = (fields.versions as unknown[]).map(item => protocolText(item, 96, code));
+  const features = (fields.features as unknown[]).map(item => protocolText(item, 96, code));
   if (new Set(versions).size !== versions.length || new Set(features).size !== features.length) fail(code);
   sortedUnique(versions, code); sortedUnique(features, code);
   if (!versions.includes(XCB_PROTOCOL_SCHEMA)) fail("VERSION_UNSUPPORTED");
@@ -208,7 +208,7 @@ function validateJson(value: unknown, depth = 0, ancestors = new Set<object>()):
 function validateArguments(value: unknown): Readonly<{ readonly [key: string]: ProtocolJson }> {
   if (!isPlainRecord(value)) fail("ARGUMENTS_INVALID");
   validateJson(value);
-  let bytes: number;
+  let bytes = 0;
   try { bytes = new TextEncoder().encode(canonicalJson(value)).byteLength; } catch { fail("ARGUMENTS_INVALID"); }
   if (bytes > XCB_PROTOCOL_MAX_ARGUMENT_BYTES) fail("ARGUMENTS_LIMIT");
   return value as Readonly<{ readonly [key: string]: ProtocolJson }>;
@@ -296,7 +296,7 @@ export function validateProtocolFrame(value: unknown): XcbProtocolFrame {
  */
 export function encodeProtocolFrame(value: XcbProtocolFrame): Uint8Array {
   const frame = validateProtocolFrame(value);
-  let canonical: string;
+  let canonical = "";
   try { canonical = canonicalJson(frame); } catch { fail("CANONICAL_JSON"); }
   const bytes = new TextEncoder().encode(`${canonical}\n`);
   if (bytes.byteLength > XCB_PROTOCOL_MAX_FRAME_BYTES) fail("FRAME_LIMIT");
@@ -311,12 +311,12 @@ export function decodeProtocolFrame(input: Uint8Array): XcbProtocolFrame {
   for (let index = 0; index < input.byteLength - 1; index += 1) {
     if (input[index] === 0x0a || input[index] === 0x0d) fail("FRAME_BOUNDARY");
   }
-  let textValue: string;
+  let textValue = "";
   try { textValue = new TextDecoder("utf-8", { fatal: true }).decode(input.subarray(0, -1)); } catch { fail("FRAME_ENCODING"); }
   if (textValue.length === 0) fail("FRAME_JSON");
   let value: unknown;
   try { value = JSON.parse(textValue) as unknown; } catch { fail("FRAME_JSON"); }
-  let canonical: string;
+  let canonical = "";
   try { canonical = canonicalJson(value); } catch { fail("CANONICAL_JSON"); }
   if (canonical !== textValue) fail("FRAME_NOT_CANONICAL");
   return validateProtocolFrame(value);
