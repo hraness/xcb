@@ -239,6 +239,12 @@ class MaintenanceTests(unittest.TestCase):
         self.assertEqual(result["at_s"], 10000)
         self.assertIsNone(result["sample"]["review_attention"])
 
+    def test_probe_preserves_task_rows_for_heartbeat_counts(self):
+        result = {"outcome": "completed", "code": 0,
+                  "stdout": m.encoded([{"state": "queued"}, {"state": "uncertain"}])}
+        with patch.object(m, "environment", return_value={}), patch.object(m, "command", return_value=result):
+            self.assertEqual(m.probe(self.config, ["tasks"], m.command), [{"state": "queued"}, {"state": "uncertain"}])
+
     def test_pressure_requires_sustained_samples_critical_immediate(self):
         history = [m.sanitize_sample(resources("warning"), service(), 10000 + n * 60) for n in range(3)]
         self.assertNotIn("memory_sustained_pressure", m.incident_codes(self.config, history[:2]))

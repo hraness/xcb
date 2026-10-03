@@ -295,7 +295,10 @@ def probe(config, arguments, runner=command):
         if result["outcome"] != "completed" or result["code"] != 0:
             return None
         data = decode(result["stdout"])
-        return data if isinstance(data, dict) else None
+        # Resource and service probes return objects; task inspection returns
+        # a bounded array of aggregateable rows. Preserve both shapes so the
+        # heartbeat can report task state instead of silently defaulting to 0.
+        return data if isinstance(data, (dict, list)) else None
     except (ValueError, OSError):
         return None
 
