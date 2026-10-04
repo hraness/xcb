@@ -42,6 +42,8 @@
     "build:dist": "bun scripts/build-dist.ts",
     "check:package": "bun scripts/package-smoke.ts",
     "test": "bun test ./src ./test ./scripts",
+    "test:assurance": "bun test test/assurance.test.ts",
+    "assurance:baseline": "bun scripts/assurance-baseline.ts",
     "gobstopper-editor": "bun src/gobstopper-editor.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "check:versions": "bun scripts/release-version-contract.ts",

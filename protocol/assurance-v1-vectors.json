@@ -1,0 +1,140 @@
+{
+  "schema": "xcb.assurance.v1",
+  "version": 1,
+  "golden": [
+    {
+      "name": "first-settled-command",
+      "commands": [
+        {
+          "commandId": "cmd_gold_01",
+          "target": "task.fixture",
+          "command": "task/accept",
+          "arguments": {"seed": 1},
+          "expectedRevision": 0,
+          "idempotencyKey": "idem_gold_01"
+        }
+      ],
+      "expectedStatuses": ["settled"],
+      "expectedRevisions": [1]
+    },
+    {
+      "name": "idempotent-replay",
+      "commands": [
+        {
+          "commandId": "cmd_gold_02",
+          "target": "task.fixture",
+          "command": "task/accept",
+          "arguments": {"seed": 2},
+          "expectedRevision": 0,
+          "idempotencyKey": "idem_gold_02"
+        },
+        {
+          "commandId": "cmd_gold_02",
+          "target": "task.fixture",
+          "command": "task/accept",
+          "arguments": {"seed": 2},
+          "expectedRevision": 0,
+          "idempotencyKey": "idem_gold_02"
+        }
+      ],
+      "expectedStatuses": ["settled", "replayed"],
+      "expectedRevisions": [1, 1]
+    },
+    {
+      "name": "revision-conflict",
+      "commands": [
+        {
+          "commandId": "cmd_gold_03",
+          "target": "task.fixture",
+          "command": "task/accept",
+          "arguments": {"seed": 3},
+          "expectedRevision": 9,
+          "idempotencyKey": "idem_gold_03"
+        }
+      ],
+      "expectedStatuses": ["rejected"],
+      "expectedErrors": ["revision_conflict"]
+    },
+    {
+      "name": "settled-command-retry",
+      "commands": [
+        {
+          "commandId": "cmd_gold_04",
+          "target": "task.fixture",
+          "command": "task/accept",
+          "arguments": {"seed": 4},
+          "expectedRevision": 0,
+          "idempotencyKey": "idem_gold_04"
+        },
+        {
+          "commandId": "cmd_gold_04",
+          "target": "task.fixture",
+          "command": "task/accept",
+          "arguments": {"seed": 4},
+          "expectedRevision": 0,
+          "idempotencyKey": "idem_gold_04"
+        }
+      ],
+      "expectedStatuses": ["settled", "replayed"],
+      "expectedRevisions": [1, 1]
+    }
+  ],
+  "negative": [
+    {
+      "name": "bad-command-id",
+      "commands": [
+        {
+          "commandId": "command-without-prefix",
+          "target": "task.fixture",
+          "command": "task/accept",
+          "arguments": {},
+          "expectedRevision": 0,
+          "idempotencyKey": "idem_negative_01"
+        }
+      ],
+      "error": "XCB_ASSURANCE_COMMAND_INVALID"
+    },
+    {
+      "name": "bad-idempotency-key",
+      "commands": [
+        {
+          "commandId": "cmd_negative_02",
+          "target": "task.fixture",
+          "command": "task/accept",
+          "arguments": {},
+          "expectedRevision": 0,
+          "idempotencyKey": "retry-me"
+        }
+      ],
+      "error": "XCB_ASSURANCE_COMMAND_INVALID"
+    },
+    {
+      "name": "negative-revision",
+      "commands": [
+        {
+          "commandId": "cmd_negative_03",
+          "target": "task.fixture",
+          "command": "task/accept",
+          "arguments": {},
+          "expectedRevision": -1,
+          "idempotencyKey": "idem_negative_03"
+        }
+      ],
+      "error": "XCB_ASSURANCE_COMMAND_INVALID"
+    },
+    {
+      "name": "non-object-arguments",
+      "commands": [
+        {
+          "commandId": "cmd_negative_04",
+          "target": "task.fixture",
+          "command": "task/accept",
+          "arguments": ["not-an-object"],
+          "expectedRevision": 0,
+          "idempotencyKey": "idem_negative_04"
+        }
+      ],
+      "error": "XCB_ASSURANCE_COMMAND_INVALID"
+    }
+  ]
+}
