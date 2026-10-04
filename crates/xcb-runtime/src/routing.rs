@@ -610,8 +610,21 @@ pub async fn smart_route(
     config: &Config,
     request: RouteRequest<'_>,
 ) -> Result<RouteDecision> {
-    crate::native_backend::require_execution(request.requirements)?;
-    let admitted = admitted_providers(store);
+    crate::native_backend::require_execution(config, request.requirements)?;
+    let mut admitted = admitted_providers(store);
+    if request.requirements.native_execution {
+        admitted.retain(|provider| {
+            config.native_execution.scopes.iter().any(|scope| {
+                scope.providers.contains(provider)
+                    && crate::native_backend::require_provider_qualification(
+                        store.root(),
+                        *provider,
+                        scope.github_credentials,
+                    )
+                    .is_ok()
+            })
+        });
+    }
     route_with_admitted(store, config, request, &admitted).await
 }
 
@@ -634,8 +647,21 @@ pub async fn failover_routes(
     config: &Config,
     request: FailoverRequest<'_>,
 ) -> Result<FailoverRoutes> {
-    crate::native_backend::require_execution(request.requirements)?;
-    let admitted = admitted_providers(store);
+    crate::native_backend::require_execution(config, request.requirements)?;
+    let mut admitted = admitted_providers(store);
+    if request.requirements.native_execution {
+        admitted.retain(|provider| {
+            config.native_execution.scopes.iter().any(|scope| {
+                scope.providers.contains(provider)
+                    && crate::native_backend::require_provider_qualification(
+                        store.root(),
+                        *provider,
+                        scope.github_credentials,
+                    )
+                    .is_ok()
+            })
+        });
+    }
     failover_routes_with_admitted(store, config, request, &admitted).await
 }
 

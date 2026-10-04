@@ -5845,7 +5845,11 @@ impl Supervisor {
             managed.imported_session_context(&task.conversation, &task.source_message)?;
         let mut routing_prompt = worker_prompt(&prompt_task, &preferences, &[], false);
         append_context(&mut routing_prompt, &imported_context);
-        let config = Config::load(store.root())?.0;
+        let mut config = Config::load(store.root())?.0;
+        config
+            .native_execution
+            .scopes
+            .retain(|scope| scope.workspace == Path::new(&task.workspace));
         let requirements = task
             .worker_sessions
             .iter()
@@ -5855,6 +5859,14 @@ impl Supervisor {
                     requirements.merge(session.map(|s| s.requirements).unwrap_or_default())
                 })
             })?;
+        let requirements = requirements.merge(xcb_core::session::TaskRequirements {
+            native_execution: config
+                .native_execution
+                .scopes
+                .iter()
+                .any(|scope| scope.workspace == Path::new(&task.workspace)),
+            ..Default::default()
+        });
         let (provider_preference, provider_required) = managed.effective_route_preferences(task)?;
         let required_provider = provider_required.then_some(provider_preference).flatten();
         let created_session = task.session.is_none();

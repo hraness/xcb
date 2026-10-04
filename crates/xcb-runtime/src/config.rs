@@ -157,6 +157,8 @@ pub struct Config {
     /// Explicitly registered host tool servers, shared by every provider.
     #[serde(skip_serializing_if = "crate::capabilities::CapabilityConfig::is_empty")]
     pub capabilities: crate::capabilities::CapabilityConfig,
+    #[serde(skip_serializing_if = "crate::native_backend::NativeConfig::is_empty")]
+    pub native_execution: crate::native_backend::NativeConfig,
     pub extensions: Extensions,
 }
 pub const DEFAULT_QUOTA_LIMIT_COOLDOWN_MS: u64 = 1_800_000;
@@ -175,6 +177,7 @@ impl Default for Config {
             routing: RoutingConfig::default(),
             resources: crate::host_resources::ResourcePolicy::default(),
             capabilities: crate::capabilities::CapabilityConfig::default(),
+            native_execution: crate::native_backend::NativeConfig::default(),
             extensions: Extensions::default(),
         }
     }
@@ -182,6 +185,7 @@ impl Default for Config {
 impl Config {
     pub fn validate(&self) -> Result<()> {
         self.capabilities.validate()?;
+        self.native_execution.validate()?;
         self.resources.validate().map_err(|message| Error::Guided {
             message,
             next: Some("check resources in config.json".into()),

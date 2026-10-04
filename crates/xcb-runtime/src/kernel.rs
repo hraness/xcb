@@ -865,10 +865,14 @@ async fn execute_inner(
         if *cancel.borrow() {
             return Err(Error::Unavailable("cancelled before the next turn"));
         }
-        let config = Config::load(store.root())?.0;
+        let mut config = Config::load(store.root())?.0;
         let session = store
             .session(&session_id)?
             .ok_or(Error::Unavailable("session not found"))?;
+        config
+            .native_execution
+            .scopes
+            .retain(|scope| scope.workspace == Path::new(&session.workspace));
         ready(&store, &session)?;
         tried.insert(format!("{}/{}", session.account, session.model.key()));
         let message = Message {

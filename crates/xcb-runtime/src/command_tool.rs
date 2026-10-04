@@ -249,9 +249,47 @@ impl CommandTools {
         } else {
             None
         };
+        let native = if name == "workspace_native_exec" {
+            if let Err(error) = crate::native_backend::admit(
+                &store,
+                &run,
+                workspace.root(),
+                &arguments,
+                &call,
+                false,
+            ) {
+                return (Err(error), EffectState::None);
+            }
+            match native::Request::parse(&arguments, workspace.root()) {
+                Ok(request) => Some(request),
+                Err(error) => return (Err(error), EffectState::None),
+            }
+        } else {
+            None
+        };
         let (cancel, cancellation) = watch::channel(false);
-        let host_call = host.is_some();
+        let host_call = host.is_some() || native.is_some();
+        let native_owner = (store.clone(), run.clone(), call.clone());
         let task = tokio::task::spawn_blocking(move || {
+            if let Some(request) = native {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build();
+                return match runtime {
+                    Ok(runtime) => runtime.block_on(native::call(
+                        native_owner.0,
+                        native_owner.1,
+                        native_owner.2,
+                        workspace,
+                        request,
+                        cancellation,
+                    )),
+                    Err(_) => (
+                        Err(Error::Unavailable("native command owner could not start")),
+                        EffectState::None,
+                    ),
+                };
+            }
             if let Some(request) = host {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -725,5 +763,7 @@ pub async fn recover(store: &Store, run: &RunRecord, expected_digest: &str) -> R
 }
 
 mod host;
+mod native;
+pub use native::qualify as qualify_native;
 #[cfg(all(test, unix))]
 mod tests;

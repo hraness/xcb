@@ -1331,6 +1331,7 @@ fn broker_guidance_keeps_native_sandbox_read_only_and_zero_tool_launches_empty()
                 names,
                 [
                     "workspace_exec",
+                    "workspace_native_exec",
                     "xcb_tools_list",
                     "xcb_tools_call",
                     "xcb_tools_image",

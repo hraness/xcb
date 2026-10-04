@@ -7,6 +7,7 @@ mod devin_sign_in;
 mod doctor;
 mod habitat;
 mod health;
+mod native;
 mod remote;
 mod resources;
 mod route;
@@ -67,6 +68,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    #[command(about = "Inspect, qualify and grant native provider execution")]
+    Native {
+        #[command(subcommand)]
+        command: native::Commands,
+    },
     /// Configure host tools shared by Codex, Claude and Devin.
     Tools {
         #[command(subcommand)]
@@ -1925,12 +1931,18 @@ async fn dispatch_inner(
                     account: account.clone(),
                     model: model.clone().filter(|model| model != "auto"),
                 };
+                let workspace = xcb_core::canonical(&cli.cwd)?;
+                let mut config = config.clone();
+                config
+                    .native_execution
+                    .scopes
+                    .retain(|scope| scope.workspace == workspace);
                 let mut requirements = xcb_core::session::TaskRequirements {
                     signed_in_browser,
                     desktop,
+                    native_execution: !config.native_execution.is_empty(),
                     ..Default::default()
                 };
-                let workspace = xcb_core::canonical(&cli.cwd)?;
                 let managed = xcb_runtime::managed::ManagedStore::open(store.root())?;
                 let (preference, required) =
                     managed.initial_route_preferences(&workspace, &prompt)?;
@@ -3424,6 +3436,9 @@ async fn dispatch_inner(
             Ok(0)
         }
         Some(Commands::Tools { command }) => tools::execute(&store, command, cli.json).await,
+        Some(Commands::Native { command }) => {
+            Box::pin(native::execute(&store, &cli.cwd, command, cli.json)).await
+        }
         Some(Commands::Judge { command }) => {
             match command {
                 Some(JudgeCommand::Token) => {

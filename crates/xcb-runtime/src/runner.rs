@@ -575,6 +575,7 @@ fn provider_args(model: &ModelChoice, tools: bool) -> Vec<String> {
         "--setting-sources".into(),
         "".into(),
         "--strict-mcp-config".into(),
+        "--disable-slash-commands".into(),
         "--no-session-persistence".into(),
         "--max-turns".into(),
         "32".into(),
@@ -586,7 +587,7 @@ fn provider_args(model: &ModelChoice, tools: bool) -> Vec<String> {
         args.push(effort.as_str().into());
     }
     args.push("--settings".into());
-    args.push(json!({"disableAllHooks":true,"disableClaudeAiConnectors":true,"autoMemoryEnabled":false,"disableBundledSkills":true,"disableSkillShellExecution":true,"enableWorkflows":false,"workflowKeywordTriggerEnabled":false,"skillOverrides":{"doctor":"off","checkup":"off"},"enabledPlugins":{"agents-md@builtin":false}}).to_string());
+    args.push(json!({"disableAllHooks":true,"disableClaudeAiConnectors":true,"autoMemoryEnabled":false,"disableBundledSkills":true,"disableSkillShellExecution":true,"enableWorkflows":false,"workflowKeywordTriggerEnabled":false,"skillOverrides":{"doctor":"off","checkup":"off"},"enabledPlugins":{"agents-md@builtin":false,"cc-plugin-plugin-authoring@builtin":false}}).to_string());
     if tools {
         args.push("--allowedTools".into());
         args.push(
@@ -2513,7 +2514,18 @@ pub async fn run(
     if *cancel.borrow() {
         return Err(Error::Unavailable("cancelled before launch"));
     }
-    crate::native_backend::require_execution(session.requirements)?;
+    crate::native_backend::require_execution(&input.config, session.requirements)?;
+    if session.requirements.native_execution {
+        let scope = input
+            .config
+            .native_execution
+            .scope(Path::new(&session.workspace), session.model.provider)
+            .ok_or(Error::Unavailable(
+                "native execution is not granted to this workspace and provider",
+            ))?;
+        crate::native_backend::validate_scope(scope, store.root())?;
+        crate::native_backend::require_qualification(store.root())?;
+    }
     if session.requirements.signed_in_browser
         && !input.pane_generation
         && !input.config.capabilities.servers.iter().any(|server| {
@@ -2685,6 +2697,10 @@ pub(crate) async fn run_prepared<P: Protocol>(
 ) -> Result<Outcome> {
     let session = &input.session;
     let tools = !input.pane_generation;
+    let qualification = session.requirements.native_execution
+        && store
+            .session(&session.id)?
+            .is_none_or(|saved| !saved.requirements.native_execution);
     let prepared = match launch.prepared_run.take() {
         Some(run) => Ok(run),
         None => store.prepare_run(&session.id, session.revision, now_ms()),
@@ -2845,6 +2861,13 @@ pub(crate) async fn run_prepared<P: Protocol>(
                 base64: base64::engine::general_purpose::STANDARD.encode(bytes),
             });
         }
+        let text = if session.requirements.native_execution {
+            format!(
+                "The host explicitly granted native execution for this workspace and provider. Use workspace_native_exec for shell commands, host toolchains, Git and network requests in the real worktree: argv is a string array (use /bin/sh -c for shell syntax), cwd is relative (use .), timeoutMs is bounded, and network must be https. The executor enforces workspace confinement and DNS/HTTPS egress. Host GitHub credentials are available only when the host grant includes them; provider credentials and private configuration remain inaccessible. Changes are immediate, not staged. Do not use workspace_exec or retry uncertain commands. Keep every action inside the user's original authority.\n\n{text}"
+            )
+        } else {
+            text
+        };
         // Once start is attempted, failure or cancellation cannot establish
         // whether its transport partially delivered the request.
         prompt_submission = None;
@@ -3008,6 +3031,11 @@ pub(crate) async fn run_prepared<P: Protocol>(
                         name,
                         arguments,
                     } if admitted && tools => {
+                        if qualification && name != "workspace_native_exec" {
+                            pending_attention = true;
+                            quota_failure = Some(Failure::Policy);
+                            return Ok((Terminal::Failed, vec![]));
+                        }
                         if !seen_calls.insert(call_id.clone()) {
                             return Err(Error::Protocol("duplicate tool call identifier"));
                         }
@@ -3042,7 +3070,18 @@ pub(crate) async fn run_prepared<P: Protocol>(
                         // tool settles its own receipt inside finish_command.
                         // Every other tool settles its receipt together with
                         // the transcript append in one durable transaction.
-                        let (output, settle) = if name == "workspace_exec" {
+                        let (output, settle) = if matches!(
+                            name.as_str(),
+                            "workspace_exec" | "workspace_host_exec"
+                        ) && session.requirements.native_execution
+                        {
+                            (
+                                Err(Error::Unavailable(
+                                    "native tasks cannot fall back to offline or legacy host commands",
+                                )),
+                                Some(EffectState::None),
+                            )
+                        } else if name == "workspace_exec" {
                             match commands
                                 .start(
                                     store.clone(),
@@ -3148,12 +3187,19 @@ pub(crate) async fn run_prepared<P: Protocol>(
                         // Result shaping never aborts the turn: legal tool
                         // output that cannot ride the transcript bound is a
                         // tool rejection with guidance, not a protocol failure.
+                        let native_denial = input.session.requirements.native_execution
+                            && matches!(
+                                name.as_str(),
+                                "workspace_native_exec" | "workspace_exec" | "workspace_host_exec"
+                            )
+                            && output.is_err();
                         let prepared = crate::tool_output::prepare(
                             store.root(),
                             output,
                             name == "xcb_tools_call" || name == "xcb_tools_image",
                         );
                         let text = prepared.text;
+                        let unresolved_tool_effects = settle == Some(EffectState::Uncertain);
                         // The durable transcript carries display-safe text;
                         // the provider still receives the exact result.
                         let message = Message {
@@ -3194,6 +3240,15 @@ pub(crate) async fn run_prepared<P: Protocol>(
                         protocol
                             .reply(&mut process, &call_id, prepared.reply)
                             .await?;
+                        if unresolved_tool_effects {
+                            pending_attention = true;
+                            return Ok((Terminal::Failed, vec![]));
+                        }
+                        if native_denial {
+                            pending_attention = true;
+                            quota_failure = Some(Failure::Policy);
+                            return Ok((Terminal::Failed, vec![]));
+                        }
                         if capabilities
                             .as_ref()
                             .is_some_and(|manager| manager.policy_denied())
@@ -3293,7 +3348,14 @@ pub(crate) async fn run_prepared<P: Protocol>(
     effects = combine_effects(effects, protocol.host_effects());
     pending_attention |= protocol.host_pending_attention();
     let bridge_joined = close_bridge(bridge).await;
-    let joined = process_joined
+    let native_joined = store.run(&run.id)?.is_some_and(|record| {
+        record
+            .capability_processes
+            .keys()
+            .all(|name| !name.starts_with("native_"))
+    });
+    let joined = native_joined
+        && process_joined
         && protocol_joined
         && bridge_joined
         && commands_joined
@@ -4171,6 +4233,11 @@ mod tests {
                 settings["enabledPlugins"]["agents-md@builtin"],
                 json!(false)
             );
+            assert_eq!(
+                settings["enabledPlugins"]["cc-plugin-plugin-authoring@builtin"],
+                json!(false)
+            );
+            assert!(args.iter().any(|arg| arg == "--disable-slash-commands"));
             assert_eq!(settings["disableAllHooks"], json!(true));
             assert_eq!(settings["disableBundledSkills"], json!(true));
             assert_eq!(settings["disableSkillShellExecution"], json!(true));

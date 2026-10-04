@@ -33,11 +33,23 @@ record both failures for that exact executable.
 ## Native execution direction
 
 The [north star](vision.md#native-provider-execution) calls for native file,
-shell, and network tools for Claude Code, Codex, and Devin. Current provider
-qualification covers the brokered execution described above, not those native
-tools. A task with `native_execution: true` records that requirement but is
-refused before routing or launch until its backend is implemented and
-qualified; it never falls back to offline replay.
+shell, and network tools for Claude Code, Codex, and Devin. On macOS,
+`workspace_native_exec` runs commands in the granted worktree through each
+provider's native tool protocol. It uses an OS policy that allows DNS and
+outbound TCP 443, clears the inherited environment, and supplies a private
+command home. Host GitHub credentials require a separate workspace option
+and a successful authenticated test. Provider-built-in host shell and web
+tools remain disabled; the host bridge does not claim that a provider's
+built-in command classifier reviewed its arguments.
+
+A task with `native_execution: true` preserves that requirement through resume
+and provider changes. The host must first pass `xcb native qualify`, run
+`xcb native verify --provider <provider>` for each provider, and select the
+workspace with `xcb native grant`. Verification uses an existing account
+lock and a disposable workspace, authorizes one command, and records tool
+results rather than trusting the provider's answer. Qualification does not
+enable real project access. Native tasks cannot use offline replay or the
+legacy Codex host command tool. Linux and Windows refuse native commands.
 
 Native backends must retain each provider's approval controls and verify their
 reported mode. A native shell requires fresh filesystem, network, cancellation,

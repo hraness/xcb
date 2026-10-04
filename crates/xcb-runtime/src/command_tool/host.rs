@@ -416,6 +416,36 @@ pub(super) async fn call(
     execute(root, request, credentials, home, path, cancel, &env_root).await
 }
 
+#[cfg(target_os = "macos")]
+pub(super) async fn native_environment(
+    command: &mut Command,
+    directory: &Path,
+    home: &Path,
+    path: &str,
+    github: bool,
+    cancel: watch::Receiver<bool>,
+) -> Result<Zeroizing<String>> {
+    command
+        .env_clear()
+        .env("HOME", home)
+        .env("PATH", path)
+        .env("TMPDIR", home.join("tmp"))
+        .env("LANG", "en_US.UTF-8")
+        .env("NO_COLOR", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+    if !github {
+        return Ok(Zeroizing::new(String::new()));
+    }
+    let (mut credentials, _, _) = credentials(cancel).await?;
+    credentials.ssh_socket = None;
+    child_environment(command, directory, &credentials, home, path)?;
+    command
+        .env("TMPDIR", home.join("tmp"))
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+    Ok(credentials.token)
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;

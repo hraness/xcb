@@ -43,6 +43,7 @@ mod managed_supervisor;
 pub mod native_backend;
 #[cfg(unix)]
 pub mod native_mcp;
+pub mod native_verification;
 pub mod offers;
 mod os;
 pub mod panes;

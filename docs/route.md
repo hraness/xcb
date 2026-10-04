@@ -54,13 +54,21 @@ field except `version`, `workspace`, and `task` is optional.
   persist with the saved session, and a conflicting provider, account, or
   model pin is rejected. See
   [browser and shared tools](tools.md) for setup and handoff behavior.
-- `requirements: {"native_execution": true}` requires the selected provider's
-  native file, shell, and network tools. It does not pin Codex and may be
-  combined with browser or desktop requirements. Current source records this
-  requirement but returns `unavailable` before selecting or launching a
-  provider, including for a dry run: none of the native-tool backends is
-  implemented and qualified yet. It never substitutes the offline VM. See
-  the [native execution direction](vision.md#native-provider-execution).
+- `requirements: {"native_execution": true}` requires native workspace
+  commands through the selected provider's tool protocol. It does not pin
+  Codex and may be combined with browser or desktop requirements. On macOS,
+  run `xcb native qualify`, verify each selected provider with
+  `xcb native verify --provider <provider>`, and grant the workspace with
+  `xcb --cwd /absolute/path/to/project native grant`. Use `--github` on both
+  verification and granting if commands need host GitHub credentials.
+  Add `--read-only-root` for toolchains outside system directories and
+  `--git-metadata` for a worktree's external Git directories. A matching
+  workspace grant also requests native execution for new direct routes and
+  newly submitted tasks. Missing or stale tests and grants return
+  `unavailable`, including for a dry run; native tasks never substitute the
+  offline VM. Linux and Windows remain unavailable. This uses xcb's native
+  command tool, not provider-built-in host shell or web tools. See the
+  [native execution direction](vision.md#native-provider-execution).
 
 Pins limit the choice; xcb never falls back outside them. With no pins, xcb
 considers accounts with a supported provider build that are signed in,

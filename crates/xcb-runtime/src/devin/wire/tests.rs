@@ -301,7 +301,7 @@ fn tool_guide_names_real_broker_tools_with_their_required_arguments() {
         );
         named += 1;
     }
-    assert_eq!(named, 8, "the guide covers every workspace tool");
+    assert_eq!(named, 9, "the guide covers every workspace tool");
     assert!(
         descriptors
             .iter()

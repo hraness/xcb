@@ -269,9 +269,24 @@ pub async fn dispatch(
     let required_provider = request
         .provider
         .or_else(|| account.as_ref().map(|account| account.provider));
-    let config = Config::load(store.root())
+    let mut config = Config::load(store.root())
         .map_err(|_| Box::new(fail(RouteCode::Unavailable)))?
         .0;
+    config
+        .native_execution
+        .scopes
+        .retain(|scope| scope.workspace == workspace);
+    let mut request = request;
+    request.requirements = request
+        .requirements
+        .merge(xcb_core::session::TaskRequirements {
+            native_execution: !config.native_execution.is_empty(),
+            ..Default::default()
+        });
+    if request.requirements.native_execution {
+        crate::native_backend::require_qualification(store.root())
+            .map_err(|_| Box::new(fail(RouteCode::Unavailable)))?;
+    }
     let excluded_routes = BTreeSet::new();
     let excluded_accounts = BTreeSet::new();
     let decision = routing::smart_route(

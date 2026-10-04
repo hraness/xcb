@@ -158,12 +158,28 @@ live acceptance cases. Native mutations carry durable effect identities;
 timeouts, missing replies, and process exit alone do not make those mutations
 safe to replay. Unknown or partially settled effects retain account custody.
 
-The current implementation records `native_execution` in task requirements
-and refuses unimplemented or unqualified native execution before routing or
-launch. It does not yet activate a native-tool backend for any provider.
-[`native_backend.rs`](../crates/xcb-runtime/src/native_backend.rs) reports each
-candidate and its required acceptance cases without converting planned work
-into an availability claim.
+The macOS implementation exposes `workspace_native_exec` through each
+provider's native tool protocol. xcb runs the command in the granted worktree
+under an OS policy with DNS and TCP 443 access, a private command home, and
+process records tied to the owning task and account. Offline replay and the
+legacy Codex host tool cannot satisfy a native task. Provider-built-in host
+shell and web tools are not enabled by this implementation; enabling them
+requires separate checks of their file access, credentials, and approval
+behavior. The target above includes those tools, not only the host bridge.
+
+Before a workspace can use native commands, `xcb native qualify` must pass the
+OS checks and `xcb native verify --provider <provider>` must record a successful
+provider command, HTTPS request, and Git operation for the running executable.
+The optional `--github` check uses read-only authenticated requests before
+host GitHub credentials can be granted. `xcb native grant` then records the
+workspace, providers, and additional toolchain or Git directories selected by
+the host. Qualification sessions use disposable workspaces and one
+session-bound command; they do not enable native access to real projects.
+Linux and Windows native commands remain unavailable rather than run without
+OS confinement. These checks do not claim live remote writes, provider-built-in
+approval classification, or all planned acceptance cases.
+[`native_backend.rs`](../crates/xcb-runtime/src/native_backend.rs) keeps the
+planned acceptance list separate from recorded availability.
 
 ### Durable task ownership
 
