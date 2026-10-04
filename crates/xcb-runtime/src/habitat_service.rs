@@ -531,10 +531,14 @@ pub fn install(root: &Path, executable: &Path, home: &Path) -> Result<Status> {
         }
         Ok(())
     };
+    let mut migrate_legacy = false;
     match read_manifest(&service.manifest) {
-        // An existing legacy manifest stays as it is; reinstalling after
-        // `service uninstall` turns the log on.
-        Ok(bytes) if service.recognize(&bytes)? == Some(None) => (),
+        // Legacy XCB-owned manifests are safe to migrate once the supervisor
+        // is idle. Leaving one in place permanently disables the watchdog.
+        Ok(bytes) if service.recognize(&bytes)? == Some(None) => {
+            migrate_legacy = true;
+            log_folders()?;
+        }
         Ok(bytes) if service.recognize(&bytes)?.is_some() => log_folders()?,
         Ok(_) => {
             return Err(Error::Conflict(
@@ -552,6 +556,28 @@ pub fn install(root: &Path, executable: &Path, home: &Path) -> Result<Status> {
             File::open(parent)?.sync_all()?;
         }
         Err(e) => return Err(e),
+    }
+    if migrate_legacy {
+        let _idle = lock(root, "supervisor.lock")?;
+        if !SYSTEMD && registered(&service)? {
+            let stopped = Command::new("/bin/launchctl")
+                .arg("bootout")
+                .arg(format!("{}/{}", domain(), service.label))
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()?;
+            if !stopped.success() {
+                return Err(Error::Unavailable(
+                    "legacy service unload failed; manifest preserved",
+                ));
+            }
+        }
+        private::replace(
+            &service.manifest,
+            body.as_bytes(),
+            &crate::digest(&read_manifest(&service.manifest)?),
+        )?;
     }
     if SYSTEMD {
         // `enable --now` is idempotent: it links the unit into
