@@ -91,4 +91,4 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: hraness/.github/actions/dependency-audit@8a1b0577ac817cd52328b6befb7bb870bc57fc47 # main
+      - uses: hraness/.github/actions/dependency-audit@021adfa02636b4950e59b09e38b2dd1fd82b1663 # v1.0.0
