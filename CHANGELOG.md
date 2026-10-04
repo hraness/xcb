@@ -21,6 +21,10 @@ and SDK instead of the former interactive terminal or hosted remote commands.
 - Add `xcb usage`, which shows token use across your coding agents by day,
   agent, provider, and model from aicharts' record on your computer. It never
   uploads, and xcb forwards only aicharts' report and scheduling commands.
+- `xcb usage connect` gives Claude and Codex tasks aicharts' read-only usage
+  tools through xcb's host tool bridge, pinned to the installed aicharts build;
+  `xcb usage disconnect` removes them. `xcb doctor` now reports whether aicharts
+  is collecting and whether that pin still matches.
 - `curl -fsSL https://xcb.sh/install.sh | sh` also installs aicharts 0.3.1 on
   macOS (Apple silicon) and Linux x86_64, checked against a pinned digest and,
   on macOS, its Developer ID signature, and turns on local usage history on a
