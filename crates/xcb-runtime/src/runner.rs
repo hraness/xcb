@@ -2503,6 +2503,17 @@ fn requested_computer_capability(
     }
 }
 
+/// Native MCP is an execution dependency only for tasks that have declared a
+/// Codex-native capability.  Merely registering a Codex-native server must
+/// not make ordinary headless workers depend on the desktop connector.
+#[cfg(any(all(test, unix), target_os = "macos"))]
+fn should_start_native_proxy(
+    pane_generation: bool,
+    requirements: xcb_core::session::TaskRequirements,
+) -> bool {
+    !pane_generation && requirements.requires_codex()
+}
+
 pub async fn run(
     store: Arc<Store>,
     input: RunInput,
@@ -2543,36 +2554,37 @@ pub async fn run(
         crate::codex::runtime_admitted_with_catalog(store.root(), &pin)?;
         let run = store.prepare_run(&session.id, session.revision, now_ms())?;
         #[cfg(target_os = "macos")]
-        let mut native_proxy = if !input.pane_generation {
-            match input
-                .config
-                .capabilities
-                .servers
-                .iter()
-                .find(|server| {
-                    server.transport == crate::capabilities::CapabilityTransport::CodexNative
-                })
-                .cloned()
-            {
-                Some(server) => match crate::native_mcp::NativeMcpProxy::start(
-                    server,
-                    store.clone(),
-                    run.clone(),
-                    workspace.root().to_owned(),
-                )
-                .await
+        let mut native_proxy =
+            if should_start_native_proxy(input.pane_generation, session.requirements) {
+                match input
+                    .config
+                    .capabilities
+                    .servers
+                    .iter()
+                    .find(|server| {
+                        server.transport == crate::capabilities::CapabilityTransport::CodexNative
+                    })
+                    .cloned()
                 {
-                    Ok(proxy) => Some(proxy),
-                    Err(error) => {
-                        store.settle(&run, State::Failed, now_ms())?;
-                        return Err(error);
-                    }
-                },
-                None => None,
-            }
-        } else {
-            None
-        };
+                    Some(server) => match crate::native_mcp::NativeMcpProxy::start(
+                        server,
+                        store.clone(),
+                        run.clone(),
+                        workspace.root().to_owned(),
+                    )
+                    .await
+                    {
+                        Ok(proxy) => Some(proxy),
+                        Err(error) => {
+                            store.settle(&run, State::Failed, now_ms())?;
+                            return Err(error);
+                        }
+                    },
+                    None => None,
+                }
+            } else {
+                None
+            };
         #[cfg(target_os = "macos")]
         let prepared = prepare_codex_native(
             &store,
@@ -3475,6 +3487,39 @@ mod tests {
             json!({}),
         ] {
             assert!(requested_computer_capability(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn native_proxy_requires_declared_codex_capability() {
+        use xcb_core::session::TaskRequirements;
+
+        assert!(!should_start_native_proxy(
+            false,
+            TaskRequirements::default()
+        ));
+        assert!(!should_start_native_proxy(
+            true,
+            TaskRequirements {
+                codex_native: true,
+                ..Default::default()
+            }
+        ));
+        for requirements in [
+            TaskRequirements {
+                signed_in_browser: true,
+                ..Default::default()
+            },
+            TaskRequirements {
+                desktop: true,
+                ..Default::default()
+            },
+            TaskRequirements {
+                codex_native: true,
+                ..Default::default()
+            },
+        ] {
+            assert!(should_start_native_proxy(false, requirements));
         }
     }
 

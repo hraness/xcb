@@ -1,4 +1,6 @@
-# Host status
+# Host availability (legacy migration reference)
+
+The Convex host-status endpoint is retired from the active xcb path. This page preserves its wire contract for migration and evidence review; do not deploy a new heartbeat sender or treat this endpoint as the current status surface. The replacement status projection belongs to the Valhalla-backed protocol described in the [north-star vision](vision.md).
 
 An optional, opt-in endpoint that answers "is my machine alive?" — even when
 the machine or its connection is down. Each machine you configure publishes
@@ -9,7 +11,7 @@ xcb stores and serves the data; it does not ship a page to display it. Any
 website can read the public endpoint and render it (the hraness.com status
 page is one such consumer).
 
-## Quickstart
+## Configure the legacy deployment (migration reference only)
 
 1. **Pick your machines.** Up to 100. Each needs a stable id — a lowercase
    slug like `macbook`, `office-mini-2` or `laptop-1` (`[a-z0-9]` plus

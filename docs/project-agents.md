@@ -1,5 +1,9 @@
 # Persistent project agents
 
+Project agents remain a local durable capability, but the former terminal
+thread/TUI entry point is removed. Use the JSON projections and SDK described
+in [route.md](route.md) and [vision.md](vision.md) for agent interaction.
+
 A project is a workspace directory. Its backlog, work history, autonomy grant,
 schedules, working memory, and Wordcell binding belong to that directory. Your
 thread (plain `xcb`) and every project view over the directory (`xcb chat

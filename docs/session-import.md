@@ -1,5 +1,9 @@
 # Bring recent conversations into xcb
 
+Imported sessions are context for new headless tasks. The historical
+`xcb chat --resume` and in-TUI `/sessions` entry points are removed; use
+`xcb sessions` plus `xcb run` or the JSON/SDK protocol instead.
+
 Find Claude and Codex conversations used in the last 24 hours:
 
 ```sh

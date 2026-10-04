@@ -158,11 +158,11 @@ coordinate intermittent agents without making a hosted provider authoritative.
 It also gives us a valuable dogfood loop: xcb can exercise Valhalla with real
 task events, custody transitions, and status projections.
 
-The current Convex deployment remains only as a compatibility implementation
-until the replacement is proven. It currently supplies device enrollment,
-authenticated remote operations, and the separate optional host-status
-heartbeat. It is not the long-term source of truth and receives no new
-state-sync features under this vision.
+The Convex schema and deployment sources remain as migration evidence, not an
+active native transport. The local supervisor no longer starts the relay or
+host-status heartbeat, and the hosted remote commands are removed. No hosted
+data is deleted by this baseline. Valhalla receives no production traffic until
+its identity, replay, custody, and recovery checks pass.
 
 Migration is a gated sequence:
 
