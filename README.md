@@ -197,6 +197,7 @@ xcb run -p "Explain this repository"   # one task here; prints the answer
 xcb tasks                              # managed tasks across projects
 xcb attention                          # questions and approvals waiting on you
 xcb accounts                           # accounts, usage, and which need you
+xcb usage                              # your token use by day, agent and model
 xcb doctor                             # provider builds and unfinished runs
 xcb upgrade                            # install the latest verified release
 xcb help advanced                      # project agents and extensions
@@ -206,6 +207,16 @@ Accounts, credentials, and task history live in `~/.local/share/xcb`, outside
 your projects (`--state` or `XCB_STATE` moves it). The
 [CLI and configuration reference](https://xcb.sh/docs/reference) lists every
 command, setting, and exit code.
+
+## See your token use
+
+`xcb usage` shows your token use across coding agents by day, agent, provider,
+and model. The numbers come from [aicharts](https://aicharts.io), which keeps a
+daily record on your computer and uploads nothing, so it needs the `aicharts`
+command installed ([get it](https://aicharts.io/usage)). `xcb usage enable`
+has aicharts collect four times a day, `xcb usage report --csv` exports the
+rows, and agents can read the same record through `aicharts mcp`. Quota left
+on each subscription stays in `xcb accounts`.
 
 ## Limits
 

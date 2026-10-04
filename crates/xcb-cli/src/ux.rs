@@ -274,6 +274,7 @@ Start here
 Accounts and models
   accounts       List accounts; add, sign in, remove and manage them
   models         List models; refresh catalogs and set the default
+  usage          Your token use by day, agent and model (kept by aicharts)
   routing        Show which models each kind of task prefers; exclude routes
   offers         Show public plan offers (not checked against your account)
 

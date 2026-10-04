@@ -18,6 +18,9 @@ and SDK instead of the former interactive terminal or hosted remote commands.
 - Remove the Ratatui frontend and native chat, resume, and remote entry points.
   Saved conversations and task history remain readable through local commands.
 - Add `xcb conversations --new --json` for creating project views without a UI.
+- Add `xcb usage`, which shows token use across your coding agents by day,
+  agent, provider, and model from aicharts' record on your computer. It never
+  uploads, and xcb forwards only aicharts' report and scheduling commands.
 - Keep inbox replay, project isolation, managed-program restart, and cancellation
   checks on the headless path; preserve the current website and its checks.
 - Define the north-star execution plan with ALGAL, protocol and SDK milestones,
