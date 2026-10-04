@@ -2506,6 +2506,7 @@ fn requested_computer_capability(
 /// Native MCP is an execution dependency only for tasks that have declared a
 /// Codex-native capability.  Merely registering a Codex-native server must
 /// not make ordinary headless workers depend on the desktop connector.
+#[cfg(any(test, target_os = "macos"))]
 fn should_start_native_proxy(
     pane_generation: bool,
     requirements: xcb_core::session::TaskRequirements,

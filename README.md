@@ -83,12 +83,11 @@ updates and removal.
 
 ## Use it as your coding agent
 
-Install Claude Code 2.1.268 or later, then connect an account and open your
-thread:
+Install Claude Code 2.1.268 or later, then connect an account and run a task:
 
 ```sh
 xcb setup claude
-xcb
+xcb run -p "Describe the next task"
 ```
 
 `xcb setup` lets you choose an existing account or add another, checks the
@@ -191,6 +190,19 @@ command, setting, and exit code.
 - **Tests and builds:** the [command runner](docs/command-runner.md) is an offline Linux VM on macOS ARM64; Git is read-only there, and native macOS builds can't run.
 - **Concurrency:** each account runs one provider turn at a time by default; `max_runs_per_account` in `config.json` (1–32) raises how many tasks may share an account, while sign-in and account checks still take the account alone. Tasks in the same project folder take turns.
 - **Managed harness:** the self-tuning harness is in development; the current build does not run self-modifying routing policies ([design](docs/managed-harness.md)).
+
+## Readiness
+
+xcb is a source preview. The published contracts cover the headless JSON route,
+local state, and the TypeScript SDK; provider qualification remains tied to the
+exact executable, account, and host evidence recorded by `xcb doctor`.
+
+## Standalone package
+
+The retained TypeScript package provides host-owned routing, account custody,
+bounded tools, and provider adapters. It is separate from the native Rust app;
+see the [compatibility reference](docs/compatibility.md) for its package and
+CLI contract.
 
 ## Compared with
 

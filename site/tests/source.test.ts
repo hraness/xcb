@@ -64,7 +64,7 @@ describe("xcb site source contract", () => {
     expect(home).toContain('import { AskAiAboutThis } from "@hraness/ui"');
     expect(home).toContain('<AskAiAboutThis className="ask-ai" url="https://xcb.sh" />');
     expect(docs).toContain('<AskAiAboutThis className="ask-ai" url="https://xcb.sh/docs" />');
-    expect(generated).toContain('export const readmeTitle = "xcb";');
+    expect(generated).toContain('export const readmeTitle = "Excalibur (xcb)";');
     expect(generated).toContain("export const readmeHtml = ");
   });
 
