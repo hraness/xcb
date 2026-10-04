@@ -6,6 +6,11 @@ pinned ALGAL scheduler. The scheduler is a herding mechanism for bounded work,
 not permission to bypass repository review, branch protection, provider
 custody, or release gates.
 
+The [ALGAL design-input record](algal-north-star-handoff.md) maps the durable
+composition ideas to xcb and names the concepts explicitly rejected. It is a
+plan note only; the local xcb protocol and its evidence boundaries remain
+authoritative.
+
 ## Operating contract
 
 - The local journal and protocol are authoritative. A worker may use a
@@ -168,16 +173,29 @@ availability.
 ## xcb scheduler setup
 
 The project grant is named `xcb`, lasts 30 days, and permits up to 100 bounded
-follow-up tasks. A pinned controller runs hourly with five managed calls:
-inspection, implementation, verification, reporting, and delivery.
+follow-up tasks. A pinned controller runs hourly with eight managed calls:
+inspection, implementation, verification, reporting, delivery, recovery,
+maintenance, and capacity review. Managed calls are an offer of work, not a
+parallelism grant: the resident supervisor admits them through the adaptive
+capacity target and durable reservations.
 
 ```sh
 xcb projects --json
 xcb schedules program /Users/bg/Documents/xcb \
   examples/xcb-north-star-controller.algal.json \
-  --workspace /Users/bg/Documents/xcb --managed-calls 5 --every 3600 \
+  --workspace /Users/bg/Documents/xcb --managed-calls 8 --every 3600 \
   --title "xcb north-star herder"
 ```
+
+The managed config exposes `max_active_runs` (1–64) and
+`adaptive_parallelism`. Adaptive mode starts at one active task and doubles
+every 30 seconds while queued work, account routes, and host telemetry remain
+healthy. It halves on resource pressure or a configuration fault. Account
+limits, workspace locks, uncertain effects, and capability checks remain hard
+gates, so increasing the ceiling cannot bypass custody. Maintenance and
+recovery work use the same ledger with their own class and priority; a
+maintenance failure is isolated from build work, while recovery retains the
+reservation of an uncertain provider effect until evidence settles it.
 
 The controller must inspect the current tree, grant, backlog, receipts, and
 validation state before selecting work. It should keep at most one integration

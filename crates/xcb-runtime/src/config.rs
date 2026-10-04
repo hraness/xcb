@@ -147,6 +147,14 @@ pub struct Config {
     /// unsettled, and no new run starts while one is in flight.
     /// Range: 1 to 32.
     pub max_runs_per_account: u32,
+    /// Upper bound for concurrent managed tasks across all accounts. The
+    /// supervisor starts at one and ramps toward this bound when telemetry and
+    /// routing remain healthy; pressure or an unreadable policy backs it down.
+    /// Range: 1 to 64.
+    pub max_active_runs: u32,
+    /// Whether the supervisor should adapt its active target instead of
+    /// launching directly up to `max_active_runs`.
+    pub adaptive_parallelism: bool,
     /// The routing preference stack: ordered route patterns per task tier,
     /// routes never used, and providers that serve only as a fallback. See
     /// [`crate::routing_stack`].
@@ -172,6 +180,8 @@ impl Default for Config {
             turn_timeout_ms: 1_800_000,
             quota_limit_cooldown_ms: DEFAULT_QUOTA_LIMIT_COOLDOWN_MS,
             max_runs_per_account: 1,
+            max_active_runs: 4,
+            adaptive_parallelism: true,
             routing: RoutingConfig::default(),
             resources: crate::host_resources::ResourcePolicy::default(),
             capabilities: crate::capabilities::CapabilityConfig::default(),
@@ -192,6 +202,7 @@ impl Config {
             || !(1_000..=3_600_000).contains(&self.turn_timeout_ms)
             || !(60_000..=604_800_000).contains(&self.quota_limit_cooldown_ms)
             || !(1..=32).contains(&self.max_runs_per_account)
+            || !(1..=64).contains(&self.max_active_runs)
             || self.favorites.len() > 128
             || context.floor_tokens < 1024
             || context.floor_tokens >= context.trigger_tokens
