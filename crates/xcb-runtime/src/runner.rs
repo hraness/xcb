@@ -2874,9 +2874,11 @@ pub(crate) async fn run_prepared<P: Protocol>(
             {
                 pending_attention = true;
                 quota_failure = Some(Failure::Policy);
-                observer(Progress::Notice(
-                    "A browser or computer action needs explicit approval; automatic work has stopped.".into(),
-                ));
+                let detail = Diagnostic::notice(
+                    "A browser or computer action needs explicit approval; automatic work has stopped.",
+                );
+                observer(Progress::Notice(detail.as_str().to_owned()));
+                diagnostic = Some(detail);
                 return Ok((Terminal::Failed, vec![]));
             }
             if frames >= crate::protocol::MAX_TURN_FRAMES {
@@ -2908,9 +2910,11 @@ pub(crate) async fn run_prepared<P: Protocol>(
                 if protocol.host_pending_attention() {
                     pending_attention = true;
                     quota_failure = Some(Failure::Policy);
-                    observer(Progress::Notice(
-                        "Automatic approval review stopped a computer action; explicit approval is required.".into(),
-                    ));
+                    let detail = Diagnostic::notice(
+                        "Automatic approval review stopped a computer action; explicit approval is required.",
+                    );
+                    observer(Progress::Notice(detail.as_str().to_owned()));
+                    diagnostic = Some(detail);
                     return Ok((Terminal::Failed, vec![]));
                 }
                 match event {
@@ -3194,9 +3198,11 @@ pub(crate) async fn run_prepared<P: Protocol>(
                         {
                             pending_attention = true;
                             quota_failure = Some(Failure::Policy);
-                            observer(Progress::Notice(
-                                "The browser denied this action; automatic work has stopped for explicit approval.".into(),
-                            ));
+                            let detail = Diagnostic::notice(
+                                "The browser denied this action; automatic work has stopped for explicit approval.",
+                            );
+                            observer(Progress::Notice(detail.as_str().to_owned()));
+                            diagnostic = Some(detail);
                             return Ok((Terminal::Failed, vec![]));
                         }
                         if capability_handoff {
