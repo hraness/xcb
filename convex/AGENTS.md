@@ -19,11 +19,13 @@
 
 ## Host availability
 
-- `hostStatus.ts` is separate, opt-in product telemetry. Its two bounded
-  public aliases, HTTP routes and `xcbHostStatus` table do not change
+- `hostStatus.ts` is separate, opt-in product telemetry. Its bounded
+  configured fleet, HTTP routes and `xcbHostStatus` tables do not change
   relay authentication, commands, device presence or encrypted projections.
-- Store only each alias's latest accepted receipt. Keep reads and writes
-  bounded to the two fixed ids, enforce the one-minute minimum write interval,
-  and never publish credentials, credential hashes, hostnames or task data.
+- Store only each machine's latest accepted receipt. Keep reads and writes
+  bounded to the configured ids (at most 100 slug ids), share one activity
+  point budget across the fleet, enforce the one-minute minimum write
+  interval, and never publish credentials, credential hashes, hostnames or
+  task data. Machine ids and labels are operator-chosen public text.
 - Credential rotation changes an existing row's sequence generation. Public
   reads show `never` until the new credential supplies its first observation.
