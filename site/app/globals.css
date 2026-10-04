@@ -500,7 +500,7 @@ body > div[data-hraness-marketing-preset] { flex: 1; }
     background: color-mix(in oklch, var(--foreground, CanvasText) 30%, var(--background, Canvas));
     content: "";
     inset: 0;
-    mask-image: url("/landscape/landscape-cb2a3e8dc231ece3444692d2cbc1be284ec11197380768da3f48b0767c6a95fd.jpg");
+    mask-image: image-set(url("/landscape/landscape-b4c8aad8c5ea5b82f0a4bead3d8a70886a615d00ccee4939113070ea030cd408.webp") 1x, url("/landscape/landscape-1602ce04189ad6d90aa7c94327b3299008c3bf3e4e5ccedd639c71402970b2a4.webp") 2x);
     mask-mode: luminance;
     mask-position: top center;
     mask-repeat: no-repeat;
@@ -514,7 +514,7 @@ body > div[data-hraness-marketing-preset] { flex: 1; }
 
 @media (max-width: 48rem) {
   .product-landscape::before {
-    mask-image: url("/landscape/landscape-1308603fe3b91bb6c230a802abd10078720a2d2382d7def872b3bffb2b03da9d.jpg");
+    mask-image: url("/landscape/landscape-eb31095d8c2bc5eb89b3a7984fefefe61686021ef867e415c609215191e30d25.webp");
     opacity: .36;
   }
 }
