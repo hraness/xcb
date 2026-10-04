@@ -1,0 +1,10 @@
+{
+  "copies": [
+    ["xcb-launch-1080p.mp4", "../../site/public/media/xcb-launch.mp4"],
+    ["xcb-launch-1080p.webm", "../../site/public/media/xcb-launch.webm"],
+    ["xcb-launch-1x1.mp4", "../../site/public/media/xcb-launch-1x1.mp4"],
+    ["xcb-launch-poster.jpg", "../../site/public/media/xcb-launch-poster.jpg"],
+    ["xcb-launch-social.jpg", "../../site/public/media/xcb-launch-social.jpg"],
+    ["xcb-launch.en.vtt", "../../site/public/media/xcb-launch.vtt"]
+  ]
+}

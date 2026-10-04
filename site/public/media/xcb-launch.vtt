@@ -1,41 +1,36 @@
 WEBVTT
 
-open
-00:00:00.000 --> 00:00:04.400
-One plan hits its limit. The others sit unused.
+1
+00:00:00.250 --> 00:00:04.950
+Two coding plans mean two logins and two usage limits.
 
-title
-00:00:04.400 --> 00:00:07.600
-Excalibur. Use your Claude, Codex, and Devin plans from one agent.
+2
+00:00:05.250 --> 00:00:09.120
+Unused quota is gone at the reset.
+You: Run this refactor on whichever plan has quota left.
+Agent: I can only see the account I'm signed in to.
 
-step-1
-00:00:07.600 --> 00:00:12.000
-One thread. Type a task once. xcb picks the project and the account.
+3
+00:00:09.420 --> 00:00:13.120
+Excalibur (xcb)
+Use your Claude and Codex plans from one agent.
 
-step-2
-00:00:12.000 --> 00:00:16.400
-Quota about to reset. xcb favors unused quota that is about to reset.
+4
+00:00:13.420 --> 00:00:18.222
+Type a task once.
+You: Refactor the billing module.
+Agent: Started on the account with unused quota closest to its reset.
 
-step-3
-00:00:16.400 --> 00:00:20.800
-Moves on at a limit. At a reported usage limit, xcb can continue on an available account.
+5
+00:00:18.522 --> 00:00:22.762
+It keeps the work moving across your plans.
 
-step-4
-00:00:20.800 --> 00:00:25.200
-Runs in the background. Close the terminal. xcb attention shows what needs you.
+6
+00:00:23.062 --> 00:00:27.302
+It runs under your own sign-in.
 
-step-5
-00:00:25.200 --> 00:00:29.100
-From any machine. Send a task from your laptop to the desktop at home.
-
-proof
-00:00:29.100 --> 00:00:33.600
-3 providers: Claude, Codex, Devin. 5 min longest a usage reading counts
-
-limits
-00:00:33.600 --> 00:00:37.600
-What it doesn't do. xcb doesn't raise any usage limit. It spends the quota you already have, in a better order.
-
-end
-00:00:37.600 --> 00:00:42.100
-Excalibur. xcb.sh. Free for Apple silicon Macs and Linux.
+7
+00:00:27.652 --> 00:00:33.600
+Ask your agent: “Install xcb from xcb.sh”
+Free and MIT licensed · Apple silicon Macs and Linux
+xcb.sh

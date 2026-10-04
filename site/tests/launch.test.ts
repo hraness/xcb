@@ -119,8 +119,11 @@ describe("xcb illustration shapes", () => {
     for (const key of Object.keys(parsed)) expect(route).toContain(`"${key}"`);
   });
 
-  test("the pre-retirement launch film is not embedded as current support", () => {
-    expect(launchFilm).toBeNull();
+  test("the embedded launch film names only current providers", async () => {
+    // The pre-retirement film named Devin; the current film must not.
+    if (launchFilm === null) return;
+    const captions = await read(`site/public${launchFilm.video.captions}`);
+    for (const text of [captions, launchFilm.video.description]) expect(text).not.toMatch(/Devin/u);
   });
 
   test("the launch film names only files that exist", async () => {

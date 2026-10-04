@@ -9,7 +9,7 @@ Posts go out from the @hraness account. The status is Latest release: v0.17.1. S
 Post 1 of 9, 199 characters
 
 ```text
-Excalibur (xcb) is a free terminal agent for people who pay for more than one of Claude and Codex. Type a task once, and xcb picks which of your accounts runs it. No more switching logins or windows.
+Paying for Claude and Codex means two logins, two usage limits, and quota that expires unused. Excalibur (xcb) is a free terminal agent: type a task once, and it picks which of your accounts runs it.
 ```
 
 Post 2 of 9, 169 characters
@@ -67,7 +67,7 @@ https://xcb.sh/blog/one-agent-for-all-your-ai-plans
 Post 1 of 9, 199 characters
 
 ```text
-Excalibur (xcb) is a free terminal agent for people who pay for more than one of Claude and Codex. Type a task once, and xcb picks which of your accounts runs it. No more switching logins or windows.
+Paying for Claude and Codex means two logins, two usage limits, and quota that expires unused. Excalibur (xcb) is a free terminal agent: type a task once, and it picks which of your accounts runs it.
 ```
 
 Post 2 of 9, 169 characters
@@ -125,7 +125,7 @@ https://xcb.sh/blog/one-agent-for-all-your-ai-plans
 Post 1 of 9, 199 characters
 
 ```text
-Excalibur (xcb) is a free terminal agent for people who pay for more than one of Claude and Codex. Type a task once, and xcb picks which of your accounts runs it. No more switching logins or windows.
+Paying for Claude and Codex means two logins, two usage limits, and quota that expires unused. Excalibur (xcb) is a free terminal agent: type a task once, and it picks which of your accounts runs it.
 ```
 
 Post 2 of 9, 169 characters
@@ -181,7 +181,7 @@ https://xcb.sh/blog/one-agent-for-all-your-ai-plans
 ## LinkedIn post
 
 ```text
-Excalibur (xcb) is a free terminal agent for people who pay for more than one of Claude and Codex. Type a task once, and xcb picks which of your accounts runs it. No more switching logins or windows.
+Paying for Claude and Codex means two logins, two usage limits, and quota that expires unused. Excalibur (xcb) is a free terminal agent: type a task once, and it picks which of your accounts runs it.
 
 Quota you don't use by the reset is gone. xcb reads each Claude and Codex account's usage, no more than five minutes old, and favors unused quota that is about to reset.
 
@@ -217,7 +217,7 @@ Topics: Developer Tools, Artificial Intelligence, Open Source
 ## Show HN and first comment fact sheet
 
 - Use your Claude, Codex, and Devin plans from one agent.
-- Excalibur (xcb) is a free terminal agent for people who pay for more than one of Claude and Codex. Type a task once, and xcb picks which of your accounts runs it. No more switching logins or windows.
+- Paying for Claude and Codex means two logins, two usage limits, and quota that expires unused. Excalibur (xcb) is a free terminal agent: type a task once, and it picks which of your accounts runs it.
 - Quota you don't use by the reset is gone. xcb reads each Claude and Codex account's usage, no more than five minutes old, and favors unused quota that is about to reset.
 - When a provider says an account hit its usage limit partway through a task, xcb moves the task to another account or model that can take it, with its original instructions. You don't paste the prompt into a new window.
 - Every task runs in the background. xcb tasks lists them across all your projects, and xcb attention collects the questions your agents are waiting on you to answer.
