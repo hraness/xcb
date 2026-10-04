@@ -74,7 +74,9 @@ tail -n 1 "$unit" | grep -qx '# edited by hand' || fail "uninstall changed an ed
 cp "$state/unit.original" "$unit"
 
 echo "--- xcb service uninstall"
-# Uninstall refuses while the supervisor runs; an idle one exits within 30s.
+# Watchdog-managed supervisors remain resident; stop the unit explicitly before
+# uninstalling so the test checks ownership and cleanup rather than idle exit.
+systemctl --user stop "$name"
 waited=0
 until run service uninstall >/dev/null 2>"$state/uninstall.err"; do
   grep -q 'active' "$state/uninstall.err" || { cat "$state/uninstall.err" >&2; fail "uninstall failed"; }
