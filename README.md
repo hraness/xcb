@@ -3,9 +3,9 @@
 
 Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin
 subscriptions you already pay for. Each task runs on an account that is signed
-in, idle, and not at a known usage limit, on a model that fits the work. Type
-work into xcb's terminal thread, where tasks keep running after you close the
-terminal, or hand it one task at a time from another agent or your own code.
+in, idle, and not at a known usage limit, on a model that fits the work. Drive
+xcb with its headless JSON route, CLI, or SDK; build any UI you need from the
+same typed projections.
 <!-- hraness:xcb-landing:end -->
 
 **Status:** [Latest release](https://github.com/hraness/xcb/releases/latest)
@@ -16,14 +16,14 @@ source build until they appear in the [release notes](https://github.com/hraness
 
 [Site](https://xcb.sh) · [Docs](https://xcb.sh/docs) ·
 [Getting started](https://xcb.sh/docs/getting-started) ·
-[Route contract](docs/route.md) · [TypeScript SDK](docs/sdk.md) ·
+[Vision](docs/vision.md) · [Route contract](docs/route.md) ·
+[TypeScript SDK](docs/sdk.md) ·
 [Compare](https://xcb.sh/compare) · [Changelog](CHANGELOG.md)
 
 With fresh Claude and Codex usage reports, xcb favors unused quota approaching
 a reset while preserving the task's quality requirements and your chosen
-provider, account, or model. You can also [continue a Claude or Codex
-conversation](#continue-a-claude-or-codex-conversation) by importing work
-active in the last 24 hours.
+provider, account, or model. Existing provider sessions can be discovered and
+imported as context for a new headless task.
 
 ## Install
 
@@ -37,8 +37,8 @@ and installs `~/.local/bin/xcb`:
 curl -fsSL https://xcb.sh/install.sh | sh
 ```
 
-New release installs update automatically before an interactive `xcb`, `chat`,
-`resume`, `run`, or `doctor` command, at most once a day and only when no other
+New release installs update automatically before `xcb run`, `xcb route`, or
+`xcb doctor`, at most once a day and only when no other
 xcb command or service is using the installation. Run `xcb update disable` to
 turn this off, or `xcb update enable --policy notify` for notices only. Existing
 saved preferences stay in force. `HRANESS_NO_UPDATE=1`, CI, JSON output, and
@@ -56,8 +56,8 @@ To run Claude Code on Windows, install the Linux build of xcb inside [WSL2](http
 the command above. Claude is the supported provider on Linux; Codex and Devin
 require macOS. Releases also carry a native
 Windows x86_64 build that runs everything except the providers (the thread,
-`xcb doctor`, accounts, remote control, and `xcb route`, which refuses provider
-work with those WSL2 steps). Install it from PowerShell:
+`xcb doctor`, accounts, and `xcb route`, which refuses provider work with those
+WSL2 steps). Install it from PowerShell:
 
 ```powershell
 irm https://xcb.sh/install.ps1 | iex
@@ -83,12 +83,11 @@ updates and removal.
 
 ## Use it as your coding agent
 
-Install Claude Code 2.1.268 or later, then connect an account and open your
-thread:
+Install Claude Code 2.1.268 or later, then connect an account and run a task:
 
 ```sh
 xcb setup claude
-xcb
+xcb run -p "Describe the next task"
 ```
 
 `xcb setup` lets you choose an existing account or add another, checks the
@@ -99,37 +98,14 @@ separate from your usual Claude Code login. `xcb setup codex`
 works the same way; Devin connects by importing the Devin CLI's sign-in
 ([accounts and models](https://xcb.sh/docs/providers)).
 
-Plain `xcb` opens your thread, one conversation for all your projects. Type a
-task such as “fix the failing test in ~/src/app”. xcb picks the project folder
-and says why (“Started Fix the failing test in `app` · named `app` ·
-/workspace to move”), picks an account and model, and runs the task there. If
-a turn stops at a usage limit, xcb continues the task on another account or
-model that can take it. Closing the terminal detaches without cancelling
-anything; the next `xcb` shows the results.
+The native CLI is headless and scriptable. Run one task with `xcb run`, or
+send a versioned JSON request through `xcb --json route`. Managed tasks,
+projects, attention, schedules, and history are durable local state that an
+agent can read and change through JSON or the SDK. A UI can be built on demand
+from those projections; xcb does not require a terminal UI.
 
-- `/tasks` lists running and finished work; `/cancel <task-id>` stops a task.
-- `/steer <task-id> <guidance>` adds guidance for a task's next turn.
-- Start a prompt with `Use Claude`, `Use Codex`, or `Use Devin` to choose the
-  provider. `/help` lists every command, and the
-  [terminal guide](docs/terminal.md) covers keys and search.
-
-## Continue a Claude or Codex conversation
-
-Bring conversation context into xcb so your next task can use its account and
-model selection. Discovery and import use a 24-hour activity window by default:
-
-```sh
-xcb sessions discover
-xcb sessions import --recent
-xcb conversations                           # saved conversations, including imports
-xcb chat --resume <conversation-id>
-```
-
-Send a new message in the imported view to start work. Import copies user and
-assistant text, preserves the original files, and does not take over the
-provider process. For a conversation started in your home folder, select one
-result with `xcb sessions import <candidate-id> --workspace /path/to/project`.
-[Session import](docs/session-import.md) covers provider filters and limits.
+The [route contract](docs/route.md) and [SDK quickstart](docs/sdk.md) show the
+stable machine-facing entry points.
 
 ## Build on it
 
@@ -193,15 +169,14 @@ a dedicated xcb Keychain entry on macOS. See
 ## Everyday commands
 
 ```sh
-xcb                                    # your thread, from any directory
-xcb chat --new                         # a project view for this directory
+xcb run -p "Describe the next task"      # one headless task
 xcb run -p "Explain this repository"   # one task here; prints the answer
 xcb tasks                              # managed tasks across projects
 xcb attention                          # questions and approvals waiting on you
 xcb accounts                           # accounts, usage, and which need you
 xcb doctor                             # provider builds and unfinished runs
 xcb upgrade                            # install the latest verified release
-xcb help advanced                      # remote devices, project agents, extensions
+xcb help advanced                      # project agents and extensions
 ```
 
 Accounts, credentials, and task history live in `~/.local/share/xcb`, outside
@@ -214,8 +189,20 @@ command, setting, and exit code.
 - **Tools:** providers use xcb's workspace tools and registered host MCP servers. Native shells and unrelated provider plugins remain unavailable; see [browser and shared tools](docs/tools.md).
 - **Tests and builds:** the [command runner](docs/command-runner.md) is an offline Linux VM on macOS ARM64; Git is read-only there, and native macOS builds can't run.
 - **Concurrency:** each account runs one provider turn at a time by default; `max_runs_per_account` in `config.json` (1–32) raises how many tasks may share an account, while sign-in and account checks still take the account alone. Tasks in the same project folder take turns.
-- **Remote devices:** `xcb link` needs a relay deployed from this repository's `convex/` folder ([remote operations](docs/remote-operations.md)).
 - **Managed harness:** the self-tuning harness is in development; the current build does not run self-modifying routing policies ([design](docs/managed-harness.md)).
+
+## Readiness
+
+xcb is a source preview. The published contracts cover the headless JSON route,
+local state, and the TypeScript SDK; provider qualification remains tied to the
+exact executable, account, and host evidence recorded by `xcb doctor`.
+
+## Standalone package
+
+The retained TypeScript package provides host-owned routing, account custody,
+bounded tools, and provider adapters. It is separate from the native Rust app;
+see the [compatibility reference](docs/compatibility.md) for its package and
+CLI contract.
 
 ## Compared with
 

@@ -10,8 +10,7 @@ const eslintConfig = defineConfig([
       '@next/next/no-html-link-for-pages': 'off',
     },
   },
-  // build-theme-bootstrap emits this minified bundle from checked source.
-  globalIgnores(['.next/**', 'out/**', 'build/**', 'next-env.d.ts', 'public/theme-bootstrap.js']),
+  globalIgnores(['.next/**', 'out/**', 'build/**', 'next-env.d.ts']),
 ]);
 
 export default eslintConfig;

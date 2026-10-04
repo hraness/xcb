@@ -118,9 +118,10 @@ answer, and the turn produced answer text or file changes:
 
 In `outcome`, `joined: true` means the provider's processes have exited, and
 `effects` is `none`, `settled` (changes recorded), or `uncertain`. `session`
-reopens with `xcb resume <session>`; the routed turn is an ordinary saved
-direct session. `text` holds up to 256 KiB, and `textTruncated: true` marks a
-longer answer.
+identifies the durable record for later inspection through the JSON task and
+conversation projections; the removed interactive resume command is not part of
+the agent contract. `text` holds up to 256 KiB, and `textTruncated: true` marks
+a longer answer.
 
 ## Failures
 

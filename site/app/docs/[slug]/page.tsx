@@ -26,11 +26,13 @@ export default async function DocsTopicPage({ params }: { params: Promise<{ slug
   return (
     <>
       <DocsShell active={topic.slug}>
-        <header className="xcb-docs-heading">
-          <p className="xcb-docs-eyebrow">{topic.group}</p>
-          <h1>{topic.title}</h1>
-          <p className="xcb-docs-lead">{topic.description}</p>
-        </header>
+        {topic.slug !== "reference" && (
+          <header className="xcb-docs-heading">
+            <p className="xcb-docs-eyebrow">{topic.group}</p>
+            <h1>{topic.title}</h1>
+            <p className="xcb-docs-lead">{topic.description}</p>
+          </header>
+        )}
         <article className="xcb-docs-body">
           <TopicContent slug={topic.slug} />
         </article>

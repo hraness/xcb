@@ -1,0 +1,44 @@
+{
+  "schema": "xcb.metrics.baseline.v1",
+  "status": "contract-established",
+  "generator": "scripts/assurance-baseline.ts",
+  "workload": {
+    "id": "xcb-shadow-acceptance-v1",
+    "seed": 20737,
+    "commands": 256,
+    "targets": 4,
+    "warmup": 16,
+    "repetitions": 31,
+    "arguments": "bounded integer-only JSON",
+    "manifest": {
+      "routing": "route.fixture.v1",
+      "projection": "projection.fixture.v1"
+    }
+  },
+  "measurementRules": {
+    "acceptanceLatency": "monotonic elapsed time around one pure command application; report microseconds",
+    "projectionBytes": "UTF-8 bytes of canonical JSON state projection after the workload",
+    "cpu": "process user+system microseconds over the complete workload; report microseconds",
+    "memory": "resident-set bytes before/after and peak when the host exposes it; report bytes",
+    "journalGrowth": "UTF-8 bytes added to the canonical append-only transition history; native SQLite growth is a separate observation",
+    "replayTime": "monotonic elapsed time to replay the complete bounded history; report microseconds",
+    "aggregation": "median, p95, minimum, maximum, sample count; do not average censored or failed runs"
+  },
+  "measurements": {
+    "acceptanceLatencyUs": null,
+    "projectionBytes": null,
+    "cpuUs": null,
+    "memoryBytes": null,
+    "journalGrowthBytes": null,
+    "replayTimeUs": null
+  },
+  "comparison": {
+    "requiredIdentity": ["sourceRevision", "toolchain", "host", "workload.id", "workload.seed", "workload.commands", "workload.manifest", "measurementRules"],
+    "promotion": "compare same workload and method; retain failed/censored runs; no safety regression; synthetic values are not provider evidence"
+  },
+  "unverified": [
+    "No host-specific measurements are asserted by this contract-only receipt.",
+    "Native event-journal file growth requires a separately captured local run.",
+    "No CPU, memory, latency, cost, token, or quality claim is made for a provider or Valhalla peer."
+  ]
+}

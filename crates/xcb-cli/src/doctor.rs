@@ -442,27 +442,6 @@ pub async fn run(
         "model": judge_model,
         "endpoint": judge_endpoint,
     });
-    // This device's link record; reachability belongs to `xcb fleet`.
-    let remote_status = {
-        use xcb_runtime::cloud::custody;
-        match (custody::load_device(root)?, custody::load_link(root)?) {
-            (Some(device), Some(link)) => {
-                let session = custody::load_session(root)?;
-                let approved = custody::load_account_key(root)?.is_some();
-                json!({
-                    "linked": true,
-                    "device": device.device,
-                    "relay": link.deployment_url,
-                    "admitted": approved,
-                    "sessionDueForRefresh": session
-                        .as_ref()
-                        .map(|session| session.due_for_refresh(now_ms()))
-                        .unwrap_or(true),
-                })
-            }
-            _ => json!({"linked": false}),
-        }
-    };
     let unsettled = store.unsettled_runs()?;
     tally.warnings += pending_admissions.len() + unsettled.len();
     if !sweep.unprovable.is_empty() {
@@ -523,7 +502,6 @@ pub async fn run(
         let mut report = json!({"version":1,"providers":reports,"unsettledRuns":unsettled});
         report["accounts"] = json!(account_reports);
         report["judge"] = judge_status;
-        report["remote"] = remote_status;
         report["catalog"] = json!({
             "reviewedBuilds": catalog_status.builds,
             "denied": catalog_status.denied,
@@ -554,23 +532,6 @@ pub async fn run(
         report["next"] = json!(next);
         crate::print_json(report)?;
         return Ok(tally.exit_code());
-    }
-    match remote_status.get("linked").and_then(|v| v.as_bool()) {
-        Some(true) => println!(
-            "{} remote: linked · device {} · relay {}{}",
-            style.symbol(ux::Symbol::On),
-            remote_status["device"].as_str().unwrap_or("?"),
-            remote_status["relay"].as_str().unwrap_or("?"),
-            if remote_status["admitted"].as_bool().unwrap_or(false) {
-                ""
-            } else {
-                " · waiting for a linked device to approve it (xcb remote admit)"
-            },
-        ),
-        _ => println!(
-            "{} remote: not linked (xcb link connects this machine)",
-            style.symbol(ux::Symbol::Off)
-        ),
     }
     let catalog_age = match catalog_status.age_secs {
         Some(secs) if secs < 120 => format!("refreshed {secs}s ago"),
