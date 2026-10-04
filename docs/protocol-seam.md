@@ -12,7 +12,7 @@ transport.
 | Revisions | `src/broker.ts` and `src/cli/workspace.ts` pass opaque `expectedRevision` values; CLI file revisions are bounded stat/inode digests. Rust managed sessions carry numeric revisions (`crates/xcb-runtime/src/store.rs` and `session.rs`), while private records commonly use SHA-256 digests. | There is no one revision algorithm or one global revision namespace yet. | Carry an opaque, bounded revision token or explicit `null` for a genesis/create command. The local owner defines its revision domain; the seam does not pretend a file revision is a task revision. |
 | Receipts | TypeScript provider/session/process receipts (`src/codex-session.ts`, `src/codex-process.ts`, `src/browser-session.ts`) and Rust runner/qualification receipts record custody and settlement. Many carry a schema string and `productionQualified: false`. | Receipts are lifecycle/provider records, not a shared command result. | `command/submit` returns only a bounded `receiptId`, status (`accepted` or `replayed`), and resulting revision. Full receipt schemas remain a later slice. |
 | Hooks | `crates/xcb-runtime/src/hooks.rs` stores versionless hook JSON, executable SHA-256, disabled-by-default state, and bounded JSON input/output. `src/capabilities.ts` keeps tool contracts explicit. | Hook execution is a trusted host effect, not a wire capability; hook payloads are not canonical frames. | Negotiate `receipt.reference` and `command.submit` only. Hooks stay host-owned and are not exposed by this codec. |
-| TypeScript SDK | `src/index.ts` exports the router, task runtime, provider adapters, capability profiles, and provider codecs. `src/runtime.ts` and `src/router.ts` keep account/model selection host-side. | The SDK has provider codecs but no provider-neutral state envelope. Importing it must remain effect-free. | `src/protocol.ts` exposes pure builders, validator, canonical encoder, decoder, and capability negotiation; it starts no service, discovers no account, and performs no I/O. |
+| TypeScript SDK | `src/index.ts` exports the router, task runtime, provider adapters, capability profiles, and provider codecs. `src/runtime.ts` and `src/router.ts` keep account/model selection host-side. | The SDK has provider codecs but no provider-neutral state envelope. Importing it must remain effect-free. | `src/protocol.ts` exposes pure builders, validator, canonical encoder, decoder, and capability negotiation; `src/assurance.ts` adds pure local shadow/replay fixtures and performs no I/O. |
 | Codex app-server | `src/codex-session.ts` and `crates/xcb-runtime/src/codex.rs` use `initialize`, `thread/start`, `turn/start`, notifications, provider request IDs, bounded frames, and process-custody receipts. | Codex's JSON-RPC-ish envelope and native request surface are pinned to one admitted provider build. It is useful shape, not xcb's state model. | Keep `requestId` and typed responses, but use `schema`, `kind`, `method`, `expectedRevision`, `idempotencyKey`, `capabilities`, `result`, and bounded `error`. No Codex method is registered in this slice. |
 
 The vector file is `protocol/v1-vectors.json`. Rust's explicit contract is
@@ -56,9 +56,12 @@ integers only. This is a byte contract, not merely a semantic JSON contract.
 
 ## Scope boundary
 
-This increment does **not** implement workspace/event paging, a local journal,
-full command receipts, subscriptions, projections, SDK transport clients, or a
-Valhalla adapter. A later slice may add those messages only with new vectors and
-an explicit compatibility decision. The present evidence proves codec and
-cross-runtime vector behavior only; it does not qualify a provider, transport,
-remote service, or live account.
+The P1 wire slice remains deliberately narrow: it does not implement
+workspace/event paging, full command receipts, subscriptions, projections, SDK
+transport clients, or a Valhalla adapter. P3 now adds a local SQLite event
+journal and a pure shadow command/receipt model behind separate tests and
+vectors; those additions do not silently expand the `xcb.protocol.v1` wire
+schema. See [`docs/assurance.md`](assurance.md) and
+`protocol/assurance-v1-vectors.json` for that evidence boundary. Nothing in
+these local tests qualifies a provider, transport, remote service, live
+account, async schedule, or distributed ordering claim.
