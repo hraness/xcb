@@ -10,7 +10,7 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
-## Unreleased
+## 0.18.0 - 2026-10-04
 
 xcb's current source build is agent-first: use the headless CLI, JSON route,
 and SDK instead of the former interactive terminal or hosted remote commands.
