@@ -6239,6 +6239,10 @@ mod relay_lock_tests {
 }
 
 pub async fn daemon(root: PathBuf) -> Result<i32> {
+    // A watchdog-owned service must remain resident so its heartbeat and
+    // scheduler ownership stay continuous. Interactive/background starts may
+    // still use the bounded idle exit below.
+    let service_managed = std::env::var_os("XCB_SERVICE_PARENT").is_some();
     // A detached supervisor's stderr goes nowhere: every startup failure is
     // written where the client that spawned it looks.
     let started = crate::os::Terminate::install()
@@ -6354,7 +6358,11 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
                 if supervisor.active.is_empty() && draining { break Ok(0); }
                 // A linked relay keeps retrying through outages — exiting
                 // while it connects or backs off would strand the fleet.
-                if supervisor.active.is_empty() && !nonterminal && !relay.keeps_resident() {
+                if !service_managed
+                    && supervisor.active.is_empty()
+                    && !nonterminal
+                    && !relay.keeps_resident()
+                {
                     if idle_since.elapsed() >= IDLE_EXIT {
                         // Settle the in-flight offer refresh while still holding
                         // the lock, then re-check: a client that committed a task
