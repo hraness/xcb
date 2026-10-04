@@ -31,6 +31,8 @@ const REFRESH_MS: u64 = 60 * 60 * 1000;
 struct RawCatalog {
     version: u32,
     codex: Option<Vec<RawBuild>>,
+    /// Kept for rolling upgrades; retired provider builds are ignored.
+    #[allow(dead_code)]
     devin: Option<Vec<RawBuild>>,
     claude: Option<Vec<RawBuild>>,
     deny: Option<BTreeMap<String, Vec<String>>>,
@@ -60,11 +62,7 @@ impl Catalog {
             return Err(Error::Protocol("catalog version"));
         }
         let mut catalog = Catalog::default();
-        for (provider, builds) in [
-            (Provider::Claude, raw.claude),
-            (Provider::Codex, raw.codex),
-            (Provider::Devin, raw.devin),
-        ] {
+        for (provider, builds) in [(Provider::Claude, raw.claude), (Provider::Codex, raw.codex)] {
             let Some(builds) = builds else { continue };
             if builds.len() > ENTRY_LIMIT {
                 return Err(Error::Protocol("catalog size"));
@@ -88,7 +86,10 @@ impl Catalog {
         }
         if let Some(deny) = raw.deny {
             for (provider, digests) in deny {
-                if !Provider::ALL.iter().any(|known| known.as_str() == provider) {
+                if !Provider::SUPPORTED
+                    .iter()
+                    .any(|known| known.as_str() == provider)
+                {
                     return Err(Error::Protocol("catalog deny provider"));
                 }
                 if digests.len() > ENTRY_LIMIT {
@@ -354,7 +355,7 @@ mod tests {
         )
         .unwrap();
         let catalog = Catalog::parse(&bytes).unwrap();
-        for provider in Provider::ALL {
+        for provider in Provider::SUPPORTED {
             assert!(catalog.admitted.contains_key(&provider));
         }
     }

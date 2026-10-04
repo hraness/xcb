@@ -54,10 +54,8 @@ impl Tally {
 }
 
 /// The detail doctor's JSON has always carried for a pinned build.
-fn build_detail(provider: Provider, native: bool) -> &'static str {
-    if native && provider == Provider::Devin {
-        "pinned · xcb accounts refresh <account> loads the model list after you connect an account"
-    } else if native {
+fn build_detail(_provider: Provider, native: bool) -> &'static str {
+    if native {
         "pinned · checked again before each run"
     } else {
         "pinned · xcb can't run this build yet"
@@ -67,7 +65,7 @@ fn build_detail(provider: Provider, native: bool) -> &'static str {
 /// How to add the first account for a provider.
 fn add_account_hint(provider: Provider) -> String {
     match provider {
-        Provider::Devin => "after devin auth login, add it with xcb accounts import-devin --source <credentials.toml>".to_owned(),
+        Provider::Devin => "Devin support was removed; use a Claude or Codex account".to_owned(),
         provider => format!("xcb setup {provider} adds one"),
     }
 }
@@ -363,11 +361,8 @@ pub async fn run(
                 }
             }
         }
-        // Devin's model list needs an account's own sign-in; doctor only
-        // pins its build.
         if let Some(pin) = pin
             && runnable
-            && provider != Provider::Devin
         {
             match runner::probe(store, pin, None).await {
                 Ok(models) => store.set_models(provider, &models)?,
@@ -474,7 +469,7 @@ pub async fn run(
         .map(|account| account.row.id.clone());
     let next = if !any_found {
         // Suggest the most common provider first.
-        [Provider::Claude, Provider::Codex, Provider::Devin]
+        [Provider::Claude, Provider::Codex]
             .into_iter()
             .find(|provider| builds.iter().any(|(checked, _, _)| checked == provider))
             .map(install_step)
@@ -939,47 +934,6 @@ mod tests {
         };
         assert_eq!(tally.summary(), "1 warning.");
         assert_eq!(tally.exit_code(), 1);
-    }
-
-    #[test]
-    fn devin_shows_the_import_hint_only_without_an_account() {
-        let none = account_section(ux::Style::PLAIN, Provider::Devin, true, &[], false, NOW);
-        assert_eq!(
-            none.lines,
-            [
-                "  ○ no accounts yet · after devin auth login, add it with xcb accounts import-devin --source <credentials.toml>"
-            ]
-        );
-        assert_eq!((none.warnings, none.passed, none.ready), (0, 0, 0));
-        let imported = [account(
-            "a_devin",
-            Provider::Devin,
-            "devin/a_devin",
-            Health::Ready { busy: false },
-        )];
-        let refs: Vec<&Account> = imported.iter().collect();
-        let with_models =
-            account_section(ux::Style::PLAIN, Provider::Devin, true, &refs, true, NOW);
-        assert_eq!(with_models.lines, ["  ✓ 1 account ready"]);
-        assert_eq!(
-            (with_models.warnings, with_models.passed, with_models.ready),
-            (0, 1, 1)
-        );
-        assert!(!with_models.lines.concat().contains("import"));
-        // Signed in but no model list yet: the one fix is a refresh.
-        let without = account_section(ux::Style::PLAIN, Provider::Devin, true, &refs, false, NOW);
-        assert_eq!(
-            without.lines,
-            [
-                "  ⚠ 1 account ready",
-                "    ⚠ no Devin models loaded yet → xcb accounts refresh a_devin",
-            ]
-        );
-        assert_eq!(without.warnings, 1);
-        assert_eq!(
-            without.refresh.as_deref(),
-            Some("xcb accounts refresh a_devin")
-        );
     }
 
     #[test]

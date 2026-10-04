@@ -27,8 +27,8 @@ const read = (path: string) => readFile(join(repo, path), "utf8");
 describe("xcb launch facts", () => {
   test("each number matches its source record", async () => {
     const [readme, quota] = await Promise.all([read("README.md"), read("docs/quota-routing.md")]);
-    expect(launchFacts.providers.value).toBe("three");
-    for (const provider of ["Claude", "Codex", "Devin"]) expect(readme).toContain(provider);
+    expect(launchFacts.providers.value).toBe("two");
+    for (const provider of ["Claude", "Codex"]) expect(readme).toContain(provider);
     expect(quota).toContain("at most five minutes old");
     expect(launchFacts.meterMaxAge.value).toBe("five minutes");
     expect(quota).toMatch(/Claude uses `five_hour` and `seven_day`/u);
@@ -117,6 +117,10 @@ describe("xcb illustration shapes", () => {
     const route = await read("docs/route.md");
     const parsed = JSON.parse(routeResponse) as Record<string, unknown>;
     for (const key of Object.keys(parsed)) expect(route).toContain(`"${key}"`);
+  });
+
+  test("the pre-retirement launch film is not embedded as current support", () => {
+    expect(launchFilm).toBeNull();
   });
 
   test("the launch film names only files that exist", async () => {

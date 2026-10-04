@@ -58,10 +58,9 @@ export default function Install() {
         <PageSection id="before" title="Before you start">
           <ul>
             <li>A Mac with Apple silicon, or a Linux x86_64 or ARM64 machine with glibc 2.34 or newer (Ubuntu 22.04, Debian 12, RHEL 9, and later). Other systems can <a href="#source">build from source</a>.</li>
-            <li>On Linux, complete the <a href="/docs/providers#claude-on-linux">sandbox checks for Claude</a> after installing xcb and before connecting an account. Codex and Devin run on macOS only.</li>
+            <li>On Linux, complete the <a href="/docs/providers#claude-on-linux">sandbox checks for Claude</a> after installing xcb and before connecting an account. Codex runs on macOS only.</li>
             <li>For Claude: a Claude subscription and Claude Code {supportedBuilds.claudeMinimum} or later. Check with <code>claude --version</code>.</li>
             <li>For Codex (macOS): Codex CLI {supportedBuilds.codex.join(" or ")}, which <code>npm install -g @openai/codex@{supportedBuilds.codex[0]}</code> installs.</li>
-            <li>For Devin (macOS): Devin CLI {supportedBuilds.devin[0]}, signed in with <code>devin auth login</code>.</li>
           </ul>
         </PageSection>
 
@@ -86,7 +85,7 @@ export default function Install() {
 
         <PageSection id="connect" title={released ? "2. Connect an account" : "Connect an account"}>
           <CodeBlock code="xcb setup claude" />
-          <p>This adds a Claude account, checks your Claude Code build, opens the sign-in page in your browser, and loads the account’s models. xcb keeps this sign-in in its own folder, so your usual Claude Code login is unaffected. Codex and Devin have their own steps in <a href="/docs/providers">Accounts and models</a>.</p>
+          <p>This adds a Claude account, checks your Claude Code build, opens the sign-in page in your browser, and loads the account’s models. xcb keeps this sign-in in its own folder, so your usual Claude Code login is unaffected. Codex has its own steps in <a href="/docs/providers">Accounts and models</a>.</p>
         </PageSection>
 
         <PageSection id="first-task" title={released ? "3. Give it a task" : "Give it a task"}>

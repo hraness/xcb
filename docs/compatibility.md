@@ -4,9 +4,9 @@ This is the reference for the TypeScript package, `@hraness/xcb`, and its
 `xcb-compat` CLI. For the native `xcb` command, start with the
 [README](../README.md); for a first embedding example, see the
 [SDK quickstart](sdk.md). Code snippets using application-owned ports show host
-integration; they don't approve a provider or prove a production sandbox. Devin
-and Codex task execution stay disabled in the `xcb-compat` CLI. The native Codex
-and Devin support, credential imports, and supervised Codex sign-in are separate;
+integration; they don't approve a provider or prove a production sandbox. Codex
+task execution stays disabled in the `xcb-compat` CLI. Native Codex support,
+credential imports, and supervised Codex sign-in are separate;
 see [accounts and models](https://xcb.sh/docs/providers). Native support doesn't
 approve these compatibility adapters.
 
@@ -14,7 +14,7 @@ approve these compatibility adapters.
 
 The retained application package provides:
 
-- A Codex/Claude/Devin adapter interface with explicit runtime qualification.
+- A Codex/Claude adapter interface with explicit runtime qualification.
 - Shared SQLite account custody, generation fencing and process-aware recovery.
 - A tool broker bound to one workspace and run, with closed file, public-web and
   messaging operations. There is no shell, executable or arbitrary RPC operation.
@@ -170,23 +170,21 @@ run rather than fall back unsandboxed. Unsupported platforms refuse execution
 without an admitted OS-confinement boundary. The sandbox adds enforcement to
 the broker boundary.
 
-`doctor` inspects binaries selected through explicit `XCB_CLAUDE`,
-`XCB_CODEX`, or `XCB_DEVIN` pins, PATH, and known installation locations.
+`doctor` inspects binaries selected through explicit `XCB_CLAUDE` or
+`XCB_CODEX` pins, PATH, and known installation locations.
 It admits the supported Claude version range and writes a time-boxed record
 binding executable SHA-256, runtime identity, and capability profile. Binary or
-profile drift revokes admission. Devin discovery never writes an execution
-qualification; older binary-only Devin records cannot activate that adapter.
-Codex requires its separate trusted host contract. The adapter re-proves the
+profile drift revokes admission. Codex requires its separate trusted host
+contract. The adapter re-proves the
 effective boundary on every run: a doctor record is not a sandbox attestation.
 
 Claude is the only compatibility CLI execution candidate. It requires an
 admitted Claude Code version (`>= 2.1.268` within major 2), authentication,
-and effective per-run boundary verification. Devin ACP remains disabled pending
-exact-runtime qualification: model discovery and protocol tests do not admit
-execution. Codex discovery is implemented, but managed sign-in and task admission
+and effective per-run boundary verification. Codex discovery is implemented,
+but managed sign-in and task admission
 require the trusted protocol manifest and pinned parent runtime described in
 [MANAGED-CODEX.md](../MANAGED-CODEX.md). A local installation cannot self-produce
-that evidence. Selecting either unqualified provider fails closed.
+that evidence. Selecting an unqualified provider fails closed.
 
 ### Judged routing, continuation, and compaction (optional)
 
@@ -615,40 +613,6 @@ explains why `allowedTools` alone only pre-approves calls. A production qualific
 must also establish that managed host policy has not introduced configuration,
 hooks or other authority that cannot be disabled by application settings.
 
-`createDevinAcpAdapter()` implements the Agent Client Protocol against
-`devin acp`, Devin CLI's stdio JSON-RPC server (protocol version 1, observed on
-CLI 3000.10.x). Each run spawns one bounded child through the application's
-`BoundedProviderProcessFactory`, initializes with `fs` and `terminal` client
-capabilities unimplemented, opens one session with the host-selected workspace
-cwd, applies the pinned mode and model through `session/set_mode` and
-`session/set_config_option`, and completes a single `session/prompt`. The
-framing codec bounds every line to 1 MiB and validates JSON-RPC envelopes,
-identifiers and control characters before dispatch; prompts are bounded to
-256 KiB; pending requests are capped and every write is serialized.
-
-Devin advertises `mcpCapabilities: {http: false, sse: false}` — only stdio MCP
-transports exist. Profile tools therefore reach the agent through
-`startDevinToolRelay()`, a host-owned loopback endpoint admitted by a random
-path and bearer token, plus a spawned inline bridge process
-(`DEVIN_MCP_BRIDGE_SOURCE`) that answers `tools/list` and `tools/call` over
-stdio. The bridge is a transport adapter only: the broker still enforces the
-exact profile manifest, input bounds, workspace scoping and revocation.
-Inbound `session/request_permission` calls are answered by the host's
-permission callback; without one, the first reject option wins. `session/delete`
-is never invoked by this adapter; provider sessions may persist for host
-`session/load` recovery.
-
-Custody mirrors the other task adapters: `stopAndJoin()` proves process-group
-exit before account release, an unproven join fails close and retains the
-lease, and protocol cleanup is never treated as termination evidence. Usage is
-reduced from `usage_update` facts and the prompt result into the neutral
-`AgentTaskUsage` shape; no billing or quota claim is made. `AgentProvider`
-accepts `"devin"` and `createProviderLaunchPlan()` emits the Devin
-configuration, but the provider remains unqualified: exact-runtime adversarial
-qualification, effective tool inventory, stdio bridge custody, failure custody
-and account transport/model admission are all unresolved. `test/devin-acp.test.ts`
-and `test/devin-adapter.test.ts` exercise the codec, client, relay and spawned
-bridge against synthetic peers only; they establish no live provider evidence.
 ## Per-account browser sessions
 
 `createBrowserSession()` is the provider-neutral custody substrate for

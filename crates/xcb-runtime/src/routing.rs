@@ -407,7 +407,7 @@ pub fn explicit_provider_intent(task: &str) -> Option<Provider> {
     let lower = task.trim_start().to_ascii_lowercase();
     let directive = lower.strip_prefix("please ").unwrap_or(&lower);
     let remainder = directive.strip_prefix("use ")?.trim_start();
-    Provider::ALL.into_iter().find(|provider| {
+    Provider::SUPPORTED.into_iter().find(|provider| {
         remainder
             .strip_prefix(provider.as_str())
             .is_some_and(|tail| {
@@ -528,8 +528,8 @@ fn selectable_model(model: &ModelChoice) -> bool {
     model.mode == Mode::Fixed
         && match model.provider {
             Provider::Codex => crate::codex::QUALIFIED_MODELS.contains(&model.id.as_str()),
-            Provider::Devin => model.effort.is_none(),
             Provider::Claude => true,
+            Provider::Devin => false,
         }
 }
 
@@ -556,7 +556,7 @@ fn eligible_profiles(
 }
 
 fn admitted_providers(store: &Store) -> BTreeSet<Provider> {
-    Provider::ALL
+    Provider::SUPPORTED
         .into_iter()
         .filter(|provider| {
             Pin::load(store.root(), *provider)
@@ -1377,7 +1377,7 @@ mod tests {
             .unwrap();
         let mut config = Config::default();
         config.extensions.judge.enabled = false;
-        let admitted = Provider::ALL.into_iter().collect();
+        let admitted = Provider::SUPPORTED.into_iter().collect();
         let routes = BTreeSet::new();
         let accounts = BTreeSet::new();
         for unavailable in [false, true] {
@@ -1478,7 +1478,7 @@ mod tests {
                 .unwrap();
             let routes = BTreeSet::new();
             let accounts = BTreeSet::new();
-            let admitted = Provider::ALL.into_iter().collect();
+            let admitted = Provider::SUPPORTED.into_iter().collect();
             let request = || RouteRequest {
                 requirements,
                 task: "read this dashboard",
@@ -1759,21 +1759,21 @@ mod tests {
         use crate::authentication_tests::account;
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(&xcb_core::canonical(root.path()).unwrap().join("state")).unwrap();
-        let devin = account(&store, Provider::Devin);
+        let claude = account(&store, Provider::Claude);
         store
             .set_models(
-                Provider::Devin,
+                Provider::Claude,
                 &[
-                    model(Provider::Devin, "swe-2-high", None, None),
-                    model(Provider::Devin, "gpt-6-astra-medium", None, None),
-                    model(Provider::Devin, "swe-1-7-fast", None, None),
+                    model(Provider::Claude, "swe-2-high", None, None),
+                    model(Provider::Claude, "gpt-6-astra-medium", None, None),
+                    model(Provider::Claude, "swe-1-7-fast", None, None),
                 ],
             )
             .unwrap();
         let config = Config::default();
         let excluded = BTreeSet::new();
         let excluded_accounts = BTreeSet::new();
-        let admitted = [Provider::Devin].into();
+        let admitted = [Provider::Claude].into();
         let request = || RouteRequest {
             requirements: Default::default(),
             task: "In add.js the add function subtracts; change it so it adds.",
@@ -1782,7 +1782,7 @@ mod tests {
             required_model: None,
             excluded_routes: &excluded,
             excluded_accounts: &excluded_accounts,
-            account: Some(&devin),
+            account: Some(&claude),
         };
         let plain = route_with_admitted(&store, &config, request(), &admitted)
             .await
@@ -1854,18 +1854,18 @@ mod tests {
         use crate::authentication_tests::account;
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(&xcb_core::canonical(root.path()).unwrap().join("state")).unwrap();
-        let devin = account(&store, Provider::Devin);
+        let claude = account(&store, Provider::Claude);
         let mut models: Vec<_> = (0..20)
-            .map(|n| model(Provider::Devin, &format!("swe-2-variant-{n}"), None, None))
+            .map(|n| model(Provider::Claude, &format!("swe-2-variant-{n}"), None, None))
             .collect();
-        models.push(model(Provider::Devin, "gpt-6-astra-ultra", None, None));
-        store.set_models(Provider::Devin, &models).unwrap();
+        models.push(model(Provider::Claude, "gpt-6-astra-ultra", None, None));
+        store.set_models(Provider::Claude, &models).unwrap();
         let mut config = Config::default();
         config.routing.never.clear();
         config.favorites.insert(
             0,
             xcb_core::models::Preference {
-                provider: Provider::Devin,
+                provider: Provider::Claude,
                 model: models[0].id.clone(),
                 effort: None,
             },
@@ -1873,16 +1873,16 @@ mod tests {
         let prompt = "details ".repeat(400);
         let excluded = BTreeSet::new();
         let excluded_accounts = BTreeSet::new();
-        let admitted = [Provider::Devin].into();
+        let admitted = [Provider::Claude].into();
         let request = |required_model| RouteRequest {
             requirements: Default::default(),
             task: &prompt,
-            required_provider: Some(Provider::Devin),
-            preferred_provider: Some(Provider::Devin),
+            required_provider: Some(Provider::Claude),
+            preferred_provider: Some(Provider::Claude),
             required_model,
             excluded_routes: &excluded,
             excluded_accounts: &excluded_accounts,
-            account: Some(&devin),
+            account: Some(&claude),
         };
         let selected = route_with_admitted(&store, &config, request(None), &admitted)
             .await
@@ -1896,7 +1896,7 @@ mod tests {
         assert_eq!(explicit.model.key(), key);
         assert!(!explicit.reason.contains("Warning"));
         // Once the exact route has been excluded, fallback remains reachable.
-        let excluded = BTreeSet::from([format!("{} · {}", selected.model.key(), devin)]);
+        let excluded = BTreeSet::from([format!("{} · {}", selected.model.key(), claude)]);
         let next = route_with_admitted(
             &store,
             &config,
@@ -1918,7 +1918,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(&xcb_core::canonical(root.path()).unwrap().join("state")).unwrap();
         let codex = account(&store, Provider::Codex);
-        account(&store, Provider::Devin);
+        account(&store, Provider::Claude);
         store
             .set_models(
                 Provider::Codex,
@@ -1927,8 +1927,8 @@ mod tests {
             .unwrap();
         store
             .set_models(
-                Provider::Devin,
-                &[model(Provider::Devin, "gpt-6-astra-medium", None, None)],
+                Provider::Claude,
+                &[model(Provider::Claude, "gpt-6-astra-medium", None, None)],
             )
             .unwrap();
         let config = Config::default();
@@ -1945,7 +1945,7 @@ mod tests {
             excluded_accounts: &excluded_accounts,
             account: None,
         };
-        let admitted = [Provider::Codex, Provider::Devin].into();
+        let admitted = [Provider::Codex, Provider::Claude].into();
         let work =
             crate::private::directory(&xcb_core::canonical(root.path()).unwrap().join("work"))
                 .unwrap();
@@ -1963,7 +1963,7 @@ mod tests {
         let busy = route_with_admitted(&store, &config, request(), &admitted)
             .await
             .unwrap();
-        assert_eq!(busy.model.provider, Provider::Devin);
+        assert_eq!(busy.model.provider, Provider::Claude);
         assert!(!busy.reason.contains("Warning"));
         store
             .settle(&run, xcb_core::session::State::Idle, now_ms())
@@ -1988,7 +1988,7 @@ mod tests {
             &config,
             RouteRequest {
                 requirements: Default::default(),
-                required_provider: Some(Provider::Devin),
+                required_provider: Some(Provider::Claude),
                 ..request()
             },
             &admitted,
@@ -1996,9 +1996,10 @@ mod tests {
         .await
         .unwrap();
         assert!(!constrained.reason.contains("Warning"));
-        let unadmitted = route_with_admitted(&store, &config, request(), &[Provider::Devin].into())
-            .await
-            .unwrap();
+        let unadmitted =
+            route_with_admitted(&store, &config, request(), &[Provider::Claude].into())
+                .await
+                .unwrap();
         assert!(!unadmitted.reason.contains("Warning"));
         store
             .record_quota(&xcb_core::usage::QuotaPoint {
@@ -2245,14 +2246,14 @@ mod tests {
         let limited = account(&store, Provider::Claude);
         let stale = account(&store, Provider::Claude);
         let exhausted = account(&store, Provider::Claude);
-        let devin = account(&store, Provider::Devin);
+        let codex = account(&store, Provider::Codex);
         let sonnet = model(Provider::Claude, "claude-sonnet-5", None, None);
-        let swe = model(Provider::Devin, "swe-2-high", None, None);
+        let replacement = model(Provider::Codex, "gpt-6-astra", None, Some("high"));
         store
             .set_models(Provider::Claude, std::slice::from_ref(&sonnet))
             .unwrap();
         store
-            .set_models(Provider::Devin, std::slice::from_ref(&swe))
+            .set_models(Provider::Codex, std::slice::from_ref(&replacement))
             .unwrap();
         let now = now_ms();
         let quota = |account: &Id, used_percent, observed_at_ms| xcb_core::usage::QuotaPoint {
@@ -2272,13 +2273,13 @@ mod tests {
             .unwrap();
         let mut config = Config::default();
         config.extensions.judge.enabled = false;
-        // This test is about usage meters, not the preference stack: Devin
-        // is an ordinary target and its SWE model is allowed.
+        // This test is about usage meters, not the preference stack: Codex
+        // is an ordinary target and its observed model is allowed.
         config.routing.never.clear();
         config.routing.fallback_providers.clear();
         let none = BTreeSet::new();
         let no_accounts = BTreeSet::new();
-        let admitted = [Provider::Claude, Provider::Devin].into();
+        let admitted = [Provider::Claude, Provider::Codex].into();
         let request = |limited_accounts| FailoverRequest {
             requirements: Default::default(),
             task: "fix a test",
@@ -2304,7 +2305,7 @@ mod tests {
             listed,
             [
                 format!("{stale}/{}", sonnet.key()),
-                format!("{devin}/{}", swe.key()),
+                format!("{codex}/{}", replacement.key()),
             ]
         );
         let seen_limited = BTreeSet::from([stale.clone()]);
@@ -2314,13 +2315,13 @@ mod tests {
                 .unwrap()
                 .routes;
         assert_eq!(routes.len(), 1, "{routes:?}");
-        assert_eq!(routes[0].account, devin);
+        assert_eq!(routes[0].account, codex);
     }
 
     #[test]
     fn unknown_model_labels_cannot_displace_the_known_quality_tier() {
         let build = |id, utility| {
-            let model = model(Provider::Devin, id, None, None);
+            let model = model(Provider::Claude, id, None, None);
             Candidate {
                 profile: base_profile(&model, &OfferState::default(), 1),
                 model,
@@ -2573,7 +2574,7 @@ mod tests {
             ProfiledModel {
                 key: "c".into(),
                 label: "c".into(),
-                provider: Provider::Devin,
+                provider: Provider::Claude,
                 profile: ModelProfile {
                     quality: 95,
                     relative_cost: 40,
@@ -2872,7 +2873,7 @@ mod tests {
         let models: Vec<_> = (0..20)
             .map(|index| {
                 model(
-                    Provider::Devin,
+                    Provider::Claude,
                     &format!("swe-2-variant-{index:02}"),
                     None,
                     None,
@@ -2889,7 +2890,7 @@ mod tests {
             |_| None,
         );
         assert_eq!(profiles.len(), 1);
-        assert_eq!(profiles["devin/swe-2-variant-19"].pareto_layer, 1);
+        assert_eq!(profiles["claude/swe-2-variant-19"].pareto_layer, 1);
         assert!(
             eligible_profiles(
                 &models,
@@ -2924,7 +2925,7 @@ mod tests {
             None,
             Some("high")
         )));
-        let mut adaptive = model(Provider::Devin, "swe-2-high", None, None);
+        let mut adaptive = model(Provider::Claude, "swe-2-high", None, None);
         adaptive.mode = Mode::Adaptive;
         assert!(!selectable_model(&adaptive));
     }
@@ -2932,12 +2933,12 @@ mod tests {
     #[test]
     fn profile_identity_and_effort_do_not_come_from_display_labels() {
         let offers = OfferState::default();
-        let mut unknown = model(Provider::Devin, "new-model", None, None);
+        let mut unknown = model(Provider::Claude, "new-model", None, None);
         unknown.label = "GPT-6 Astra Ultra (Max plan)".into();
         let profile = base_profile(&unknown, &offers, 2);
         assert!(!profile.recognized);
         assert_eq!(profile.quality, 72);
-        let near_match = model(Provider::Devin, "swe-20-high", None, None);
+        let near_match = model(Provider::Claude, "swe-20-high", None, None);
         assert!(!base_profile(&near_match, &offers, 2).recognized);
         let resolved = model(
             Provider::Claude,
@@ -2947,7 +2948,7 @@ mod tests {
         );
         assert_eq!(base_profile(&resolved, &offers, 2).quality, 83);
         assert_eq!(
-            effort(&model(Provider::Devin, "swe-2-xhigh", None, None)),
+            effort(&model(Provider::Claude, "swe-2-xhigh", None, None)),
             "xhigh"
         );
     }
@@ -2972,7 +2973,7 @@ mod tests {
         for (task, provider) in [
             ("Use Claude.", Provider::Claude),
             ("  Please use Codex to fix this", Provider::Codex),
-            ("use devin for this task", Provider::Devin),
+            ("use claude for this task", Provider::Claude),
             ("use claude", Provider::Claude),
         ] {
             assert_eq!(explicit_provider_intent(task), Some(provider), "{task}");
@@ -2981,6 +2982,7 @@ mod tests {
             "Do not use Claude",
             "Don't use Codex for this",
             "Explain when to use Devin",
+            "use devin for this task",
             "The docs say use Claude.",
             "use codexish tools",
             "use Claude's API",
@@ -2996,13 +2998,13 @@ mod tests {
         use crate::authentication_tests::account;
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(&xcb_core::canonical(root.path()).unwrap().join("state")).unwrap();
-        let first = account(&store, Provider::Devin);
-        let second = account(&store, Provider::Devin);
-        let shared = model(Provider::Devin, "swe-2-variant", None, None);
-        let exclusive = model(Provider::Devin, "gpt-6-astra-ultra", None, None);
+        let first = account(&store, Provider::Claude);
+        let second = account(&store, Provider::Claude);
+        let shared = model(Provider::Claude, "swe-2-variant", None, None);
+        let exclusive = model(Provider::Claude, "gpt-6-astra-ultra", None, None);
         // An upgraded host: one provider-wide list, no account's own yet.
         store
-            .set_models(Provider::Devin, std::slice::from_ref(&shared))
+            .set_models(Provider::Claude, std::slice::from_ref(&shared))
             .unwrap();
         store
             .set_account_models(&first, &[shared.clone(), exclusive.clone()])
@@ -3010,7 +3012,7 @@ mod tests {
         let mut config = Config::default();
         config.routing.never.clear();
         let prompt = "details ".repeat(400);
-        let admitted = [Provider::Devin].into();
+        let admitted = [Provider::Claude].into();
         let no_routes = BTreeSet::new();
         let no_accounts = BTreeSet::new();
         let route = |excluded_routes, excluded_accounts, required_model| {
@@ -3025,7 +3027,7 @@ mod tests {
                     RouteRequest {
                         requirements: Default::default(),
                         task: prompt,
-                        required_provider: Some(Provider::Devin),
+                        required_provider: Some(Provider::Claude),
                         preferred_provider: None,
                         required_model,
                         excluded_routes,
@@ -3071,7 +3073,7 @@ mod tests {
         assert_eq!(quality(Provider::Codex, "gpt-5.6-sol"), 89);
         assert_eq!(quality(Provider::Codex, "gpt-6-sol"), 94);
         assert_eq!(quality(Provider::Codex, "gpt-6.1-sol"), 94);
-        assert_eq!(quality(Provider::Devin, "gpt-6-1-sol-max"), 94);
+        assert_eq!(quality(Provider::Claude, "gpt-6-1-sol-max"), 94);
         assert_eq!(quality(Provider::Codex, "gpt-6-astra"), 100);
         assert_eq!(quality(Provider::Codex, "gpt-7-astra"), 100);
         assert_eq!(quality(Provider::Claude, "claude-fable-5-1"), 97);
@@ -3391,27 +3393,29 @@ mod tests {
         let store = Store::open(&base.join("state")).unwrap();
         let work = crate::private::directory(&base.join("work")).unwrap();
         let codex = account(&store, Provider::Codex);
-        let devin = account(&store, Provider::Devin);
+        let claude = account(&store, Provider::Claude);
         let sol = model(Provider::Codex, "gpt-5.6-sol", None, Some("ultra"));
         store
             .set_models(Provider::Codex, std::slice::from_ref(&sol))
             .unwrap();
         store
             .set_models(
-                Provider::Devin,
+                Provider::Claude,
                 &[
-                    model(Provider::Devin, "swe-2-high", None, None),
-                    model(Provider::Devin, "swe-2-max", None, None),
-                    model(Provider::Devin, "gpt-5-6-sol-max", None, None),
-                    model(Provider::Devin, "gpt-6-astra-medium", None, None),
+                    model(Provider::Claude, "swe-2-high", None, None),
+                    model(Provider::Claude, "swe-2-max", None, None),
+                    model(Provider::Claude, "gpt-5-6-sol-max", None, None),
+                    model(Provider::Claude, "gpt-6-astra-medium", None, None),
                 ],
             )
             .unwrap();
         let mut config = Config::default();
         config.extensions.judge.enabled = false;
+        config.routing.fallback_providers = vec![Provider::Claude];
+        config.routing.never = vec!["claude/swe-*".into()];
         let none = BTreeSet::new();
         let no_accounts = BTreeSet::new();
-        let admitted = [Provider::Codex, Provider::Devin].into();
+        let admitted = [Provider::Codex, Provider::Claude].into();
         let request = |required_model| RouteRequest {
             requirements: Default::default(),
             task: "fix a test",
@@ -3437,11 +3441,11 @@ mod tests {
         let fallback = route_with_admitted(&store, &config, request(None), &admitted)
             .await
             .unwrap();
-        assert_eq!(fallback.account, devin);
-        assert_eq!(fallback.model.key(), "devin/gpt-5-6-sol-max");
+        assert_eq!(fallback.account, claude);
+        assert_eq!(fallback.model.key(), "claude/gpt-5-6-sol-max");
         assert_eq!(
             fallback.stack_position, None,
-            "Devin never matches a codex/ pattern"
+            "Claude never matches a codex/ pattern"
         );
         let failover = failover_routes_with_admitted(
             &store,
@@ -3476,7 +3480,7 @@ mod tests {
         let refused = route_with_admitted(
             &store,
             &config,
-            request(Some("devin/swe-2-high")),
+            request(Some("claude/swe-2-high")),
             &admitted,
         )
         .await
@@ -3486,24 +3490,24 @@ mod tests {
         let pinned = route_with_admitted(
             &store,
             &config,
-            request(Some("devin/gpt-6-astra-medium")),
+            request(Some("claude/gpt-6-astra-medium")),
             &admitted,
         )
         .await
         .unwrap();
-        assert_eq!(pinned.model.key(), "devin/gpt-6-astra-medium");
-        // Without the fallback rule Devin competes on the profile order and
+        assert_eq!(pinned.model.key(), "claude/gpt-6-astra-medium");
+        // Without the fallback rule Claude competes on the profile order and
         // an allowed SWE model is an ordinary route again.
         config.routing.fallback_providers.clear();
         config.routing.never.clear();
         let open = route_with_admitted(
             &store,
             &config,
-            request(Some("devin/swe-2-high")),
+            request(Some("claude/swe-2-high")),
             &admitted,
         )
         .await
         .unwrap();
-        assert_eq!(open.model.key(), "devin/swe-2-high");
+        assert_eq!(open.model.key(), "claude/swe-2-high");
     }
 }

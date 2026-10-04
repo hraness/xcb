@@ -22,13 +22,13 @@ const blogLines = indexableBlogPosts.map((entry) => `- [${entry.title}](https://
 
 const body = `# Excalibur (xcb)
 
-> Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for.
+> Excalibur (xcb) routes coding tasks across the Claude and Codex subscriptions you already pay for.
 
 xcb is a terminal and router for developers who pay for more than one coding agent. Each task runs on an account that is signed in, idle, and not at a known usage limit, on a model that fits the work, and xcb holds that account until the provider process exits. It is MIT licensed. ${releaseLine}
 
 ## Use it as a coding agent
 
-Plain \`xcb\` opens one thread for all your projects. xcb picks each task's project folder and says why, then picks an account and model. Tasks keep running after you close the terminal, and a turn that stops at a usage limit continues on another account or model. Set up with \`xcb setup claude\`, \`xcb setup codex\`, or \`xcb setup devin\`.
+Plain \`xcb\` opens one thread for all your projects. xcb picks each task's project folder and says why, then picks an account and model. Tasks keep running after you close the terminal, and a turn that stops at a usage limit continues on another account or model. Set up with \`xcb setup claude\`, \`xcb setup codex\`.
 
 ## Use subscription capacity before it resets
 
@@ -48,7 +48,6 @@ When Claude or Codex reports fresh usage data, xcb favors unused capacity approa
 
 - Claude: Claude Code ${supportedBuilds.claudeMinimum} or later within version 2. ${providerStatus.claude} On Linux, Claude runs after xcb's sandbox checks pass on that machine.
 - Codex: Codex CLI ${supportedBuilds.codex.join(", ")} on macOS ARM64. ${providerStatus.codex}
-- Devin: Devin CLI ${supportedBuilds.devin.join(", ")} on macOS ARM64. ${providerStatus.devin}
 - Providers work through xcb's file tools in an OS sandbox, without their own shells or plugins. Model requests go from each provider's CLI to that provider.
 - The command runner for tests and builds is an offline Linux VM on macOS ARM64. Git is read-only there, and native macOS builds can't run.
 - Each account runs one provider turn at a time, and tasks in the same project folder take turns.
@@ -64,7 +63,7 @@ ${docsLines}
 - [Install](https://xcb.sh/install): the one-line installer, first steps, a prompt for your agent, and the source build.
 - [Documentation](https://xcb.sh/docs): all guides, grouped for using xcb and building on it.
 - [Compare](https://xcb.sh/compare): how xcb compares with request routers, agent workspaces, provider coding tools, and managed task environments.
-- [xcb vs OpenRouter](https://xcb.sh/compare/openrouter): OpenRouter bills per token for API calls to many models; xcb sends each coding task to a Claude, Codex, or Devin subscription you already pay for.
+- [xcb vs OpenRouter](https://xcb.sh/compare/openrouter): OpenRouter bills per token for API calls to many models; xcb sends each coding task to a Claude or Codex subscription you already pay for.
 - [Routing that learns you](https://xcb.sh/reflexes): learned routing and continuation built from ALGAL programs and local evidence.
 - [README as Markdown](https://xcb.sh/README.md): the repository README.
 - [Blog](https://xcb.sh/blog): posts on how xcb works, with an [Atom feed](https://xcb.sh/blog/feed.xml).

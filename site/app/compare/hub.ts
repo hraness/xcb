@@ -1,5 +1,5 @@
 import type { ArticleIsoDate } from "@hraness/design-kit";
-import { comparisonPath, devinStatus } from "./comparisons";
+import { comparisonPath } from "./comparisons";
 
 /**
  * The words on /compare. Each group names a kind of tool people weigh against
@@ -24,9 +24,9 @@ export interface HubGroup {
 }
 
 export const hubTitle = "How xcb compares with coding agents, terminals, and routers";
-export const hubDescription = "xcb runs each coding task on one of your own Claude, Codex, or Devin subscriptions. See where it fits beside agents, agent terminals, and routers.";
+export const hubDescription = "xcb runs each coding task on one of your own Claude or Codex subscriptions. See where it fits beside agents, agent terminals, and routers.";
 export const hubHeading = "How xcb compares";
-export const hubLead = "xcb runs each coding task on one of your own Claude, Codex, or Devin subscriptions, through that provider’s own tool. It holds the account until the run ends, sandboxes the run, and returns the result to you or to another agent.";
+export const hubLead = "xcb runs each coding task on one of your own Claude or Codex subscriptions, through that provider’s own tool. It holds the account until the run ends, sandboxes the run, and returns the result to you or to another agent.";
 /** The day this comparison guide last materially changed. */
 export const hubUpdated: ArticleIsoDate = "2026-10-01";
 
@@ -34,11 +34,10 @@ export const hubGroups: readonly HubGroup[] = [
   {
     id: "provider-agents",
     title: "Provider agents",
-    summary: `Claude Code, Codex, and the Devin CLI are the coding agents themselves, and xcb runs them for you under your own accounts. Use one directly when a single subscription covers your work, and add xcb when you pay for more than one. ${devinStatus}`,
+    summary: `Claude Code and Codex are the coding agents themselves, and xcb runs them for you under your own accounts. Use one directly when a single subscription covers your work, and add xcb when you pay for more than one.`,
     tools: [
       { name: "Claude Code", href: comparisonPath("claude-code"), summary: "Anthropic’s coding agent for the terminal, IDE, desktop, and browser." },
       { name: "Codex", href: `${comparisonPath("claude-code")}#codex`, summary: "OpenAI’s open-source coding agent, signed in with a ChatGPT plan or an API key." },
-      { name: "Devin CLI", href: "https://docs.devin.ai/cli", summary: "Cognition’s local coding agent, which can hand work off to Devin Cloud." },
     ],
   },
   {
@@ -77,7 +76,7 @@ export const hubGroups: readonly HubGroup[] = [
   {
     id: "account-switchers",
     title: "Account switchers",
-    summary: "These change which login your usual Claude Code or Codex uses, by hand or before a usage limit, and you keep every feature of the provider’s tool. xcb keeps each account in its own private profile, picks one per task across Claude, Codex, and Devin, and replaces the provider’s built-in tools with its own file tools in each run.",
+    summary: "These change which login your usual Claude Code or Codex uses, by hand or before a usage limit, and you keep every feature of the provider’s tool. xcb keeps each account in its own private profile, picks one per task across Claude and Codex, and replaces the provider’s built-in tools with its own file tools in each run.",
     tools: [
       { name: "claude-swap", href: "https://github.com/realiti4/claude-swap", summary: "Switches Claude Code between saved logins and can rotate before you hit a rate limit." },
       { name: "aisw", href: "https://github.com/burakdede/aisw", summary: "Named account profiles for Claude Code, Codex CLI, Gemini CLI, and Antigravity CLI." },
@@ -120,6 +119,6 @@ export const hubGroups: readonly HubGroup[] = [
 export const hubElsewhere: readonly string[] = [
   "You pay for one subscription and want every native feature: use that provider’s own tool.",
   "The agent needs to commit, push, or build for macOS: in xcb, Git is read-only for workers, and commands run in an offline Linux VM on macOS ARM64.",
-  "You need providers to run natively on Windows, or Codex or Devin on Linux: Windows provider work requires xcb’s Linux build in WSL2, and Codex and Devin need macOS.",
+  "You need providers to run natively on Windows, or Codex on Linux: Windows provider work requires xcb’s Linux build in WSL2, and Codex needs macOS.",
   "You need the provider’s native shell or unrelated plugins: use its own tool or an open agent. xcb supports registered host MCP servers, including browser tools.",
 ];

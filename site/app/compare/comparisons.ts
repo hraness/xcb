@@ -60,15 +60,9 @@ export interface Comparison {
   readonly sources: readonly ComparisonSource[];
 }
 
-/**
- * Devin's status in one sentence, shown once on each page where Devin support
- * matters to a claim.
- */
-export const devinStatus = "Devin support covers specific Devin CLI builds on macOS; a coding task on a signed-in Devin account passed with Devin CLI 3000.11.3.";
-
 /** Table cells that state the same xcb fact on several pages. */
 export const xcbFacts = {
-  platforms: "Mac ARM64, Linux x86_64/ARM64, Windows x86_64; Windows provider work needs WSL2; Codex and Devin need macOS",
+  platforms: "Mac ARM64, Linux x86_64/ARM64, Windows x86_64; Windows provider work needs WSL2; Codex needs macOS",
   sandbox: "Every provider run is sandboxed; commands run in an offline Linux VM on macOS ARM64",
   route: "`xcb --json route` takes one task and returns the result, the account and model used, and how the run ended",
 } as const;
@@ -76,7 +70,7 @@ export const xcbFacts = {
 const xcbPlatforms = {
   status: "partial",
   label: "Mac, Linux, Windows",
-  detail: "Mac ARM64; Linux x86_64/ARM64; Windows x86_64. Claude on Linux needs sandbox setup. Windows provider work uses WSL2; Codex and Devin need Mac.",
+  detail: "Mac ARM64; Linux x86_64/ARM64; Windows x86_64. Claude on Linux needs sandbox setup. Windows provider work uses WSL2; Codex needs Mac.",
 } as const;
 
 const checkedOn: ArticleIsoDate = "2026-09-27";
@@ -93,7 +87,7 @@ export const comparisons: readonly Comparison[] = [
     slug: "herdr",
     glance: [
       { label: "Focus", values: ["Terminal workspaces", "Task and account routing"] },
-      { label: "Agents", values: ["22 agent CLIs", "Claude Code, Codex, Devin"] },
+      { label: "Agents", values: ["22 agent CLIs", "Claude Code and Codex"] },
       { label: "After disconnect", values: [{ status: "yes", label: "Background server" }, { status: "yes", label: "Task supervisor" }] },
       { label: "Run isolation", values: [{ status: "depends", label: "Agent permissions", detail: "Plugin code is not sandboxed." }, { status: "yes", label: "Sandboxed provider runs", detail: "Commands use an offline VM on Mac ARM64." }] },
       { label: "Platforms", values: ["Mac, Linux, Windows", xcbPlatforms] },
@@ -102,7 +96,7 @@ export const comparisons: readonly Comparison[] = [
     tool: "herdr",
     title: "xcb vs herdr: where agents live, and which account runs a task",
     description: "herdr keeps coding agents running in terminals you can reattach to from any machine. xcb picks the account for each task and can run in a herdr pane.",
-    lead: "herdr keeps your coding agents running in real terminals that you can reattach to from any machine, and shows which one needs you. xcb picks which of your Claude, Codex, and Devin accounts runs each task and holds that account until the run ends, and it can run in a herdr pane, so you can use both.",
+    lead: "herdr keeps your coding agents running in real terminals that you can reattach to from any machine, and shows which one needs you. xcb picks which of your Claude and Codex accounts runs each task and holds that account until the run ends, and it can run in a herdr pane, so you can use both.",
     updated: checkedOn,
     picks: {
       tool: [
@@ -112,7 +106,7 @@ export const comparisons: readonly Comparison[] = [
         "You want plugins, or agents that open and drive panes through a socket API.",
       ],
       xcb: [
-        "You pay for more than one of Claude, Codex, and Devin, or hold several accounts, and want each task sent to one that can take it now.",
+        "You pay for more than one of Claude and Codex, or hold several accounts, and want each task sent to one that can take it now.",
         "You want each account to run one task at a time, held until that run ends.",
         "You want another agent to hand off a whole task with `xcb --json route` and get the result back.",
         "You want each provider run in a sandbox.",
@@ -120,7 +114,7 @@ export const comparisons: readonly Comparison[] = [
     },
     rows: [
       { aspect: "What it manages", tool: "Terminals: sessions, workspaces, tabs, and panes, each running a real process", xcb: "Tasks: which account and model runs each one, and how the run ended" },
-      { aspect: "Agents", tool: "22 detected agent CLIs, including Claude Code, Codex, pi, OpenCode, and the Devin CLI", xcb: "Claude Code, Codex, and the Devin CLI, run by xcb instead of through their own interfaces" },
+      { aspect: "Agents", tool: "22 detected agent CLIs, including Claude Code, Codex, pi, and OpenCode", xcb: "Claude Code and Codex, run by xcb instead of through their own interfaces" },
       { aspect: "Accounts and limits", tool: "Each agent keeps its own sign-in; herdr runs it unchanged", xcb: "Each task goes to an idle account that isn’t at a known limit, one task per account" },
       { aspect: "After you disconnect", tool: "Agents keep running in herdr’s background server", xcb: "Tasks keep running under xcb’s background supervisor" },
       { aspect: "For other agents", tool: "A CLI and socket API that agents use to split panes, start and prompt other agents, and wait on them", xcb: xcbFacts.route },
@@ -128,7 +122,6 @@ export const comparisons: readonly Comparison[] = [
       { aspect: "Platforms", tool: "macOS, Linux, and Windows", xcb: xcbFacts.platforms },
       { aspect: "License and price", tool: "Apache 2.0, free", xcb: "MIT, free" },
     ],
-    note: devinStatus,
     sections: [
       {
         id: "together",
@@ -151,7 +144,7 @@ export const comparisons: readonly Comparison[] = [
     slug: "pi",
     glance: [
       { label: "Focus", values: ["Extensible coding agent", "Router around provider agents"] },
-      { label: "Model access", values: ["15+ providers; keys or OAuth", "Claude, Codex, Devin plans"] },
+      { label: "Model access", values: ["15+ providers; keys or OAuth", "Claude and Codex plans"] },
       { label: "Extensions", values: ["Tools, prompts, and interface", "Panes, hooks, and reflexes"] },
       { label: "Run isolation", values: [{ status: "optional", label: "Bring your own container" }, { status: "yes", label: "Sandboxed provider runs", detail: "Commands use an offline VM on Mac ARM64." }] },
       { label: "Platforms", values: ["Mac, Linux, Windows", xcbPlatforms] },
@@ -171,14 +164,14 @@ export const comparisons: readonly Comparison[] = [
         "You want to embed an agent with its SDK or drive it over RPC.",
       ],
       xcb: [
-        "You pay for Claude, Codex, or Devin and want each task to run through that provider’s own agent.",
+        "You pay for Claude or Codex and want each task to run through that provider’s own agent.",
         "You want each task sent to an account that can take it now, and held there until the run ends.",
         "You want to customize the harness and still have every provider run sandboxed with the same tools.",
       ],
     },
     rows: [
       { aspect: "What it is", tool: "A coding agent with a minimal core that you extend", xcb: "A router and terminal around the providers’ own agents" },
-      { aspect: "Model access", tool: "15+ providers through API keys or OAuth, including Claude Pro/Max and ChatGPT plans", xcb: "Your Claude, Codex, and Devin subscriptions, through Claude Code, Codex, and the Devin CLI" },
+      { aspect: "Model access", tool: "15+ providers through API keys or OAuth, including Claude Pro/Max and ChatGPT plans", xcb: "Your Claude and Codex subscriptions, through Claude Code and Codex" },
       { aspect: "What you change", tool: "Tools, commands, prompts, compaction, and the whole interface, through TypeScript extensions", xcb: "Panes, hooks, and reflex programs; none of them can add tools or permissions to a provider run" },
       { aspect: "Permissions", tool: "No permission prompts; run it in a container or build your own confirmation flow", xcb: xcbFacts.sandbox },
       { aspect: "Scripting", tool: "Print and JSON modes, RPC over stdin and stdout, and an SDK", xcb: xcbFacts.route },
@@ -186,7 +179,6 @@ export const comparisons: readonly Comparison[] = [
       { aspect: "Platforms", tool: "macOS, Linux, and Windows", xcb: xcbFacts.platforms },
       { aspect: "License", tool: "MIT", xcb: "MIT" },
     ],
-    note: devinStatus,
     sections: [
       {
         id: "reshape",
@@ -239,7 +231,7 @@ export const comparisons: readonly Comparison[] = [
         "You want the agent to commit, push, or run native macOS builds.",
       ],
       xcb: [
-        "You pay for more than one of Claude, Codex, and Devin, or hold more than one account, and want one place to send work.",
+        "You pay for more than one of Claude and Codex, or hold more than one account, and want one place to send work.",
         "You want each task sent to an idle account that isn’t at a known limit, and held there until the run ends.",
         "You want tasks in several projects to keep running after you close the terminal, with one place to answer their questions.",
         "You want another agent to hand off work with `xcb --json route`.",
@@ -255,7 +247,6 @@ export const comparisons: readonly Comparison[] = [
       { aspect: "For other programs", tool: "`claude -p` and the Agent SDK", xcb: xcbFacts.route },
       { aspect: "Platforms", tool: "macOS, Linux, WSL, and Windows", xcb: "Claude runs on Mac ARM64 and on Linux after sandbox setup; Windows provider work uses WSL2" },
     ],
-    note: devinStatus,
     sections: [
       {
         id: "codex",
@@ -313,7 +304,7 @@ export const comparisons: readonly Comparison[] = [
         "You want paid cloud workspaces, live collaboration, or a mobile app.",
       ],
       xcb: [
-        "You pay for more than one of Claude, Codex, and Devin, or several accounts at one provider, and want each task on one that can take it now.",
+        "You pay for more than one of Claude and Codex, or several accounts at one provider, and want each task on one that can take it now.",
         "You want each run sandboxed instead of running with your user permissions.",
         "You want tasks to keep running on your own machine after you close the terminal.",
         "You want another agent to hand off work with `xcb --json route`.",
@@ -326,10 +317,9 @@ export const comparisons: readonly Comparison[] = [
       { aspect: "Sandboxing", tool: "Local agents run directly on your system without sandboxing", xcb: xcbFacts.sandbox },
       { aspect: "Closing the app", tool: "Local sessions end; paid cloud workspaces keep running", xcb: "Managed tasks keep running under a background supervisor" },
       { aspect: "Review and merge", tool: "Diffs, pull requests, and merging in the app", xcb: "None; workers see Git status and diffs read-only" },
-      { aspect: "Agents", tool: "Claude Code, Codex, Cursor, and OpenCode", xcb: "Claude Code, Codex, and the Devin CLI" },
+      { aspect: "Agents", tool: "Claude Code, Codex, Cursor, and OpenCode", xcb: "Claude Code and Codex" },
       { aspect: "Price", tool: "Free; Pro is $50 a month and adds cloud workspaces, an API, and a mobile app", xcb: "Free and open source under the MIT license" },
     ],
-    note: devinStatus,
     sections: [
       {
         id: "others",
@@ -337,7 +327,7 @@ export const comparisons: readonly Comparison[] = [
         paragraphs: [
           "[Claude Squad](https://github.com/smtg-ai/claude-squad) is a terminal app that runs Claude Code, Codex, Gemini, Aider, and other local agents in separate tmux sessions and Git worktrees, with an optional auto-accept mode. It needs tmux and the GitHub CLI, and it is licensed under AGPL-3.0.",
           "[Superset](https://github.com/superset-sh/superset) runs Claude Code, Codex, or another CLI agent with terminals, code review, and browser previews in one workspace, with a worktree for each task. Its README notes that worktrees “do not sandbox processes or prevent merge conflicts”. It targets macOS, with experimental Linux builds, under the Elastic License 2.0.",
-          "[Emdash](https://github.com/generalaction/emdash) is a desktop app for macOS, Windows, and Linux that runs each task in its own worktree, locally or on a remote machine over SSH. It works with Claude Code, Codex, OpenCode, Amp, Devin, and more, under the Apache 2.0 license.",
+          "[Emdash](https://github.com/generalaction/emdash) is a desktop app for macOS, Windows, and Linux that runs each task in its own worktree, locally or on a remote machine over SSH. It works with Claude Code, Codex, OpenCode, Amp, and more, under the Apache 2.0 license.",
           "Each of them works with the agents and sign-ins you already have. xcb picks an account for each task and sandboxes each run, and it can run beside any of them.",
         ],
       },
@@ -356,7 +346,7 @@ export const comparisons: readonly Comparison[] = [
     slug: "claude-code-router",
     glance: [
       { label: "Routes", values: ["Individual API requests", "Coding tasks"] },
-      { label: "Credentials", values: ["API keys; some subscription imports", "Claude, Codex, Devin sign-ins"] },
+      { label: "Credentials", values: ["API keys; some subscription imports", "Claude and Codex sign-ins"] },
       { label: "Retry or fallback", values: [{ status: "yes", label: "API requests" }, { status: "depends", label: "Managed usage-limit recovery", detail: "Route calls run once." }] },
       { label: "Run isolation", values: [{ status: "depends", label: "Controlled by your agent" }, { status: "yes", label: "Sandboxed provider runs" }] },
       { label: "Integration", values: ["Local model API endpoint", "JSON task result via CLI"] },
@@ -375,21 +365,20 @@ export const comparisons: readonly Comparison[] = [
         "You pay per token with API keys and want one local endpoint for all your agents.",
       ],
       xcb: [
-        "You want the Claude, Codex, and Devin subscriptions you already pay for used through each provider’s own tool.",
+        "You want the Claude and Codex subscriptions you already pay for used through each provider’s own tool.",
         "You want each task held on one account until its run ends, instead of routing each request.",
         "You want each run sandboxed and a result that says how the run ended.",
       ],
     },
     rows: [
       { aspect: "What it routes", tool: "Each API request from your agent to a provider and model", xcb: "Each coding task to one of your accounts and a model" },
-      { aspect: "Where it sits", tool: "A local endpoint between your agents and model APIs", xcb: "Above the agents: it starts Claude Code, Codex, or the Devin CLI itself" },
-      { aspect: "What you bring", tool: "API keys, plus logins it can import for some subscriptions", xcb: "Claude, Codex, and Devin subscriptions, signed in through each provider’s own flow" },
+      { aspect: "Where it sits", tool: "A local endpoint between your agents and model APIs", xcb: "Above the agents: it starts Claude Code or Codex itself" },
+      { aspect: "What you bring", tool: "API keys, plus logins it can import for some subscriptions", xcb: "Claude and Codex subscriptions, signed in through each provider’s own flow" },
       { aspect: "When a call fails", tool: "Retries, credential pools, key rotation, and ordered fallback models", xcb: "A route call runs once; a managed task can switch accounts after a reported usage limit" },
       { aspect: "Sandboxing", tool: "Your agent runs as usual; the router handles its requests", xcb: "Every provider run is sandboxed, and file changes go through xcb" },
       { aspect: "For your own code", tool: "One local endpoint that compatible API clients can call", xcb: xcbFacts.route },
       { aspect: "Platforms", tool: "Desktop apps for macOS, Windows, and Linux, plus a CLI and Docker", xcb: xcbFacts.platforms },
     ],
-    note: devinStatus,
     sections: [
       {
         id: "proxies",
@@ -420,7 +409,7 @@ export const comparisons: readonly Comparison[] = [
     slug: "opencode",
     glance: [
       { label: "Focus", values: ["Terminal, IDE, desktop agent", "Router around provider agents"] },
-      { label: "Model access", values: ["75+ API providers; local models", "Claude, Codex, Devin plans"] },
+      { label: "Model access", values: ["75+ API providers; local models", "Claude and Codex plans"] },
       { label: "Worker plugins", values: [{ status: "yes", label: "Plugins and MCP" }, { status: "partial", label: "Registered host tools", detail: "No unrelated provider plugins or provider-native shells." }] },
       { label: "Permissions", values: ["Allow, ask, or deny rules", { status: "yes", label: "Sandboxed provider runs", detail: "Commands use an offline VM on Mac ARM64." }] },
       { label: "Platforms", values: ["Mac, Linux, Windows", xcbPlatforms] },
@@ -428,8 +417,8 @@ export const comparisons: readonly Comparison[] = [
     ],
     tool: "OpenCode",
     title: "xcb vs OpenCode: an open agent or a router for your subscriptions",
-    description: "OpenCode is an open agent for 75+ providers and no longer bundles Claude Pro/Max plugins. xcb uses your Claude plan through Claude Code, plus Codex and Devin.",
-    lead: "OpenCode is an open-source coding agent for 75+ providers and local models, and its docs say Anthropic prohibits using a Claude Pro or Max plan through OpenCode plugins. xcb uses your Claude subscription through the unmodified Claude Code binary, along with Codex and the Devin CLI, routing tasks across the accounts you connect.",
+    description: "OpenCode is an open agent for 75+ providers and no longer bundles Claude Pro/Max plugins. xcb uses your Claude plan through Claude Code, plus Codex.",
+    lead: "OpenCode is an open-source coding agent for 75+ providers and local models, and its docs say Anthropic prohibits using a Claude Pro or Max plan through OpenCode plugins. xcb uses your Claude subscription through the unmodified Claude Code binary, along with Codex, routing tasks across the accounts you connect.",
     updated: "2026-10-01",
     picks: {
       tool: [
@@ -439,22 +428,21 @@ export const comparisons: readonly Comparison[] = [
         "You want plugins, MCP servers, and language server support in your agent.",
       ],
       xcb: [
-        "You want to use a Claude Pro or Max plan through Claude Code, alongside Codex and Devin.",
+        "You want to use a Claude Pro or Max plan through Claude Code, alongside Codex.",
         "You hold several accounts and want each task sent to one that is idle and not at a known limit.",
         "You want every provider run sandboxed, with file changes going through xcb.",
       ],
     },
     rows: [
-      { aspect: "What it is", tool: "An open-source coding agent for the terminal, IDE, and desktop", xcb: "A router and terminal around Claude Code, Codex, and the Devin CLI" },
-      { aspect: "Model access", tool: "75+ providers through API keys, plus local models", xcb: "Your Claude, Codex, and Devin subscriptions, through each provider’s own tool" },
-      { aspect: "Subscriptions", tool: "ChatGPT Plus, GitHub Copilot, and GitLab Duo; Claude Pro/Max plugins no longer bundled", xcb: "Claude through the unmodified Claude Code binary, ChatGPT through Codex, and Devin plans" },
+      { aspect: "What it is", tool: "An open-source coding agent for the terminal, IDE, and desktop", xcb: "A router and terminal around Claude Code and Codex" },
+      { aspect: "Model access", tool: "75+ providers through API keys, plus local models", xcb: "Your Claude and Codex subscriptions, through each provider’s own tool" },
+      { aspect: "Subscriptions", tool: "ChatGPT Plus, GitHub Copilot, and GitLab Duo; Claude Pro/Max plugins no longer bundled", xcb: "Claude through the unmodified Claude Code binary and ChatGPT through Codex" },
       { aspect: "Customization", tool: "Custom agents and subagents, plugins, MCP servers, and language servers", xcb: "Panes, hooks, and reflex programs; workers use xcb’s tools and registered host MCP servers" },
       { aspect: "Permissions", tool: "Rules that allow, ask about, or deny edits, shell commands, and web fetches", xcb: xcbFacts.sandbox },
       { aspect: "For your own code", tool: "An SDK and a server mode", xcb: xcbFacts.route },
       { aspect: "Platforms", tool: "macOS, Linux, and Windows", xcb: xcbFacts.platforms },
       { aspect: "License", tool: "MIT", xcb: "MIT" },
     ],
-    note: devinStatus,
     sections: [
       {
         id: "claude-plan",
@@ -486,8 +474,8 @@ export const comparisons: readonly Comparison[] = [
     ],
     tool: "OpenRouter",
     title: "xcb vs OpenRouter: your subscriptions or a per-token API",
-    description: "OpenRouter bills per token for API calls to hundreds of models. xcb sends each coding task to a Claude, Codex, or Devin plan you already pay for.",
-    lead: "OpenRouter is a hosted API that sends each request from your code to one of hundreds of models and bills you per token. xcb runs on your machine and sends each coding task to one of the Claude, Codex, or Devin accounts you already pay for; it never proxies or rewrites API traffic.",
+    description: "OpenRouter bills per token for API calls to hundreds of models. xcb sends each coding task to a Claude or Codex plan you already pay for.",
+    lead: "OpenRouter is a hosted API that sends each request from your code to one of hundreds of models and bills you per token. xcb runs on your machine and sends each coding task to one of the Claude or Codex accounts you already pay for; it never proxies or rewrites API traffic.",
     updated: checkedOn,
     picks: {
       tool: [
@@ -497,21 +485,21 @@ export const comparisons: readonly Comparison[] = [
         "Your app already calls the OpenAI chat API and you want to switch models without changing code.",
       ],
       xcb: [
-        "You already pay for Claude, Codex, or Devin and want coding tasks to use those plans, with no per-token charge from xcb.",
+        "You already pay for Claude or Codex and want coding tasks to use those plans, with no per-token charge from xcb.",
         "You want each task held on one account until its run ends; if xcb can’t confirm how a run ended, it keeps the account held and doesn’t retry.",
         "You want your account credentials to stay on your machine, outside your project folder.",
       ],
     },
     rows: [
       { aspect: "What it routes", tool: "One API request: a prompt in, a model’s answer out", xcb: "One coding task; each route call runs one provider turn on one model" },
-      { aspect: "What you bring", tool: "An OpenRouter API key, or your own provider keys through BYOK", xcb: "Claude, Codex, or Devin subscriptions you already pay for, signed in on your machine" },
-      { aspect: "Where it runs", tool: "OpenRouter’s hosted service; requests leave your machine for its endpoint", xcb: "Your machine: all three providers on Mac ARM64; Claude on Linux after sandbox setup, or through WSL2 on Windows" },
+      { aspect: "What you bring", tool: "An OpenRouter API key, or your own provider keys through BYOK", xcb: "Claude or Codex subscriptions you already pay for, signed in on your machine" },
+      { aspect: "Where it runs", tool: "OpenRouter’s hosted service; requests leave your machine for its endpoint", xcb: "Your machine: both providers on Mac ARM64; Claude on Linux after sandbox setup, or through WSL2 on Windows" },
       { aspect: "How you pay", tool: "Per token at the provider’s price, plus a 5.5% fee when you buy credits on the Standard plan", xcb: "xcb is free; usage draws on each subscription’s own limits" },
       { aspect: "Choosing the model", tool: "The model field on each request, or the `openrouter/auto` router", xcb: "xcb picks from models recently seen on accounts that can take the task now" },
       { aspect: "Choosing the provider", tool: "Provider order, price ceilings, and region limits on each request", xcb: "The provider of the chosen account; each turn runs on one account" },
       { aspect: "When a call fails", tool: "Fallback chains retry on another model or provider", xcb: "A route call runs once; a managed task can switch accounts after a reported usage limit" },
     ],
-    note: `OpenRouter’s pricing page lists 500+ models from 80+ providers. Requests on your own provider keys are free up to $25,000 of list-price inference a month, then carry a 5% fee. OpenRouter also serves image, video, and speech models, which this table leaves out. ${devinStatus}`,
+    note: `OpenRouter’s pricing page lists 500+ models from 80+ providers. Requests on your own provider keys are free up to $25,000 of list-price inference a month, then carry a 5% fee. OpenRouter also serves image, video, and speech models, which this table leaves out.`,
     sources: [
       { label: "OpenRouter home page", href: "https://openrouter.ai/", checkedOn },
       { label: "OpenRouter pricing", href: "https://openrouter.ai/pricing", checkedOn },

@@ -10,7 +10,7 @@
 # show a SmartScreen prompt the first time xcb.exe runs.
 #
 # On Windows xcb runs everything except the providers: running or signing in
-# to Claude Code, Codex, or Devin needs the Linux build inside WSL2.
+# to Claude Code or Codex needs the Linux build inside WSL2.
 #
 # Options (environment): XCB_VERSION, XCB_INSTALL_PREFIX (default
 # %LOCALAPPDATA%\Programs\xcb), XCB_ADD_PATH=yes (add the bin directory to
@@ -244,7 +244,7 @@
 
     Write-Host "Installed $destination ($candidateDigest)"
     Write-Host $reported
-    Write-Host 'Claude Code, Codex, and Devin run only in the Linux build of xcb; on Windows install it inside WSL2.'
+    Write-Host 'Claude Code and Codex run only in the Linux build of xcb; on Windows install xcb inside WSL2.'
     Write-Host "Guide: $guide"
     if ($guardToken) {
       if (-not (Test-Real $updateGuard) -or [System.IO.File]::ReadAllText($updateGuard).Trim() -cne $guardToken) { Fail 'update-in-progress record changed' }

@@ -7,15 +7,13 @@ import { homedir } from "node:os";
 
 import { claudeCodeVersionAdmitted } from "../claude-sdk.ts";
 import { CODEX_NATIVE_SHA256, CODEX_NATIVE_VERSION } from "../codex-process.ts";
-import { devinCliVersionMatches } from "./devin.ts";
 import { boundedText } from "../validation.ts";
 import { assertPrivateStat, canonicalizePrivatePath, matchesPrivateStat, openPrivateRead, PRIVATE_CONTROL_REJECT } from "../private-file.ts";
 
 export const CLI_CODEX_ENV = "XCB_CODEX";
 export const CLI_CLAUDE_ENV = "XCB_CLAUDE";
-export const CLI_DEVIN_ENV = "XCB_DEVIN";
 
-export type CliProviderName = "codex" | "claude" | "devin";
+export type CliProviderName = "codex" | "claude";
 export type CliBinaryInspection = Readonly<{
   provider: CliProviderName;
   executablePath: string;
@@ -64,7 +62,7 @@ function pathEntries(env: (name: string) => string | undefined): string[] {
 }
 
 /** Closed discovery order: explicit env pin, PATH, then known install locations. */
-const PROVIDER_ENV: Record<CliProviderName, string> = { claude: CLI_CLAUDE_ENV, codex: CLI_CODEX_ENV, devin: CLI_DEVIN_ENV };
+const PROVIDER_ENV: Record<CliProviderName, string> = { claude: CLI_CLAUDE_ENV, codex: CLI_CODEX_ENV };
 
 export function cliBinaryCandidates(provider: CliProviderName, env: (name: string) => string | undefined = (name) => process.env[name]): readonly string[] {
   const pinned = env(PROVIDER_ENV[provider]);
@@ -72,9 +70,7 @@ export function cliBinaryCandidates(provider: CliProviderName, env: (name: strin
   const home = homedir();
   const known = provider === "claude"
     ? [join(home, ".local", "bin", "claude"), join(home, ".claude", "local", "claude")]
-    : provider === "codex"
-      ? [join(home, ".codex", "bin", "codex"), join(home, ".local", "bin", "codex")]
-      : [join(home, ".local", "bin", "devin"), join(home, ".devin", "bin", "devin")];
+    : [join(home, ".codex", "bin", "codex"), join(home, ".local", "bin", "codex")];
   const found = [
     ...(pinned !== undefined ? [pinned] : []),
     ...pathEntries(env).map((entry) => join(entry, command)),
@@ -140,9 +136,7 @@ export async function inspectCliBinary(provider: CliProviderName, env: (name: st
     }
     const version = reportedVersion(inspected.executablePath);
     if (version === null) continue;
-    const versionMatches = provider === "codex" ? version === CODEX_NATIVE_VERSION
-      : provider === "claude" ? claudeCodeVersionAdmitted(version)
-        : devinCliVersionMatches(version);
+    const versionMatches = provider === "codex" ? version === CODEX_NATIVE_VERSION : claudeCodeVersionAdmitted(version);
     const pinnedSha256 = provider === "codex" ? CODEX_NATIVE_SHA256 : null;
     return Object.freeze({
       provider, executablePath: inspected.executablePath, version, sha256: inspected.sha256,

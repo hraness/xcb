@@ -20,13 +20,13 @@
       ]
     },
     "category": "Agent subscription router",
-    "tagline": "Use your Claude, Codex, and Devin plans from one agent.",
-    "short": "Routes coding tasks across the Claude, Codex, and Devin plans you have",
-    "meta": "Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for, picking an account that is signed in and idle.",
-    "medium": "Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for. Each task runs on an account that is signed in, idle, and not at a known usage limit, on a model that fits the work.",
-    "long": "Excalibur (xcb) is a terminal and router for developers who pay for more than one coding agent. Type the work into one conversation, and xcb sends each task to a Claude, Codex, or Devin account that is signed in, idle, and not at a known usage limit, on a model that fits the job. Tasks keep running after you close the terminal, every session appears on one screen, and each account runs one task at a time. Other agents can hand xcb work with one JSON command. xcb is free and MIT licensed, with releases for macOS and Linux.",
+    "tagline": "Use your Claude and Codex plans from one agent.",
+    "short": "Routes coding tasks across the Claude and Codex plans you have",
+    "meta": "Excalibur (xcb) routes coding tasks across the Claude and Codex subscriptions you already pay for, picking an account that is signed in and idle.",
+    "medium": "Excalibur (xcb) routes coding tasks across the Claude and Codex subscriptions you already pay for. Each task runs on an account that is signed in, idle, and not at a known usage limit, on a model that fits the work.",
+    "long": "Excalibur (xcb) is a terminal and router for developers who pay for more than one coding agent. Type the work into one conversation, and xcb sends each task to a Claude or Codex account that is signed in, idle, and not at a known usage limit, on a model that fits the job. Tasks keep running after you close the terminal, every session appears on one screen, and each account runs one task at a time. Other agents can hand xcb work with one JSON command. xcb is free and MIT licensed, with releases for macOS and Linux.",
     "hero": {
-      "heading": "Use your Claude, Codex, and Devin plans from one agent.",
+      "heading": "Use your Claude and Codex plans from one agent.",
       "summary": "Use the AI plans you already pay for. xcb routes each task to an available account, from your terminal or app.",
       "primaryAction": "Install xcb",
       "secondaryAction": "See how it works"
@@ -71,7 +71,7 @@
     {
       "id": "xcb",
       "name": "Excalibur (xcb)",
-      "description": "routes coding tasks across the claude, codex, and devin plans you have",
+      "description": "routes coding tasks across the claude and codex plans you have",
       "canonicalUrl": "https://xcb.sh",
       "surface": {
         "actionLabel": "explore Excalibur (xcb)",
@@ -91,8 +91,8 @@
             "HRA"
           ]
         },
-        "short": "Routes coding tasks across the Claude, Codex, and Devin plans you have",
-        "tagline": "Use your Claude, Codex, and Devin plans from one agent."
+        "short": "Routes coding tasks across the Claude and Codex plans you have",
+        "tagline": "Use your Claude and Codex plans from one agent."
       }
     },
     {

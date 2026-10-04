@@ -39,7 +39,7 @@ field except `version`, `workspace`, and `task` is optional.
 - `workspace` must be an existing folder. The provider's file tools stay inside
   it.
 - `task` is 1 byte to 256 KiB of text without NUL.
-- `provider` is `claude`, `codex`, or `devin`, and requires that provider.
+- `provider` is `claude` or `codex`, and requires that provider.
 - `account` names one account by ID or exact name. A `provider` that doesn't
   match the account's provider is an `invalid_request`.
 - `model` is a full key as printed by `xcb models`, and limits the route to

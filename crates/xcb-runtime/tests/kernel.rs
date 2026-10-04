@@ -273,7 +273,7 @@ fn a_usage_limit_without_a_fallback_is_explained_not_silent() {
         failure: Failure::AccountQuota,
         tried: &BTreeSet::new(),
         limited_accounts: &BTreeSet::new(),
-        admitted: &Provider::ALL.into_iter().collect(),
+        admitted: &Provider::SUPPORTED.into_iter().collect(),
         credentialed: &credentialed,
         required_provider: None,
         run_limit: 1,

@@ -39,7 +39,6 @@ function Table({ label, head, rows }: { label: string; head: readonly string[]; 
 }
 
 const releaseVersion = publishedRelease?.version ?? null;
-const devinBuilds = supportedBuilds.devin.join(", ");
 
 function GettingStarted() {
   return (
@@ -91,7 +90,7 @@ export PATH="$HOME/.local/bin:$PATH"`}</Code>
       <h2 id="next">Next steps</h2>
       <ul>
         <li><a href="/docs/projects-and-tasks">Projects and tasks</a>: work across several projects from one thread.</li>
-        <li><a href="/docs/providers">Accounts and models</a>: connect Codex and Devin, and choose a model yourself.</li>
+        <li><a href="/docs/providers">Accounts and models</a>: connect Codex, and choose a model yourself.</li>
         <li><a href="/docs/workspace">Tests and builds</a>: let tasks run your project’s checks.</li>
         <li><a href="/docs/route">Route tasks</a>: send work from another agent or a script.</li>
       </ul>
@@ -113,7 +112,7 @@ function HowRoutingWorks() {
         <li>It is not at a known usage limit. When Claude reports 100% use of its five-hour or seven-day window, xcb skips that account until the reset the provider reported. Unknown usage stays unknown and does not block the account.</li>
         <li>The model was seen recently in the provider’s model list.</li>
       </ul>
-      <p>Your constraints narrow the list first. A prompt that starts with <code>Use Claude</code>, <code>Use Codex</code>, or <code>Use Devin</code> requires that provider, and <code>xcb run --account</code> or a pinned <code>provider</code>, <code>account</code>, or <code>model</code> in a route request does the same. xcb never falls back outside a constraint.</p>
+      <p>Your constraints narrow the list first. A prompt that starts with <code>Use Claude</code> or <code>Use Codex</code> requires that provider, and <code>xcb run --account</code> or a pinned <code>provider</code>, <code>account</code>, or <code>model</code> in a route request does the same. xcb never falls back outside a constraint.</p>
       <h2 id="rank">2. Rank the models</h2>
       <p>xcb gives each model relative quality, cost, and latency scores and sorts the models into tiers: a model is in the first tier when no other model is at least as good on every measure and better on one. It then scores the tiers for routine, balanced, or complex work.</p>
       <p>The kind of task comes from the <a href="/docs/reflexes">route reflex</a>, a small classifier that learns from the model tiers you ask for. If you turn on the <a href="/docs/security#judge">optional judge</a>, its answers feed the same classifier. A prompt of at least 400 words or 8 KiB always gets the highest-quality model available, whatever its price. Quota timing, your <code>favorites</code> in <a href="/docs/reference#configuration">config.json</a>, and the provider you usually pick for that project adjust the score.</p>
@@ -159,7 +158,6 @@ function Security() {
       <h2 id="network">Other network requests</h2>
       <ul>
         <li><strong>Supported builds:</strong> about once an hour, xcb reads the list of reviewed provider builds from this repository’s <code>qualified-builds.json</code> on GitHub.</li>
-        <li><strong>Offers:</strong> the background supervisor reads the public Devin pricing page when it starts and every six hours.</li>
         <li><strong>Updates:</strong> <code>xcb update check</code>, <code>xcb upgrade</code>, and the optional daily check read release data from GitHub.</li>
         <li><strong>Remote devices:</strong> hosted remote commands are removed from the current source build. Valhalla transport is planned and does not synchronize tasks yet.</li>
       </ul>
@@ -229,17 +227,16 @@ function Providers() {
         <tbody>
           <tr><th scope="row">Claude</th><td>Claude Code {supportedBuilds.claudeMinimum} or later within version 2, on macOS or Linux</td><td>{providerStatus.claude} On Linux, Claude needs <a href="#claude-on-linux">xcb’s sandbox checks</a> first.</td></tr>
           <tr><th scope="row">Codex</th><td>Codex CLI {supportedBuilds.codex.join(", ")} on macOS ARM64</td><td>{providerStatus.codex}</td></tr>
-          <tr><th scope="row">Devin</th><td>Devin CLI {devinBuilds} on macOS ARM64</td><td>{providerStatus.devin}</td></tr>
         </tbody>
       </table></div>
-      <p>For Codex and Devin, xcb checks the executable’s SHA-256 as well as its version. When a provider updates itself to a build xcb hasn’t reviewed, <code>xcb doctor</code> says it is waiting for review and xcb keeps using the build it already checked. Reviewed builds are published in the repository’s <Ext href={`${repository}/blob/main/qualified-builds.json`}>qualified-builds.json</Ext>, and xcb picks them up within an hour without an upgrade.</p>
+      <p>For Codex, xcb checks the executable’s SHA-256 as well as its version. When a provider updates itself to a build xcb hasn’t reviewed, <code>xcb doctor</code> says it is waiting for review and xcb keeps using the build it already checked. Reviewed builds are published in the repository’s <Ext href={`${repository}/blob/main/qualified-builds.json`}>qualified-builds.json</Ext>, and xcb picks them up within an hour without an upgrade.</p>
       <p>During interactive Codex sign-in, xcb shows the device code and copies it to your clipboard on macOS when available. Press Enter to open the sign-in page, then paste the code. If clipboard access or opening the browser fails, use the displayed code and link. Claude Code opens its own browser sign-in flow.</p>
       <h2 id="more-than-one-account">Use more than one account per provider</h2>
       <p>When you run <code>xcb setup</code> in a terminal, choose an existing account or add another. To connect another Claude or Codex account directly, run:</p>
       <Code>{`xcb accounts add claude
 xcb accounts`}</Code>
       <p>In a terminal, <code>xcb accounts add claude</code> and <code>xcb accounts add codex</code> start sign-in and load the new account’s models. Choose the new account in your browser. Use <code>xcb setup codex --new</code> to skip the account chooser. With <code>--json</code> or piped input/output, <code>accounts add</code> only creates the account; sign in with <code>xcb accounts login &lt;account-id&gt;</code> afterward.</p>
-      <p>For Codex, <code>xcb accounts import-codex</code> without <code>--account</code> also creates a new account from another ChatGPT sign-in, and each <code>xcb accounts import-devin</code> adds one Devin account. <code>xcb accounts</code> lists every account with its known usage and when it resets, and the thread and <code>xcb run</code> pick among them for each task. When every account is at a known limit, xcb reports the limit and a task from your thread waits for the reset; xcb never falls back to an API key. Each provider’s terms decide whether you may use more than one personal account, so check them before you add a second.</p>
+      <p>For Codex, <code>xcb accounts import-codex</code> without <code>--account</code> also creates a new account from another ChatGPT sign-in, <code>xcb accounts</code> lists every account with its known usage and when it resets, and the thread and <code>xcb run</code> pick among them for each task. When every account is at a known limit, xcb reports the limit and a task from your thread waits for the reset; xcb never falls back to an API key. Each provider’s terms decide whether you may use more than one personal account, so check them before you add a second.</p>
       <h2 id="claude" className="xcb-provider-heading"><ProviderMark mark="claudecode" label="Claude Code" size={24} />Claude</h2>
       <Code>{`xcb setup claude`}</Code>
       <p>Setup runs these steps, which you can also run one at a time:</p>
@@ -273,14 +270,6 @@ xcb accounts refresh <account-id>`}</Code>
       <Code>{`xcb accounts import-codex --account <account-id> --source /absolute/path/to/auth.json
 xcb accounts refresh <account-id>`}</Code>
       <p>Import leaves the source file in place and copies no Codex settings, plugins, or sessions. Updating an existing account preserves its enabled state and usage limits. API-key sign-ins aren’t accepted. Run <code>xcb models</code> to see the models available to your accounts.</p>
-      <h2 id="devin" className="xcb-provider-heading"><ProviderMark mark="devin" label="Devin" size={24} />Devin</h2>
-      <p>Sign in with the Devin CLI, then copy that sign-in into xcb:</p>
-      <Code>{`devin auth login
-xcb doctor --provider devin
-xcb accounts import-devin --source /absolute/path/to/credentials.toml
-xcb accounts refresh <account-id>
-xcb models`}</Code>
-      <p>Import leaves the Devin CLI’s credentials and sessions in place. To connect with a token instead, pipe it into <code>xcb accounts token &lt;account-id&gt;</code>. To refresh only the model list, run <code>xcb models refresh devin --account &lt;account-id&gt;</code>. xcb checks the chosen model against the account’s current model list before each Devin turn.</p>
       <h2 id="choose">Choose an account or model</h2>
       <p>You don’t need to pick: the thread and <code>xcb run</code> choose automatically. To choose yourself:</p>
       <Code>{`xcb run --account <account> --model <full-model-key> -p "Explain this repository"
@@ -288,7 +277,7 @@ xcb accounts default <account>      # the default for new direct sessions
 xcb models default <full-model-key> # a preferred model; a stronger route can still win
 xcb accounts disable <account>      # keep it, but route nothing to it
 xcb accounts enable <account>`}</Code>
-      <p>Copy full model keys, such as <code>claude/sonnet/low</code>, from <code>xcb models</code>. A saved session keeps its account. In the thread, start a prompt with <code>Use Claude</code>, <code>Use Codex</code>, or <code>Use Devin</code> to require that provider.</p>
+      <p>Copy full model keys, such as <code>claude/sonnet/low</code>, from <code>xcb models</code>. A saved session keeps its account. In the thread, start a prompt with <code>Use Claude</code> or <code>Use Codex</code> to require that provider.</p>
       <h2 id="usage-limits">Usage limits</h2>
       <p><code>xcb accounts</code> shows each account’s known usage and when it resets. Fresh Claude and Codex account-wide meters can keep an account out of rotation until its reported reset. An explicit account-limit error without a reset starts a cooldown; it does not invent a usage percentage or reset time. Other errors do not imply a quota limit. A reset or expired cooldown allows another attempt, but does not promise the provider will accept it. Usage xcb hasn’t measured stays unknown. <code>xcb --json accounts</code> adds <code>quotaBlockedUntilMs</code>. The <Ext href={`${repositoryDocs}/quota-routing.md`}>quota routing reference</Ext> has the details.</p>
     </>
@@ -463,7 +452,7 @@ rm ~/.local/bin/xcb`}</Code>
         ["Write locks", <code key="w">~/.local/share/xcb-coordination</code>, <>Or the folder in <code>XCB_COORDINATION_ROOT</code>. Remove it only when no xcb process is running.</>],
         ["PATH line", <><code>~/.zprofile</code>, <code>~/.bash_profile</code>, or <code>~/.profile</code></>, <>Only if you installed with <code>XCB_ADD_PATH=yes</code>.</>],
       ]} />
-      <p>The TypeScript compatibility CLI, <code>xcb-compat</code>, keeps its own state in <code>~/.xcb</code>. Removing xcb doesn’t sign you out of Claude Code, Codex, or Devin themselves.</p>
+      <p>The TypeScript compatibility CLI, <code>xcb-compat</code>, keeps its own state in <code>~/.xcb</code>. Removing xcb doesn’t sign you out of Claude Code or Codex themselves.</p>
     </>
   );
 }
@@ -482,7 +471,6 @@ function Troubleshooting() {
       <h2 id="sign-in-again">An account needs signing in again</h2>
       <p>After a sign-in fails, xcb stops routing to that account, including after a restart, and <code>xcb accounts</code> marks it. Sign in again:</p>
       <Code>{`xcb accounts login <account>`}</Code>
-      <p>For Devin, run <code>devin auth login</code> and import the credentials again. Refreshing the model list or re-importing the same credentials doesn’t clear the mark.</p>
       <h2 id="no-route">No account can take a task</h2>
       <p>A task waits, or a route request fails with <code>unavailable</code>, when no account passes the <a href="/docs/how-routing-works#filter">routing checks</a>. Check <code>xcb accounts</code> for usage limits, disabled accounts, and accounts that need signing in; <code>xcb models</code> for models; and <code>xcb models route --task &quot;…&quot;</code> for the route xcb would pick.</p>
       <h2 id="empty-result">A task finished with no reply and no changes</h2>
@@ -529,7 +517,7 @@ EOF`}</Code>
       <ul>
         <li><code>version</code> is <code>1</code>. Pin it; a new request format ships under a new version.</li>
         <li><code>workspace</code> is an existing folder. The provider’s file tools stay inside it.</li>
-        <li><code>provider</code> (<code>claude</code>, <code>codex</code>, or <code>devin</code>), <code>account</code> (an ID or exact name), and <code>model</code> (a full key from <code>xcb models</code>) are optional limits on the choice, not fallbacks. A <code>provider</code> that doesn’t match the pinned account is rejected.</li>
+        <li><code>provider</code> (<code>claude</code> or <code>codex</code>), <code>account</code> (an ID or exact name), and <code>model</code> (a full key from <code>xcb models</code>) are optional limits on the choice, not fallbacks. A <code>provider</code> that doesn’t match the pinned account is rejected.</li>
         <li><code>timeoutMs</code> is 1,000 to 3,600,000. When it expires, xcb cancels the turn and answers after the provider has stopped.</li>
         <li><code>dryRun: true</code> reports the route without holding an account or starting a provider.</li>
       </ul>
@@ -597,7 +585,7 @@ bun add @hraness/xcb`}</Code>
         <li><strong>Request:</strong> the account, model, prompt, and limits. <code>maxRunMs</code> plus <code>maxCleanupMs</code> is the whole deadline, at most one hour; pass <code>signal</code> to cancel sooner.</li>
       </ul>
       <h2 id="adapters">Use a real provider</h2>
-      <p>Replace the stand-in with an adapter that launches a provider: <code>createClaudeTaskAdapter</code> (Claude Code), <code>createClaudeApiAdapter</code> (the Claude API), <code>createCodexTaskAdapter</code> or <code>createCodexManagedTaskAdapter</code> (Codex). The Devin adapter is present but not enabled for tasks. A real adapter runs only with a qualification record from your host: evidence that its exact provider build runs with the expected tools, configuration, and file access. The SDK checks that record on every task; it doesn’t create it for you, and it doesn’t discover credentials. The <Ext href={`${repositoryDocs}/compatibility.md#embedding-the-subscription-router`}>compatibility reference</Ext> documents each adapter’s options.</p>
+      <p>Replace the stand-in with an adapter that launches a provider: <code>createClaudeTaskAdapter</code> (Claude Code), <code>createClaudeApiAdapter</code> (the Claude API), <code>createCodexTaskAdapter</code> or <code>createCodexManagedTaskAdapter</code> (Codex). A real adapter runs only with a qualification record from your host: evidence that its exact provider build runs with the expected tools, configuration, and file access. The SDK checks that record on every task; it doesn’t create it for you, and it doesn’t discover credentials. The <Ext href={`${repositoryDocs}/compatibility.md#embedding-the-subscription-router`}>compatibility reference</Ext> documents each adapter’s options.</p>
       <h2 id="errors">Errors</h2>
       <p>The router throws an <code>Error</code> whose message is a code:</p>
       <ul>
@@ -649,7 +637,7 @@ const commandGroups: readonly Readonly<{ id: string; title: string; commands: re
     ["doctor", "Check provider builds and unfinished runs; --provider, --executable"],
   ] },
   { id: "commands-accounts", title: "Accounts and models", commands: [
-    ["accounts", "List accounts; add, login, token, refresh, default, disable, enable, remove, import-codex, import-devin"],
+    ["accounts", "List accounts; add, login, token, refresh, default, disable, enable, remove, import-codex"],
     ["models", "List models; refresh, default, tiers, route"],
     ["routing", "Show which models each kind of task prefers; never add, never remove"],
     ["offers", "Show public plan offers (not checked against your account)"],

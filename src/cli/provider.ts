@@ -11,7 +11,6 @@ import { inspectCliBinary, type CliBinaryInspection, type CliProviderName } from
 import { providerAuthDirs, readClaudeOAuthToken } from "./auth.ts";
 import { CLI_CODEX_BUN_DARWIN_ARM64_SHA256, CLI_CODEX_SCHEMA_SHA256, cliCodexRuntimeIdentity,
   cliCodexHostDiagnostic, createCliCodexManagedLauncher, qualifyCliCodexRuntime } from "./codex.ts";
-import { CLI_DEVIN_MIN_VERSION, CLI_DEVIN_QUALIFICATION_REQUIRED } from "./devin.ts";
 import { claudeCliProcessFactory, prepareCliLinuxSandbox,
   type CliLinuxSandbox } from "./sandbox.ts";
 import { buildQualificationRecord, readCliQualification, toTaskQualification, writeCliQualification, type CliQualificationRecord } from "./qualification.ts";
@@ -19,10 +18,8 @@ import { privateDirectory } from "./state.ts";
 
 export const CLI_CLAUDE_ROUTE = "claude-subscription";
 export const CLI_CODEX_ROUTE = "codex-subscription";
-export const CLI_DEVIN_ROUTE = "devin-subscription";
 export const CLI_CLAUDE_DEFAULT_MODEL = "claude-sonnet-4-5";
 export const CLI_CODEX_DEFAULT_MODEL = "gpt-5.1-codex-mini";
-export const CLI_DEVIN_DEFAULT_MODEL = "adaptive";
 
 export type CliProviderState =
   | Readonly<{ status: "ready"; adapter: AgentTaskAdapter; inspection: CliBinaryInspection; record: CliQualificationRecord; close?: () => Promise<unknown> }>
@@ -47,15 +44,10 @@ export async function admitCliProvider(stateRoot: string, provider: CliProviderN
     return Object.freeze({ inspection, record: null, detail: `${provider} binary not found` });
   }
   if (!inspection.versionMatches) {
-    const required = provider === "codex" ? CODEX_NATIVE_VERSION
-      : provider === "devin" ? CLI_DEVIN_MIN_VERSION : CLAUDE_CODE_MIN_VERSION;
+    const required = provider === "codex" ? CODEX_NATIVE_VERSION : CLAUDE_CODE_MIN_VERSION;
     const comparator = provider === "codex" ? `pinned ${required}` : `>= ${required}`;
-    const hint = provider === "claude" ? ` — install with \`bun add -g @anthropic-ai/claude-code@2\``
-      : provider === "devin" ? ` — upgrade the devin CLI to ${required} or newer` : "";
+    const hint = provider === "claude" ? ` — install with \`bun add -g @anthropic-ai/claude-code@2\`` : "";
     return Object.freeze({ inspection, record: null, detail: `${provider} ${inspection.version} found; ${comparator} required${hint}` });
-  }
-  if (provider === "devin") {
-    return Object.freeze({ inspection, record: null, detail: CLI_DEVIN_QUALIFICATION_REQUIRED });
   }
   if (provider === "codex") {
     let evidence;
@@ -88,14 +80,12 @@ export async function admitCliProvider(stateRoot: string, provider: CliProviderN
 
 /** Open the task adapter for one provider if a matching live admission record
  * exists. Anything stale, drifted or absent leaves the adapter out — the TUI
- * explains the next step instead of running unqualified. Devin remains
- * unavailable until its effective tools and confinement can be qualified. */
+ * explains the next step instead of running unqualified. */
 export async function openCliProvider(stateRoot: string, provider: CliProviderName, profile: CapabilityProfile, events?: ClaudeTaskEvents,
   _context?: Readonly<{ workspaceRoot?: string }>): Promise<CliProviderState> {
   const inspection = await inspectCliBinary(provider);
   if (inspection === null) return Object.freeze({ status: "binary-missing", inspection });
   if (!inspection.versionMatches) return Object.freeze({ status: "version-mismatch", inspection });
-  if (provider === "devin") return Object.freeze({ status: "unadmitted", inspection, detail: CLI_DEVIN_QUALIFICATION_REQUIRED });
   if (provider === "codex") {
     const detail = cliCodexHostDiagnostic();
     if (detail !== null) return Object.freeze({ status: "sandbox-unavailable", inspection, detail });

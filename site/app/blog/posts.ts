@@ -20,7 +20,7 @@ import { launchPostSlug } from "../launch/beats";
 export const blogPath = "/blog";
 export const blogFeedPath = "/blog/feed.xml";
 export const blogTitle = "Excalibur (xcb) blog";
-export const blogDescription = "How xcb routes coding tasks across your Claude, Codex, and Devin subscriptions, and how it uses other Hraness tools to do it.";
+export const blogDescription = "How xcb routes coding tasks across your Claude and Codex subscriptions, and how it uses other Hraness tools to do it.";
 
 export const blogAuthor: ArticleAuthor = { kind: "organization", name: "Hraness" };
 
@@ -97,11 +97,11 @@ export const blogPosts: readonly BlogPost[] = [
   post({
     slug: launchPostSlug,
     title: "Introducing Excalibur: one agent for all your AI coding plans",
-    dek: "Run tasks across your Claude, Codex, and Devin plans, use available quota, and keep work moving between accounts.",
+    dek: "Run tasks across your Claude and Codex plans, use available quota, and keep work moving between accounts.",
     eyebrow: "Launch",
     updated: "2026-10-01",
     published: "2026-09-29",
-    keywords: ["xcb", "Excalibur", "Claude Code", "Codex", "Devin", "multiple AI subscriptions", "usage limits", "coding agents"],
+    keywords: ["xcb", "Excalibur", "Claude Code", "Codex", "multiple AI subscriptions", "usage limits", "coding agents"],
     relation: "all",
     statusInBody: false,
     format: "beats",
@@ -143,11 +143,11 @@ export const blogPosts: readonly BlogPost[] = [
   post({
     slug: "introducing-excalibur",
     title: "Introducing Excalibur",
-    dek: "xcb, short for Excalibur, sends each coding task to one of your Claude, Codex, or Devin accounts that is signed in, idle, and not at a known usage limit.",
+    dek: "xcb, short for Excalibur, sends each coding task to one of your Claude or Codex accounts that is signed in, idle, and not at a known usage limit.",
     eyebrow: "Release",
     updated: "2026-10-01",
     published: "2026-09-27",
-    keywords: ["xcb", "Excalibur", "coding agents", "routing", "Claude Code", "Codex", "Devin"],
+    keywords: ["xcb", "Excalibur", "coding agents", "routing", "Claude Code", "Codex"],
     relation: "all",
     statusInBody: true,
     sources: [
@@ -157,7 +157,7 @@ export const blogPosts: readonly BlogPost[] = [
     ],
     admission: {
       lifecycle: "indexable",
-      readerJob: "Decide whether xcb is worth installing today when you pay for more than one of Claude, Codex, and Devin or build agent tooling, and know the first commands to run.",
+      readerJob: "Decide whether xcb is worth installing today when you pay for more than one of Claude and Codex or build agent tooling, and know the first commands to run.",
       nonObviousAnswer: "xcb runs provider tools under your sign-in, holds an account until the provider process exits, and sandboxes the run. The route command picks the account and model; an SDK host names both. Registered host tools run separately with their own permissions.",
       originalContribution: "One account of how xcb runs a task, the thread and the route and SDK uses, its account, sandbox, host-tool, and usage limits, revised against current xcb source and linked to detailed guides.",
       hostFit: "The product’s introduction on its own host; the retired Introducing xcb URL redirects here.",
@@ -176,8 +176,8 @@ export const blogPosts: readonly BlogPost[] = [
       harmIfWrong: "A reader could install xcb expecting Linux coding sessions or the newest Codex build to work today, run several accounts believing xcb raises usage limits, or enable a hook believing it runs inside xcb's sandbox.",
       refreshTriggers: [
         "xcb release tag bump (site/published-release.json)",
-        "A change to which providers have a confirmed coding session, or to the supported Devin builds: update the Limits paragraph",
-        "A change to the supported Codex or Devin builds (qualified-builds.json) or the Claude Code version floor, or a coding session confirmed for Claude on Linux or on the current Codex build",
+        "A change to which providers have a confirmed coding session, or to the supported Codex builds: update the Limits paragraph",
+        "A change to the supported Codex builds (qualified-builds.json) or the Claude Code version floor, or a coding session confirmed for Claude on Linux or on the current Codex build",
         "The one-line installer at /install.sh shipping, changing its platforms, or being withdrawn, or a change to xcb setup",
         "A change to the route request or response, its failure codes, or the 256 KiB text cap, or to how the SDK's createSubscriptionRouter chooses accounts",
         "The /compare, /compare/herdr, or /compare/pi pages moving or changing their verdicts, or Herdr or Pi changing what their own sites say they do",
@@ -212,18 +212,18 @@ export const blogPosts: readonly BlogPost[] = [
       ],
       observations: [
         "On this path xcb calls gobstopper-core's elide strategy in memory and keeps originals in its own session history; it uses neither the Gobstopper program nor Gobstopper's archive.",
-        "Devin sessions are sent without elision because context.rs maps the Devin provider to no Gobstopper provider.",
+        "All supported provider sessions use this elision policy.",
       ],
       scores: { readerUtility: 2, originalEvidence: 1, factualConfidence: 2, hostFit: 2, voiceIntegrity: 2, maintenanceValue: 2 },
       review: revisionReview,
       reassessOn: "2026-11-12",
-      harmIfWrong: "A reader could expect elided output to be gone for good, or expect Devin sessions to be trimmed, and size their sessions on a wrong assumption.",
+      harmIfWrong: "A reader could expect elided output to be gone for good, or expect provider sessions to be trimmed, and size their sessions on a wrong assumption.",
       refreshTriggers: [
         "Change to the relation detail runtime:gobstopper:xcb:compacts-sessions-for",
         "gobstopper-core rev bump in crates/xcb-runtime/Cargo.toml",
         "Change to ContextPolicy defaults or validation in config.rs, or to selection rules, marker text or judge rules in context.rs",
         "Change to the elision notice or judge fallback in runner.rs",
-        "Devin sessions gaining compaction",
+        "Provider sessions changing their compaction policy",
         "xcb release tag bump",
         "Rename of xcb or Gobstopper",
       ],

@@ -14,25 +14,5 @@
       "platform": "darwin-aarch64",
       "qualifiedBy": "qualification/codex-0.159.3-inventory.json"
     }
-  ],
-  "devin": [
-    {
-      "version": "3000.11.3",
-      "sha256": "7ef3859e68d4eabc0115e51898fcd4eab1edde753c27a472349ef551180b38ff",
-      "platform": "darwin-aarch64",
-      "qualifiedBy": "release"
-    },
-    {
-      "version": "3000.11.1",
-      "sha256": "1327c9ff28ec0799e29baa1fe0eeceba2a7c8965123d49058845b6746fea7940",
-      "platform": "darwin-aarch64",
-      "qualifiedBy": "release"
-    },
-    {
-      "version": "3000.10.31",
-      "sha256": "4cd4d2e242ed78443fe26d6f55382fd888ece0ac4e80b205106f8f1bf2b0cfa4",
-      "platform": "darwin-aarch64",
-      "qualifiedBy": "release"
-    }
   ]
 }

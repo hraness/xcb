@@ -140,6 +140,23 @@ activation of xcb remain separate decisions under each repository's checks.
 A compatibility hold has an owner and expiry and stays visible as unfinished
 portfolio adoption work. This plan update changes no running schedule.
 
+## Optional research inference
+
+The owner reports XAI and Gemini credentials already available on the host.
+Future implementers may use these for budgeted ALGAL experiments, not as xcb
+subscription providers or as evidence of live qualification. The environment
+variable names are `XAI_API_KEY` and `GEMINI_API_KEY`; `AGENTS.md` records the
+OpenAI-compatible endpoints and executor commands using `--credential-env`.
+Use the owner's approved environment loader and an observed model identifier.
+Never search for, print, copy, or commit credential values.
+
+Check the experiment manifest, declare its model-call budget, retain failures,
+and compare held-out results before proposing adoption. An executor receipt
+records execution, not quality, billing, or provider acceptance. Experiments
+cannot alter provider custody, reinterpret historical identities, bypass
+`Required`, or promote their own evaluator. No live XAI or Gemini call is
+established by this cleanup or by its offline checks.
+
 ## Testing investment and hill-climbing
 
 The assurance portfolio in `docs/vision.md` is the baseline classification.

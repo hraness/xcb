@@ -1,6 +1,6 @@
 #!/bin/sh
-# Install Excalibur (xcb), which routes coding tasks across the Claude, Codex,
-# and Devin subscriptions you already pay for.
+# Install Excalibur (xcb), which routes coding tasks across the Claude and Codex
+# subscriptions you already pay for.
 #
 #   curl -fsSL https://xcb.sh/install.sh | sh
 #   curl -fsSL https://xcb.sh/install.sh | XCB_VERSION=<version> sh   # one exact version

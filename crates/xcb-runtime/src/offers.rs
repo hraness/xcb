@@ -248,6 +248,11 @@ fn fetch_devin_pricing() -> Result<Vec<u8>> {
 }
 
 pub fn refresh(root: &Path) -> Result<OfferState> {
+    if !Provider::SUPPORTED.contains(&Provider::Devin) {
+        return Err(Error::Unavailable(
+            "Devin support was removed; no supported provider has an offer feed",
+        ));
+    }
     let state = parse_devin_pricing(&fetch_devin_pricing()?, now_ms())?;
     save(root, &state)?;
     Ok(state)
@@ -255,7 +260,9 @@ pub fn refresh(root: &Path) -> Result<OfferState> {
 
 pub fn refresh_if_due(root: &Path, now: u64) -> Result<OfferState> {
     let state = load(root)?;
-    if state.checked_at_ms <= now && state.next_check_ms > now {
+    if !Provider::SUPPORTED.contains(&Provider::Devin)
+        || (state.checked_at_ms <= now && state.next_check_ms > now)
+    {
         return Ok(state);
     }
     let next = parse_devin_pricing(&fetch_devin_pricing()?, now)?;
@@ -278,6 +285,28 @@ mod tests {
             effort: None,
             observed_at_ms: 1,
         }
+    }
+
+    #[test]
+    fn retired_provider_refresh_preserves_saved_observations_without_fetching() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = crate::private::directory(
+            &xcb_core::canonical(directory.path()).unwrap().join("state"),
+        )
+        .unwrap();
+        let observed = parse_devin_pricing(SWE2_TERMS.as_bytes(), 1).unwrap();
+        save(&root, &observed).unwrap();
+        let original = private::read(&path(&root), 64 * 1024).unwrap();
+        let cached = refresh_if_due(&root, SWE2_PROMOTION_END_MS).unwrap();
+        assert_eq!(cached.checked_at_ms, observed.checked_at_ms);
+        assert_eq!(cached.offers.len(), 1);
+        assert!(
+            refresh(&root)
+                .unwrap_err()
+                .to_string()
+                .contains("support was removed")
+        );
+        assert_eq!(private::read(&path(&root), 64 * 1024).unwrap(), original);
     }
 
     #[test]

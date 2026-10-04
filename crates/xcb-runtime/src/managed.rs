@@ -3128,23 +3128,7 @@ impl ManagedStore {
         };
         let trimmed = text.trim();
         if attachments.is_empty() && offer_question(trimmed) {
-            let root = self.root.parent().ok_or(Error::PrivateState)?;
-            let state = crate::offers::load(root)?;
-            let now = now_ms();
-            let answer = if !state.fresh(now) {
-                "The official model-offer observation is stale or unavailable. XCB refreshes it when the managed supervisor starts; run `xcb offers --refresh` to check now.".into()
-            } else if let Some(offer) = state
-                .offers
-                .iter()
-                .find(|offer| offer.provider == Provider::Devin && now < offer.valid_until_ms)
-            {
-                format!(
-                    "Official Devin offer observed: **{}**. It describes `{}` models through {}. Account entitlement is unverified; this public promotion does not establish free execution or qualify a provider.",
-                    offer.terms, offer.model_prefix, offer.valid_until_ms
-                )
-            } else {
-                "XCB has a fresh official pricing observation but no currently active Devin SWE-2 free offer.".into()
-            };
+            let answer = "Devin support was removed from xcb; use Claude or Codex. Saved offer observations are historical and do not establish current support.".into();
             return self.record_pair(conversation, id, text, answer);
         }
         if attachments.is_empty() && message_question(trimmed) {
@@ -6298,7 +6282,7 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
             let catalog_root = root.clone();
             let _ =
                 tokio::task::spawn_blocking(move || crate::catalog::refresh(&catalog_root)).await;
-            for provider in xcb_core::Provider::ALL {
+            for provider in xcb_core::Provider::SUPPORTED {
                 let report = crate::process::refresh_provider(&root, provider, None, &home).await;
                 if let Some(detail) = report.detail {
                     record_supervisor_fault(&fault_root, &format!("{provider} refresh: {detail}"));

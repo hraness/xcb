@@ -10,7 +10,6 @@
   .hkm-root.xcb-mock {
     --xcb-claude: light-dark(#c15f3c, #e38a66);
     --xcb-codex: light-dark(#2d6a4f, #6fcf97);
-    --xcb-devin: light-dark(#3a5bd9, #8ea6ff);
   }
 
   .xcb-mock .xcb-mock-body {
@@ -83,7 +82,6 @@
 
   .xcb-mock .xcb-board-provider[data-provider="claude"] { background: var(--xcb-claude); }
   .xcb-mock .xcb-board-provider[data-provider="codex"] { background: var(--xcb-codex); }
-  .xcb-mock .xcb-board-provider[data-provider="devin"] { background: var(--xcb-devin); }
 
   .xcb-mock .xcb-board-chip {
     padding: 1px 7px;

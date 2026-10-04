@@ -234,7 +234,7 @@ mod tests {
 pub fn start_text() -> String {
     format!(
         "\
-Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin
+Excalibur (xcb) routes coding tasks across the Claude and Codex
 subscriptions you already pay for.
 
 Start here
@@ -260,7 +260,7 @@ xcb {}
 /// lines. Hidden internal commands are left out, and the rest that aren't
 /// here are in [`ADVANCED`]; a test keeps both lists in step with the parser.
 pub const ROOT_HELP: &str = "\
-Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin
+Excalibur (xcb) routes coding tasks across the Claude and Codex
 subscriptions you already pay for. Use `xcb run`, `xcb --json route`, or the
 SDK; the former interactive terminal surface has been removed.
 

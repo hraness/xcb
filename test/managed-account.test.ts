@@ -16,7 +16,7 @@ class Leases implements AccountLeaseStore {
   release(lease: AccountLease) { if (lease !== this.current) return false; this.releases++; this.current = undefined; return true; }
 }
 const sessionBinding = (overrides: Partial<BrowserSessionBinding> = {}): BrowserSessionBinding =>
-  Object.freeze({ provider: "devin", accountId: "account-one", owner: "owner-one", leaseGeneration: 7, processGeneration: 2, ...overrides });
+  Object.freeze({ provider: "claude", accountId: "account-one", owner: "owner-one", leaseGeneration: 7, processGeneration: 2, ...overrides });
 
 function fixture(options: { leases?: Leases; factoryFailure?: boolean; operationTimeoutMs?: number; closeTimeoutMs?: number; usageReader?: ManagedAccountUsageReader } = {}) {
   const leases = options.leases ?? new Leases(), calls: string[] = [], requests: ManagedAccountRequest[] = [];
@@ -48,7 +48,7 @@ function fixture(options: { leases?: Leases; factoryFailure?: boolean; operation
       return { state: "signed-out" };
     },
   };
-  const controller = createManagedAccountController({ provider: "devin", accountId: "account-one", owner: "owner-one", processGeneration: 3, leases, semantics,
+  const controller = createManagedAccountController({ provider: "claude", accountId: "account-one", owner: "owner-one", processGeneration: 3, leases, semantics,
     ...(options.usageReader === undefined ? {} : { usageReader: options.usageReader }),
     ...(options.operationTimeoutMs === undefined ? {} : { operationTimeoutMs: options.operationTimeoutMs }),
     ...(options.closeTimeoutMs === undefined ? {} : { closeTimeoutMs: options.closeTimeoutMs }),
@@ -67,7 +67,7 @@ function fixture(options: { leases?: Leases; factoryFailure?: boolean; operation
 describe("managed account controller", () => {
   test("snapshot and unused close never acquire a lease or launch a transport", async () => {
     const f = fixture();
-    expect(f.controller.snapshot()).toMatchObject({ provider: "devin", accountId: "account-one", state: "unchecked", accountGeneration: 1, processGeneration: 3, pendingLoginId: null });
+    expect(f.controller.snapshot()).toMatchObject({ provider: "claude", accountId: "account-one", state: "unchecked", accountGeneration: 1, processGeneration: 3, pendingLoginId: null });
     expect(Object.isFrozen(f.controller.snapshot())).toBe(true);
     expect(f.calls).toEqual([]);
     expect(await f.controller.close()).toEqual({ released: true, state: "closed" });
@@ -77,10 +77,10 @@ describe("managed account controller", () => {
   test("check acquires the lease, projects through provider semantics and fences generations", async () => {
     const f = fixture();
     const result = await f.controller.check();
-    expect(result).toMatchObject({ provider: "devin", state: "signed-in", planLabel: "synthetic-plan" });
+    expect(result).toMatchObject({ provider: "claude", state: "signed-in", planLabel: "synthetic-plan" });
     expect(JSON.stringify(result)).not.toContain("never-exposed");
     expect(f.calls).toEqual(["factory", "read"]);
-    expect(f.binding().provider).toBe("devin");
+    expect(f.binding().provider).toBe("claude");
     expect(f.leases.acquires).toBe(1);
     expect(await f.controller.close()).toEqual({ released: true, state: "closed" });
     expect(f.leases.releases).toBe(1);
