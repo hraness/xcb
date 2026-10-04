@@ -553,17 +553,13 @@ async fn run_reserved(
             )
             .await
         }
-        Provider::Devin => {
-            let (launch, protocol) =
-                match runner::prepare_devin(&store, &pin, &model, false, false, Some(&run)).await {
-                    Ok(value) => value,
-                    Err(error) => return Err(preparation_failed(&store, &run, &id, false, error)),
-                };
-            execute(
-                store, &request, deadline, &id, &run, &model, cancel, launch, protocol,
-            )
-            .await
-        }
+        Provider::Devin => Err(preparation_failed(
+            &store,
+            &run,
+            &id,
+            false,
+            Error::Unavailable("Devin support was removed; use Claude or Codex"),
+        )),
     }
 }
 
@@ -1633,7 +1629,7 @@ mod tests {
 
     #[tokio::test]
     async fn blocked_application_and_qualification_never_prepare_a_provider() {
-        for provider in Provider::ALL {
+        for provider in Provider::SUPPORTED {
             let temp = tempfile::tempdir().unwrap();
             let store = Arc::new(
                 Store::open(&xcb_core::canonical(temp.path()).unwrap().join("state")).unwrap(),
@@ -1979,7 +1975,7 @@ mod tests {
 
     #[test]
     fn qualification_generation_mismatch_releases_childless_custody_without_publication() {
-        for provider in Provider::ALL {
+        for provider in Provider::SUPPORTED {
             for present in [false, true] {
                 let temp = tempfile::tempdir().unwrap();
                 let store =

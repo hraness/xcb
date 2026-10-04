@@ -407,7 +407,7 @@ pub fn explicit_provider_intent(task: &str) -> Option<Provider> {
     let lower = task.trim_start().to_ascii_lowercase();
     let directive = lower.strip_prefix("please ").unwrap_or(&lower);
     let remainder = directive.strip_prefix("use ")?.trim_start();
-    Provider::ALL.into_iter().find(|provider| {
+    Provider::SUPPORTED.into_iter().find(|provider| {
         remainder
             .strip_prefix(provider.as_str())
             .is_some_and(|tail| {
@@ -528,8 +528,8 @@ fn selectable_model(model: &ModelChoice) -> bool {
     model.mode == Mode::Fixed
         && match model.provider {
             Provider::Codex => crate::codex::QUALIFIED_MODELS.contains(&model.id.as_str()),
-            Provider::Devin => model.effort.is_none(),
             Provider::Claude => true,
+            Provider::Devin => false,
         }
 }
 
@@ -556,7 +556,7 @@ fn eligible_profiles(
 }
 
 fn admitted_providers(store: &Store) -> BTreeSet<Provider> {
-    Provider::ALL
+    Provider::SUPPORTED
         .into_iter()
         .filter(|provider| {
             Pin::load(store.root(), *provider)
@@ -1377,7 +1377,7 @@ mod tests {
             .unwrap();
         let mut config = Config::default();
         config.extensions.judge.enabled = false;
-        let admitted = Provider::ALL.into_iter().collect();
+        let admitted = Provider::SUPPORTED.into_iter().collect();
         let routes = BTreeSet::new();
         let accounts = BTreeSet::new();
         for unavailable in [false, true] {
@@ -1478,7 +1478,7 @@ mod tests {
                 .unwrap();
             let routes = BTreeSet::new();
             let accounts = BTreeSet::new();
-            let admitted = Provider::ALL.into_iter().collect();
+            let admitted = Provider::SUPPORTED.into_iter().collect();
             let request = || RouteRequest {
                 requirements,
                 task: "read this dashboard",

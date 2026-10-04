@@ -74,11 +74,17 @@ impl FromStr for Id {
 pub enum Provider {
     Claude,
     Codex,
+    /// Retained only so older state files can still be read. New routes and
+    /// commands reject Devin; xcb currently focuses on Claude and Codex.
     Devin,
 }
 
 impl Provider {
+    /// All provider tags understood by the state-file decoder, including the
+    /// retired Devin tag for backwards-compatible reads.
     pub const ALL: [Self; 3] = [Self::Devin, Self::Claude, Self::Codex];
+    /// Providers that xcb can discover, authenticate, route, and run.
+    pub const SUPPORTED: [Self; 2] = [Self::Claude, Self::Codex];
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Claude => "claude",
@@ -95,7 +101,7 @@ impl fmt::Display for Provider {
 impl FromStr for Provider {
     type Err = Error;
     fn from_str(value: &str) -> Result<Self> {
-        Self::ALL
+        Self::SUPPORTED
             .into_iter()
             .find(|provider| provider.as_str() == value)
             .ok_or(Error::Invalid("provider"))

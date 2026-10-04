@@ -23,6 +23,9 @@ pub mod device_login;
 // Only the workspace tools, which Windows builds refuse, take this lock.
 #[cfg_attr(windows, allow(dead_code))]
 mod coordination;
+/// Legacy Devin protocol implementation retained only to decode and clean up
+/// pre-removal state. New commands and routes reject the provider.
+#[allow(dead_code)]
 pub mod devin;
 #[cfg(unix)]
 pub mod egress;
@@ -146,11 +149,11 @@ pub enum Error {
         next: Option<String>,
     },
 }
-/// Why this build refuses to start or sign in to a provider. Claude Code,
-/// Codex, and Devin run only inside xcb's macOS and Linux sandboxes; Windows
+/// Why this build refuses to start or sign in to a provider. Claude Code and
+/// Codex run only inside xcb's macOS and Linux sandboxes; Windows
 /// builds keep everything else (accounts, routing answers, the terminal
 /// workspace, relay links) and point provider work at WSL2.
-pub const PROVIDERS_UNSUPPORTED: &str = "xcb can't run or sign in to Claude Code, Codex, or Devin on Windows: their sandbox needs macOS or Linux. Install the Linux build of xcb inside WSL2 and run providers there.";
+pub const PROVIDERS_UNSUPPORTED: &str = "xcb can't run or sign in to Claude Code or Codex on Windows: their sandbox needs macOS or Linux. Install the Linux build of xcb inside WSL2 and run providers there.";
 
 impl Error {
     pub fn is_cleanup_unproven(&self) -> bool {

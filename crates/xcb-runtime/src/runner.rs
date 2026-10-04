@@ -967,6 +967,7 @@ pub(crate) fn prepare_codex(
 }
 
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
 pub(crate) async fn prepare_devin(
     store: &Store,
     pin: &Pin,
@@ -1084,6 +1085,7 @@ pub(crate) async fn prepare_devin(
     ))
 }
 
+#[allow(dead_code)]
 async fn probe_devin(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<Vec<ModelChoice>> {
     if account.is_none() {
         return Err(Error::Unavailable(
@@ -1224,11 +1226,7 @@ pub fn provider_admitted(root: &Path, pin: &Pin) -> bool {
                 && sandbox::available()
                 && crate::codex::runtime_admitted_with_catalog(root, pin).is_ok()
         }
-        Provider::Devin => {
-            cfg!(target_os = "macos")
-                && sandbox::available()
-                && crate::devin::runtime_admitted_with_catalog(root, pin).is_ok()
-        }
+        Provider::Devin => false,
     }
 }
 
@@ -2270,7 +2268,7 @@ pub async fn probe(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<Vec
         return probe_codex(store, pin, account).await;
     }
     if pin.provider == Provider::Devin {
-        return probe_devin(store, pin, account).await;
+        return Err(Error::Unavailable("Devin support was removed; use Claude or Codex"));
     }
     let now = now_ms();
     let model = ModelChoice {
@@ -2622,26 +2620,7 @@ pub async fn run(
         return run_prepared(store, input, cancel, observer, launch, protocol, workspace).await;
     }
     if session.model.provider == Provider::Devin {
-        let pin = Pin::load(store.root(), Provider::Devin)?;
-        crate::devin::runtime_admitted_with_catalog(store.root(), &pin)?;
-        let run = store.prepare_run(&session.id, session.revision, now_ms())?;
-        let (launch, protocol) = match prepare_devin(
-            &store,
-            &pin,
-            &session.model,
-            !input.pane_generation,
-            false,
-            Some(&run),
-        )
-        .await
-        {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                store.settle(&run, State::Failed, now_ms())?;
-                return Err(error);
-            }
-        };
-        return run_prepared(store, input, cancel, observer, launch, protocol, workspace).await;
+        return Err(Error::Unavailable("Devin support was removed; use Claude or Codex"));
     }
     if session.model.provider != Provider::Claude {
         return Err(Error::Unavailable(

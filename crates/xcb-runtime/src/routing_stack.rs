@@ -10,11 +10,9 @@
 //! matches the model's normalized identity: its id and, when the catalog
 //! resolved an alias, the resolved id, both lowercased with `.` as `-`, with
 //! and without the provider name prefix (`claude-`), so `opus*` matches
-//! `opus`, `opus[1m]` and the resolved `claude-opus-5-5`. Devin ids carry the
-//! effort as a suffix (`gpt-6-astra-medium`); that suffix is removed before
-//! matching and the pattern's effort segment is ignored for Devin. For other
-//! providers the effort segment must equal the model's effort exactly, and an
-//! absent effort segment matches every effort.
+//! `opus`, `opus[1m]` and the resolved `claude-opus-5-5`. The effort segment
+//! must equal the model's effort exactly, and an absent effort segment matches
+//! every effort.
 //!
 //! Future extension: a later change adds a per-route `delegate` flag. The
 //! string form stays; a route may then also be written as an object
@@ -98,7 +96,7 @@ impl RoutePattern {
         }
         if provider != "*" && provider.parse::<Provider>().is_err() {
             return Err(xcb_core::Error::Invalid(
-                "routing pattern provider; use claude, codex, devin or *",
+                "routing pattern provider; use claude, codex or *",
             )
             .into());
         }
@@ -127,11 +125,10 @@ impl RoutePattern {
 
     pub fn matches(&self, model: &ModelChoice) -> bool {
         glob_matches(&self.provider, model.provider.as_str())
-            && (model.provider == Provider::Devin
-                || self
-                    .effort
-                    .as_deref()
-                    .is_none_or(|effort| effort == effort_of(model)))
+            && self
+                .effort
+                .as_deref()
+                .is_none_or(|effort| effort == effort_of(model))
             && matching_identities(model)
                 .iter()
                 .any(|identity| glob_matches(&self.model, identity))
@@ -173,8 +170,7 @@ pub fn glob_matches(pattern: &str, text: &str) -> bool {
     pattern[p..].iter().all(|byte| *byte == b'*')
 }
 
-/// The effort a model runs at: its own effort, else a Devin-style id suffix,
-/// else `medium`.
+/// The effort a model runs at: its own effort, or `medium` when absent.
 pub(crate) fn effort_of(model: &ModelChoice) -> String {
     model
         .effort
@@ -205,15 +201,7 @@ fn normalize(raw: &str) -> String {
     raw.to_ascii_lowercase().replace('.', "-")
 }
 
-/// Removes a Devin id's effort suffix so the family name is left.
-fn family_name(model: &ModelChoice, identity: &str) -> String {
-    if model.provider == Provider::Devin
-        && let Some(level) = EFFORTS
-            .into_iter()
-            .find(|level| identity.ends_with(&format!("-{level}")))
-    {
-        return identity[..identity.len() - level.len() - 1].to_owned();
-    }
+fn family_name(_model: &ModelChoice, identity: &str) -> String {
     identity.to_owned()
 }
 
@@ -282,8 +270,8 @@ pub struct RoutingConfig {
 impl Default for RoutingConfig {
     fn default() -> Self {
         Self {
-            never: vec!["devin/swe-*".into()],
-            fallback_providers: vec![Provider::Devin],
+            never: Vec::new(),
+            fallback_providers: Vec::new(),
             tiers: TierPatterns::default(),
         }
     }
@@ -299,7 +287,7 @@ impl RoutingConfig {
                 RoutePattern::parse(pattern)?;
             }
         }
-        if self.fallback_providers.len() > Provider::ALL.len() {
+        if self.fallback_providers.len() > Provider::SUPPORTED.len() {
             return Err(xcb_core::Error::Limit("routing fallback providers").into());
         }
         Ok(())
@@ -422,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn patterns_match_normalized_identities_aliases_and_devin_suffixes() {
+    fn patterns_match_normalized_identities_and_aliases() {
         let sol = RoutePattern::parse("codex/gpt-*-sol/ultra").unwrap();
         assert!(sol.matches(&model(Provider::Codex, "gpt-5.6-sol", None, Some("ultra"))));
         assert!(sol.matches(&model(Provider::Codex, "gpt-6.1-sol", None, Some("ultra"))));
@@ -451,14 +439,6 @@ mod tests {
             None,
             Some("max")
         )));
-        // Devin: the effort is the id suffix and the pattern's effort is ignored.
-        let astra = RoutePattern::parse("devin/gpt-*-astra/ultra").unwrap();
-        assert!(astra.matches(&model(Provider::Devin, "gpt-6-astra-medium", None, None)));
-        assert!(!astra.matches(&model(Provider::Devin, "swe-2-high", None, None)));
-        let never = RoutePattern::parse("devin/swe-*").unwrap();
-        assert!(never.matches(&model(Provider::Devin, "swe-2-high", None, None)));
-        assert!(never.matches(&model(Provider::Devin, "swe-1-7-fast", None, None)));
-        assert!(!never.matches(&model(Provider::Codex, "swe-2", None, None)));
         assert!(
             RoutePattern::parse("*/gpt-*-astra/*")
                 .unwrap()
@@ -475,10 +455,6 @@ mod tests {
         assert_eq!(
             version(&model(Provider::Claude, "opus[1m]", None, Some("max"))),
             version(&model(Provider::Claude, "opus", None, Some("max")))
-        );
-        assert_eq!(
-            version(&model(Provider::Devin, "gpt-6-astra-medium", None, None)),
-            vec![6]
         );
     }
 
@@ -500,9 +476,10 @@ mod tests {
     fn default_config_validates_and_limits_hold() {
         let config = RoutingConfig::default();
         config.validate().unwrap();
-        assert!(config.excluded(&model(Provider::Devin, "swe-2-max", None, None)));
-        assert!(!config.excluded(&model(Provider::Devin, "gpt-6-astra-max", None, None)));
-        assert!(config.is_fallback(Provider::Devin));
+        assert!(config.never.is_empty());
+        assert!(config.fallback_providers.is_empty());
+        assert!(!config.excluded(&model(Provider::Codex, "gpt-6-astra-max", None, None)));
+        assert!(!config.is_fallback(Provider::Claude));
         assert!(!config.is_fallback(Provider::Codex));
         assert_eq!(
             config.position(
@@ -529,7 +506,7 @@ mod tests {
         long.tiers.meaty = vec!["codex/gpt-*/high".into(); MAX_PATTERNS + 1];
         assert!(long.validate().is_err());
         let mut bad = RoutingConfig::default();
-        bad.never.push("devin".into());
+        bad.never.push("devin/swe-*".into());
         assert!(bad.validate().is_err());
     }
 

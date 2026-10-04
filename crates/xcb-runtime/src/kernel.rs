@@ -92,7 +92,7 @@ pub async fn auto_route(
         Error::Unavailable("--model auto needs the judge: xcb judge token && xcb judge enable"),
     )?;
     let view = summary::snapshot(store, None, config, now_ms())?;
-    let admitted_providers: BTreeSet<_> = Provider::ALL
+    let admitted_providers: BTreeSet<_> = Provider::SUPPORTED
         .into_iter()
         .filter(|provider| {
             Pin::load(store.root(), *provider)
@@ -457,9 +457,7 @@ fn credential_guidance(provider: Provider) -> &'static str {
         Provider::Codex => {
             "connect this Codex account with xcb accounts login <account>, or explicitly import auth.json with xcb accounts import-codex --source <path>"
         }
-        Provider::Devin => {
-            "connect this Devin account by piping a token into xcb accounts token <account>, or copy a CLI sign-in into a new account with xcb accounts import-devin --source <absolute credentials.toml path>"
-        }
+        Provider::Devin => "Devin support was removed; use a Claude or Codex account",
     }
 }
 
@@ -1107,7 +1105,7 @@ async fn execute_inner(
                 quota_clear: false,
                 available: false,
             };
-            let admitted_providers: BTreeSet<_> = Provider::ALL
+            let admitted_providers: BTreeSet<_> = Provider::SUPPORTED
                 .into_iter()
                 .filter(|provider| {
                     Pin::load(store.root(), *provider)
@@ -2761,7 +2759,7 @@ mod tests {
             failure: Failure::ModelQuota,
             tried: &BTreeSet::new(),
             limited_accounts: &BTreeSet::new(),
-            admitted: &Provider::ALL.into_iter().collect(),
+            admitted: &Provider::SUPPORTED.into_iter().collect(),
             credentialed: &credentialed,
             required_provider: Some(Provider::Devin),
             run_limit: 1,
@@ -3014,7 +3012,7 @@ mod tests {
 
     #[tokio::test]
     async fn disabled_resumed_accounts_restore_drafts_before_any_turn_for_every_provider() {
-        for provider in Provider::ALL {
+        for provider in Provider::SUPPORTED {
             let directory = tempfile::tempdir().unwrap();
             let base = xcb_core::canonical(directory.path()).unwrap();
             let store = Arc::new(Store::open(&base.join("state")).unwrap());

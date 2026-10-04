@@ -3586,7 +3586,7 @@ mod tests {
         let dir = root();
         let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
-        for provider in Provider::ALL {
+        for provider in Provider::SUPPORTED {
             let account = store.add_account(provider, "Test", 1, None).unwrap();
             let run = store.prepare_probe(&account.id, None, 2).unwrap();
             crate::application_qualification::ensure_generation(&store, &run).unwrap();
@@ -3630,7 +3630,7 @@ mod tests {
         let dir = root();
         let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
-        for provider in Provider::ALL {
+        for provider in Provider::SUPPORTED {
             let account = store.add_account(provider, "Test", 1, None).unwrap();
             let run = store.prepare_probe(&account.id, None, 2).unwrap();
             crate::application_qualification::ensure_generation(&store, &run).unwrap();

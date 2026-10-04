@@ -3,7 +3,6 @@ mod claude_sign_in;
 mod code_sign_in;
 mod context;
 mod device_sign_in;
-mod devin_sign_in;
 mod doctor;
 mod habitat;
 mod health;
@@ -45,7 +44,7 @@ use xcb_runtime::{
 #[command(
     name = "xcb",
     version,
-    about = "Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for",
+    about = "Excalibur (xcb) routes coding tasks across the Claude and Codex subscriptions you already pay for",
     override_help = ux::ROOT_HELP
 )]
 struct Cli {
@@ -67,7 +66,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Configure host tools shared by Codex, Claude and Devin.
+    /// Configure host tools shared by Codex and Claude.
     Tools {
         #[command(subcommand)]
         command: tools::Commands,
@@ -80,7 +79,7 @@ enum Commands {
     /// Add an account, check the provider, sign in and load its models, in
     /// one command.
     Setup {
-        /// Provider to set up: claude, codex, or devin.
+        /// Provider to set up: claude or codex.
         provider: Provider,
         /// Plan label for a new account; a display label only.
         #[arg(long, default_value = "Subscription")]
@@ -409,7 +408,7 @@ enum Commands {
     /// attention, and 1 when a check failed or needs attention; the output
     /// names the one next step.
     Doctor {
-        /// Check only this provider (claude, codex, or devin).
+        /// Check only this provider (claude or codex).
         #[arg(long)]
         provider: Option<Provider>,
         /// Provider binary to check instead of the one found on PATH;
@@ -546,7 +545,7 @@ enum AccountCommand {
     /// Add and sign in to an account. With --json or outside a terminal,
     /// create the account only.
     Add {
-        /// Provider to add: claude, codex, or devin.
+        /// Provider to add: claude or codex.
         provider: Provider,
         /// Plan label shown by `xcb accounts`; a display label only, never
         /// verified against the provider's entitlement.
@@ -605,20 +604,14 @@ enum AccountCommand {
         #[arg(long)]
         account: Option<String>,
     },
-    /// Copy one existing Devin sign-in into a private xcb account.
-    ImportDevin {
-        /// Absolute path to the Devin credentials.toml to copy.
-        #[arg(long)]
-        source: PathBuf,
-    },
 }
 #[derive(Subcommand)]
 enum ModelCommand {
     /// Discover the provider's current model catalog through an account.
     Refresh {
-        /// Provider whose catalog is refreshed: claude, codex, or devin.
+        /// Provider whose catalog is refreshed: claude or codex.
         provider: Provider,
-        /// Account whose credentials run the discovery (required for devin).
+        /// Account whose credentials run the discovery.
         #[arg(long)]
         account: Option<String>,
         /// Legacy discovery flag; use an explicit credential import and --account.
@@ -642,7 +635,7 @@ enum ModelCommand {
         /// Task description the route is previewed for.
         #[arg(long)]
         task: String,
-        /// Restrict the preview to one provider (claude, codex, or devin).
+        /// Restrict the preview to one provider (claude or codex).
         #[arg(long)]
         provider: Option<Provider>,
     },
@@ -1216,7 +1209,7 @@ fn provider_name(provider: Provider) -> &'static str {
     match provider {
         Provider::Claude => "Claude Code",
         Provider::Codex => "Codex",
-        Provider::Devin => "Devin",
+        Provider::Devin => "retired Devin",
     }
 }
 
@@ -1224,6 +1217,9 @@ fn provider_name(provider: Provider) -> &'static str {
 /// provider, first do what `xcb doctor --provider <p>` does, so the first
 /// sign-in after `xcb accounts add` works without a separate doctor step.
 async fn ensure_pin(root: &std::path::Path, provider: Provider) -> Result<Pin> {
+    if provider == Provider::Devin {
+        return Err(Error::Unavailable("Devin support was removed; use Claude or Codex"));
+    }
     if Pin::recorded(root, provider) {
         return Pin::load(root, provider);
     }
@@ -1249,6 +1245,9 @@ async fn ensure_pin(root: &std::path::Path, provider: Provider) -> Result<Pin> {
 
 /// Refuse a provider build xcb can't run, saying why and what fixes it.
 fn require_supported(root: &std::path::Path, pin: &Pin) -> Result<()> {
+    if pin.provider == Provider::Devin {
+        return Err(Error::Unavailable("Devin support was removed; use Claude or Codex"));
+    }
     if runner::provider_admitted(root, pin) {
         return Ok(());
     }
@@ -1309,9 +1308,7 @@ fn require_account_credentials(store: &Store, account: &xcb_runtime::store::Acco
         Provider::Codex => {
             "connect this Codex account with xcb accounts login <account> or explicitly import auth.json with xcb accounts import-codex --source <path>"
         }
-        Provider::Devin => {
-            "connect this Devin account with xcb accounts login <account>, or explicitly import credentials.toml with xcb accounts import-devin --source <path>"
-        }
+        Provider::Devin => "Devin support was removed; use a Claude or Codex account",
     }))
 }
 
@@ -1325,9 +1322,7 @@ fn catalog_account(
     // ACP probe, nor grant ambient access to the native CLI's credential home.
     if from_native {
         return Err(Error::Unavailable(match provider {
-            Provider::Devin => {
-                "--from-native no longer reads ambient credentials; use xcb accounts import-devin --source <absolute credentials.toml path>, then models refresh devin --account <account>"
-            }
+            Provider::Devin => "Devin support was removed; use Claude or Codex",
             Provider::Codex => {
                 "--from-native no longer reads ambient credentials; use xcb accounts import-codex --source <absolute auth.json path>, then models refresh codex --account <account>"
             }
@@ -1337,11 +1332,6 @@ fn catalog_account(
         }));
     }
     let Some(name) = name else {
-        if provider == Provider::Devin {
-            return Err(Error::Unavailable(
-                "Devin catalog refresh requires --account after an explicit credential import or token connection",
-            ));
-        }
         return Ok(None);
     };
     let account = store.resolve_account(name)?;
@@ -1822,7 +1812,7 @@ async fn dispatch_inner(
         let catalog_root = root.clone();
         let _ =
             tokio::task::spawn_blocking(move || xcb_runtime::catalog::refresh(&catalog_root)).await;
-        for provider in Provider::ALL {
+        for provider in Provider::SUPPORTED {
             let report = process::refresh_provider(&root, provider, None, &home).await;
             match (report.outcome, report.detail) {
                 (process::RefreshOutcome::Adopted, _) => {
@@ -1906,7 +1896,7 @@ async fn dispatch_inner(
                 // Install both handlers before routing, which can start provider
                 // work, and before any provider starts. SIGTERM must use the same
                 // independent join/custody path as interactive Ctrl-C.
-                let mut stop = stop::Stop::install()?;
+                let stop = stop::Stop::install()?;
                 let _interrupt = AbortOnDrop(tokio::spawn(async move {
                     stop.recv().await;
                     let _ = cancel.send(true);
@@ -2120,14 +2110,9 @@ async fn dispatch_inner(
                             }
                         }
                         Provider::Devin => {
-                            if !terminal_available() || cli.json {
-                                return Err(Error::guided(
-                                    "Devin browser sign-in requires a terminal",
-                                    format!("xcb accounts login {}", account.id),
-                                ));
-                            }
-                            devin_sign_in::login(&store, &account.id, &pin, cancel, receiver)
-                                .await?;
+                            return Err(Error::Unavailable(
+                                "Devin support was removed; use a Claude or Codex account",
+                            ));
                         }
                     }
                     if cli.json {
@@ -2154,7 +2139,11 @@ async fn dispatch_inner(
                     let account = store.resolve_account(&account)?;
                     let limit = match account.provider {
                         Provider::Claude => 2048,
-                        Provider::Devin => 8194,
+                        Provider::Devin => {
+                            return Err(Error::Unavailable(
+                                "Devin support was removed; use a Claude or Codex account",
+                            ));
+                        }
                         Provider::Codex => {
                             return Err(Error::Unavailable(
                                 "Codex uses ChatGPT sign-in; use xcb accounts login <account> or xcb accounts import-codex --source <absolute auth.json path>",
@@ -2164,9 +2153,7 @@ async fn dispatch_inner(
                     let bytes = zeroize::Zeroizing::new(stdin(limit)?);
                     match account.provider {
                         Provider::Claude => auth::store_token(&store, &account.id, &bytes)?,
-                        Provider::Devin => {
-                            xcb_runtime::devin::auth::store_token(&store, &account.id, &bytes)?
-                        }
+                        Provider::Devin => unreachable!("retired Devin support was rejected above"),
                         Provider::Codex => unreachable!("Codex token input is rejected above"),
                     }
                     if cli.json {
@@ -2260,16 +2247,6 @@ async fn dispatch_inner(
                         );
                     }
                 }
-                Some(AccountCommand::ImportDevin { source }) => {
-                    let id = xcb_runtime::devin::auth::import_account(&store, &source)?;
-                    if cli.json {
-                        print_json(import_acknowledgement(&id))?;
-                    } else {
-                        println!(
-                            "Imported one Devin account as {id}. Next: xcb accounts refresh {id}"
-                        );
-                    }
-                }
             }
             Ok(0)
         }
@@ -2354,11 +2331,6 @@ async fn dispatch_inner(
                 }
                 let selected = match selected {
                     Some(account) => Some(account),
-                    None if provider == Provider::Devin => {
-                        let pin = stop.settle(ensure_pin(store.root(), provider)).await?;
-                        require_supported(store.root(), &pin)?;
-                        Some(add_setup_account(&store, provider, &plan)?)
-                    }
                     None => Some(add_setup_account(&store, provider, &plan)?),
                 };
                 let retry = selected
@@ -4168,9 +4140,7 @@ async fn finish_account_setup(
     // 3. A rejected credential must be replaced by sign-in; refreshing
     // model metadata does not repair authentication.
     let Some(account) = account else {
-        ux::next(
-            "sign in with devin auth login, then run xcb accounts import-devin --source <path to credentials.toml>",
-        );
+        ux::next("run xcb accounts login <account> to connect the account");
         return Ok(0);
     };
     if account_needs_sign_in(store, &account)? {
@@ -5507,7 +5477,7 @@ mod tests {
             Some(devin.id.clone())
         );
         assert!(catalog_account(&store, Provider::Devin, Some(claude.id.as_str()), false).is_err());
-        for provider in Provider::ALL {
+        for provider in Provider::SUPPORTED {
             let error = catalog_account(&store, provider, None, true).unwrap_err();
             assert!(error.to_string().contains("--from-native"));
         }

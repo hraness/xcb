@@ -75,8 +75,8 @@ pub fn load(store: &Store, config: &Config, now: u64) -> Result<Accounts> {
     Ok(Accounts { accounts, runway })
 }
 
-/// Providers in the order xcb names them: Claude, Codex, Devin.
-pub const PROVIDERS: [Provider; 3] = [Provider::Claude, Provider::Codex, Provider::Devin];
+/// Providers in the order xcb names them: Claude, Codex.
+pub const PROVIDERS: [Provider; 2] = [Provider::Claude, Provider::Codex];
 
 fn provider_rank(provider: Provider) -> usize {
     PROVIDERS

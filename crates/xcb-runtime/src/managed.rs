@@ -6288,7 +6288,7 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
             let catalog_root = root.clone();
             let _ =
                 tokio::task::spawn_blocking(move || crate::catalog::refresh(&catalog_root)).await;
-            for provider in xcb_core::Provider::ALL {
+            for provider in xcb_core::Provider::SUPPORTED {
                 let report = crate::process::refresh_provider(&root, provider, None, &home).await;
                 if let Some(detail) = report.detail {
                     record_supervisor_fault(&fault_root, &format!("{provider} refresh: {detail}"));
