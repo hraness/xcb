@@ -192,15 +192,21 @@ Git commit. Its task record verified. The tested executable's SHA-256 is
 Host credential helpers resolve trusted absolute toolchain paths independently
 of the restricted PATH supplied by the login service. No remote write was tested.
 
-Claude's effective tool boundary passed startup checks, but its signed-in
-session reported that the organization had disabled Claude Code subscription
-access. A later check confirmed the supported Claude build and refreshed an
-existing account's model catalog through startup and usage-metadata requests,
+Claude's effective tool boundary passed startup checks, but an earlier
+account's signed-in session reported that the organization had disabled
+Claude Code subscription access. A later check confirmed the supported Claude
+build and refreshed an existing account's model catalog through startup and
+usage-metadata requests,
 without sending a coding prompt. All 46 targeted offline Claude tests passed.
 The account's quota and reset time remained unmeasured. These checks do not
 establish usable subscription access or clear the earlier organization refusal.
+A newly signed-in account then passed the Auto-mode startup checks on an
+account-pinned Sonnet session, but Claude rejected its prompt at the weekly
+usage limit, with a reported reset of 2026-10-06 at 03:00 UTC. Its process
+exited with no tool effects, and xcb recorded the account's quota block.
+Haiku was unsuitable for this check because it does not support Auto mode.
 Claude native execution remains unavailable until authorized subscription
-access and live acceptance succeed. Devin remains retired. Existing project
+usage and live acceptance succeed. Devin remains retired. Existing project
 grants and uncertain runs do not acquire wider access from these test results.
 [`native_backend.rs`](../crates/xcb-runtime/src/native_backend.rs) keeps the
 planned acceptance list separate from recorded availability.

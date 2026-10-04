@@ -35,3 +35,9 @@
   quota, and metadata success does not clear an organization access refusal.
   `xcb native verify --provider claude` does submit a model prompt; defer it
   until authorized subscription access and inference usage are available.
+- Account-specific Claude checks must use `xcb run --account <id>` and an
+  observed Auto-compatible model such as Sonnet. Haiku does not support Auto
+  mode and can fail the effective permission assertion before inference;
+  never relax that assertion to make a sign-in check pass. The current native
+  verifier has no account selector, so it cannot attest a particular new
+  account merely because provider-wide verification succeeds.
