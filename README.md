@@ -204,6 +204,12 @@ bounded tools, and provider adapters. It is separate from the native Rust app;
 see the [compatibility reference](docs/compatibility.md) for its package and
 CLI contract.
 
+## Optional behavior
+
+Usage measurement stays local. Local exports and executable hooks require
+explicit opt-in, and projections remain presentation data: they cannot grant
+execution authority.
+
 ## Compared with
 
 - **Claude Code, Codex, or the Devin CLI alone:** enough when one subscription covers your work, and you keep all of the tool's built-in tools, MCP servers, and plugins. xcb supplies workspace tools, its offline command runner on macOS, and registered host tool servers across providers.
