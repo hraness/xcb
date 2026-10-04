@@ -124,6 +124,49 @@ Hooks and external projections consume sanitized, bounded events. They do not
 receive provider secrets or arbitrary host paths. Every effect that can be
 retried has a stable identity and a settlement receipt.
 
+### Scoped memory across worker and provider changes
+
+A worker should be able to resume with a small view of its assigned history and
+recover the original context behind an older decision. xcb's
+[program-context reads](context-recipes.md) already retain a managed child's
+instructions and declared inputs through ALGAL. Its recent-work view provides
+workspace task summaries, and an explicitly configured Wordcell binding can
+keep longer-lived notes. These have different source, permission, and retention
+rules; they are not one permanent machine-wide memory.
+
+The proposed addition is a multiresolution view: recent original records plus
+expandable summaries of older ranges, with exact search underneath.
+[OptMem's pinned implementation](https://github.com/VictorTaelin/OptMem/blob/1fb164cf39028047781f72ac3bb1e5a691c1dcb0/memo)
+is a design reference for that reading pattern. Its structural tests use a fake
+compressor, so a smaller overview is not evidence of better worker performance.
+
+ALGAL supplies the portable source/view rules. xcb binds them to the current
+workspace, task, program call, provider session, and capability grant. A child's
+`cell.view` remains authoritative: workspace access cannot reveal hidden parent
+inputs or sibling reports. Direct sessions do not inherit program-child context
+merely because a tool name is known. Fresh provider sessions must receive the
+original task contract before optional historical context; summaries cannot
+acknowledge clipped instructions or stand in for process-exit evidence.
+
+Overview pages capture one source head and summary generation. Expansion and
+search preserve original IDs, byte ranges, task states, and incomplete results.
+Cached summaries require permission to every contributing source. Corrections,
+revoked access, and source expiry invalidate their derived bodies; old uncertain
+outcomes remain uncertain. Managed retention still applies, and durable knowledge
+requires an explicit Wordcell or application operation rather than a summary
+silently extending task-history lifetime.
+
+Optional summary jobs run through ordinary managed work with the same project,
+account, call, and resource limits. Reads do not start inference. A failed or
+uncertain summary job cannot release an account, renew a grant, or authorize a
+retry. Provider credentials and private runtime state never enter the memory view.
+
+The local pilot needs no Valhalla transport or new UI. Before default activation,
+compare recent-work context, exact/lexical recall, and progressive views on the
+same later tasks, including old failures and changed facts. Report source recovery,
+accepted task outcomes, correction effort, maintenance cost, and usage separately.
+Keep the prior view available as a tested rollback.
+
 ### Durable task ownership
 
 Long-running work is a bounded ownership tree, not a flat list of provider

@@ -105,6 +105,23 @@ receipts, recovery, and held-out workload results remain green. Synthetic
 tests never become claims about provider quality, billing, or public Valhalla
 availability.
 
+## Scoped memory adoption
+
+- **Status:** Not started
+- **Depends on:** An admitted ALGAL source/view contract and immutable dependency pin; existing local command, capability, replay, and assurance boundaries. This subtrack does not depend on P4 Valhalla or P5 migration.
+- **Objective:** Resume a worker with progressive detail over only its assigned context and permitted workspace history.
+- **Scope:** `crates/xcb-runtime/src/managed_habitat.rs`, `managed_program_state.rs`, `context_recipe.rs` and their tests; `docs/context-recipes.md`. The integration owner owns dependency and protocol/tool declaration changes.
+- **Out of scope:** A second memory database or supervisor, provider-state copying, global identity, changed retention, larger grants, removed terminal interfaces, and live campaigns without a separately frozen budget.
+- **Approach:** Read the scoped-memory section of `docs/vision.md` and existing `ProgramContext` capture/query paths. Use OptMem's recent-detail/older-range pattern over ALGAL source references, not its installer or fixed-width log. Start with scripted nodes. Capture original task states, request identity, source head, grant, and derivative generation before building a view. Keep exact search and expansion independent of summary quality. Missing nodes return an explicit raw/incomplete view; reads never generate summaries.
+- **Acceptance criteria:** A fresh provider receives the original task contract. Cross-workspace, cross-child, direct-session, stale-grant, and cached broader-scope reads refuse. A changed summary generation cannot shift earlier pages. Existing request/output limits include view overhead, and protected intent never silently disappears. Expired managed history is unavailable rather than presented as permanent memory. Failed and uncertain source tasks retain their states. Summary maintenance uses ordinary managed budgets and cannot release custody or retry an uncertain effect. The opt-out path preserves existing receipts and exact-context behavior.
+- **Validation:** `cargo test --locked -p xcb-runtime managed_program_state_tests`; `cargo test --locked -p xcb-runtime managed_habitat_tests`; `cargo test --locked -p xcb-runtime context_recipe`; native workspace tests, clippy, fmt, and `bun run check` through the normal host controls.
+
+An opt-in implementation can ship after those mechanism checks. Default use needs
+a separately preregistered later-task comparison with correction and old-failure
+cases, equal total resources including summary maintenance, fresh confirmation,
+and a tested rollback. This plan records no live memory-quality result and does
+not create a new schedule or authorize a provider call.
+
 ## xcb scheduler setup
 
 The project grant is named `xcb`, lasts 30 days, and permits up to 100 bounded
