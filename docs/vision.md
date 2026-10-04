@@ -205,6 +205,12 @@ account-pinned Sonnet session, but Claude rejected its prompt at the weekly
 usage limit, with a reported reset of 2026-10-06 at 03:00 UTC. Its process
 exited with no tool effects, and xcb recorded the account's quota block.
 Haiku was unsuitable for this check because it does not support Auto mode.
+The [Claude integration stages](provider-permissions.md#claude-integration-methods)
+add account-pinned native verification, Auto-compatible executable catalogs,
+allowlisted startup/account introspection, and cooperative cancellation on
+the task branch. Session, MCP, settings, and rewind controls retain separate
+scope, inventory, and recovery gates. These additions do not qualify Claude
+while subscription usage is exhausted or replace the validated live daemon.
 Claude native execution remains unavailable until authorized subscription
 usage and live acceptance succeed. Devin remains retired. Existing project
 grants and uncertain runs do not acquire wider access from these test results.

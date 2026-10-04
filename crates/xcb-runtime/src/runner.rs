@@ -2009,6 +2009,19 @@ pub fn parse_models(value: &Value, now: u64) -> Result<Vec<ModelChoice>> {
             .filter(|resolved| *resolved != id.as_str())
             .map(Id::new)
             .transpose()?;
+        let auto = match model.get("supportsAutoMode") {
+            None | Some(Value::Null) => None,
+            Some(Value::Bool(value)) => Some(*value),
+            _ => return Err(Error::Protocol("model Auto capability")),
+        };
+        if auto == Some(false)
+            || [Some(&id), resolved.as_ref()]
+                .into_iter()
+                .flatten()
+                .any(|id| id.as_str() == "haiku" || id.as_str().starts_with("claude-haiku-"))
+        {
+            continue;
+        }
         let name = model
             .get("displayName")
             .and_then(Value::as_str)
@@ -2204,7 +2217,7 @@ pub(crate) async fn handshake(
     process: &mut StreamProcess,
     tools: bool,
     system: &str,
-) -> Result<Vec<ModelChoice>> {
+) -> Result<claude::Metadata> {
     process.send(&initialize(tools, system)).await?;
     tokio::time::timeout(crate::protocol::INIT_DEADLINE, async {
         for _ in 0..256 {
@@ -2243,7 +2256,7 @@ pub(crate) async fn handshake(
                             Error::Protocol("initialization failed")
                         });
                     }
-                    return parse_models(
+                    return claude::Metadata::parse(
                         value
                             .pointer("/response/response")
                             .ok_or(Error::Protocol("initialize response"))?,
@@ -2271,6 +2284,26 @@ pub async fn probe(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<Vec
     if pin.provider == Provider::Devin {
         return Err(Error::Unavailable(
             "Devin support was removed; use Claude or Codex",
+        ));
+    }
+    probe_claude_metadata(store, pin, account)
+        .await
+        .map(|metadata| metadata.models)
+}
+
+pub async fn probe_claude_metadata(
+    store: &Store,
+    pin: &Pin,
+    account: Option<&Id>,
+) -> Result<claude::Metadata> {
+    if pin.provider != Provider::Claude
+        || account
+            .map(|id| store.account(id))
+            .transpose()?
+            .is_some_and(|account| account.provider != Provider::Claude)
+    {
+        return Err(Error::Unavailable(
+            "Claude metadata requires a Claude account and build",
         ));
     }
     let now = now_ms();
@@ -2324,7 +2357,7 @@ pub async fn probe(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<Vec
     .await?;
     let result = async {
         if let Some(run) = &run { store.mark_spawned(run, process.pid())?; }
-        let models = handshake(&mut process, false, "Return no messages; this connection is for host metadata queries only.").await?;
+        let metadata = handshake(&mut process, false, "Return no messages; this connection is for host metadata queries only.").await?;
         if let Some(account) = account {
             process.send(&json!({"type":"control_request","request_id":"xcb_usage","request":{"subtype":"get_usage","skip_behaviors":true}})).await?;
             let response = tokio::time::timeout(Duration::from_secs(20), async {
@@ -2368,16 +2401,17 @@ pub async fn probe(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<Vec
                 })
                 .map(|value| format!("Claude {value}"));
             let base = launch.artifacts.path();
-            let email = auth::claude_profile_email(&[
+            let email = metadata.account.email.clone().or_else(|| auth::claude_profile_email(&[
                 &base.join("scratch").join("config"),
                 &base.join("scratch").join("home"),
                 &base.join("profile"),
-            ]);
+            ]));
+            let plan = plan.or_else(|| metadata.account.subscription_type.as_ref().map(|plan| format!("Claude {plan}")));
             if email.is_some() || plan.is_some() {
                 store.set_account_identity(account, email, plan)?;
             }
         }
-        Ok::<_, Error>(models)
+        Ok::<_, Error>(metadata)
     }.await;
     let process_joined = process.join().await;
     let bridge_joined = close_bridge(bridge).await;

@@ -20,6 +20,23 @@ pub async fn verify(
     github: bool,
     cancel: watch::Receiver<bool>,
 ) -> Result<ProviderQualification> {
+    verify_for_account(store, provider, None, github, cancel).await
+}
+
+pub async fn verify_for_account(
+    store: Arc<Store>,
+    provider: Provider,
+    account: Option<xcb_core::Id>,
+    github: bool,
+    cancel: watch::Receiver<bool>,
+) -> Result<ProviderQualification> {
+    if let Some(account) = &account
+        && store.account(account)?.provider != provider
+    {
+        return Err(Error::Unavailable(
+            "native verification account belongs to another provider",
+        ));
+    }
     native_backend::require_qualification(store.root())?;
     let mut lookup = Command::new("/usr/bin/xcrun");
     lookup
@@ -87,7 +104,7 @@ pub async fn verify(
             required_model: None,
             excluded_routes: &excluded_routes,
             excluded_accounts: &excluded_accounts,
-            account: None,
+            account: account.as_ref(),
         },
     )
     .await?;
@@ -196,4 +213,31 @@ pub async fn verify(
         Err(error) => return Err(error),
     }
     Ok(receipt)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn explicit_verification_account_cannot_cross_provider_boundaries() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        let store = Arc::new(Store::open(&root.join("state")).unwrap());
+        let account = store
+            .add_account(Provider::Codex, "Fixture", 1, None)
+            .unwrap();
+        let (_cancel, cancelled) = watch::channel(false);
+        let error = verify_for_account(
+            store.clone(),
+            Provider::Claude,
+            Some(account.id),
+            false,
+            cancelled,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("another provider"));
+        assert!(store.unsettled_runs().unwrap().is_empty());
+    }
 }

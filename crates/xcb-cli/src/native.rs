@@ -21,6 +21,13 @@ pub(crate) enum Commands {
         )]
         session: Option<xcb_core::Id>,
     },
+    #[command(
+        about = "Read Claude startup methods, models and account metadata without a model prompt"
+    )]
+    Describe {
+        #[arg(long, help = "Existing Claude account name or id to inspect")]
+        account: String,
+    },
     #[command(about = "Verify native command filesystem confinement and DNS/HTTPS access")]
     Qualify,
     #[command(
@@ -32,6 +39,8 @@ pub(crate) enum Commands {
             help = "Provider to test using its supported installed build and a signed-in account"
         )]
         provider: Provider,
+        #[arg(long, help = "Restrict this check to an existing account name or id")]
+        account: Option<String>,
         #[arg(
             long,
             help = "Also verify host GitHub credentials using read-only authenticated requests"
@@ -110,6 +119,26 @@ pub(crate) async fn execute(
                 println!("{} workspace grants", config.native_execution.scopes.len());
             }
         }
+        Commands::Describe { account } => {
+            let account = store.resolve_account(&account)?;
+            if account.provider != Provider::Claude {
+                return Err(xcb_runtime::Error::Unavailable(
+                    "startup description requires a Claude account",
+                ));
+            }
+            let pin = Pin::load(store.root(), Provider::Claude)?;
+            let metadata = crate::stop::Stop::install()?
+                .settle(Box::pin(runner::probe_claude_metadata(
+                    store,
+                    &pin,
+                    Some(&account.id),
+                )))
+                .await?;
+            store.set_account_models(&account.id, &metadata.models)?;
+            crate::print_json(
+                json!({"version":1,"provider":"claude","accountId":account.id,"providerVersion":pin.version,"providerSha256":pin.sha256,"modelPromptSubmitted":false,"nativeQualified":native_backend::require_provider_qualification(store.root(), Provider::Claude, false).is_ok(),"metadata":metadata,"methods":{"startup":["initializationResult","supportedModels","supportedCommands","supportedAgents","accountInfo"],"execution":["streamInput","interrupt","close"],"guarded":["setPermissionMode","applyFlagSettings","setMcpServers","rewindFiles","stopTask"],"notImplemented":["mcpServerStatus","getContextUsage","reinitialize","reconnectMcpServer","toggleMcpServer","providerResume","providerFork"],"hostOwned":["setModel","resume","cancel"]}}),
+            )?;
+        }
         Commands::Qualify => {
             let receipt = crate::stop::Stop::install()?
                 .settle(Box::pin(xcb_runtime::command_tool::qualify_native(
@@ -122,16 +151,24 @@ pub(crate) async fn execute(
                 println!("Native command confinement and DNS/HTTPS checks passed.");
             }
         }
-        Commands::Verify { provider, github } => {
+        Commands::Verify {
+            provider,
+            account,
+            github,
+        } => {
+            let account = account
+                .map(|name| store.resolve_account(&name).map(|account| account.id))
+                .transpose()?;
             let (cancel, cancelled) = tokio::sync::watch::channel(false);
             let mut stop = crate::stop::Stop::install()?;
             let _interrupt = crate::AbortOnDrop(tokio::spawn(async move {
                 stop.recv().await;
                 let _ = cancel.send(true);
             }));
-            let receipt = Box::pin(xcb_runtime::native_verification::verify(
+            let receipt = Box::pin(xcb_runtime::native_verification::verify_for_account(
                 store.clone(),
                 provider,
+                account,
                 github,
                 cancelled,
             ))
@@ -196,4 +233,51 @@ pub(crate) async fn execute(
         }
     }
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn native_verification_retains_an_explicit_account_selector() {
+        let cli = crate::Cli::try_parse_from([
+            "xcb",
+            "native",
+            "verify",
+            "--provider",
+            "claude",
+            "--account",
+            "new-account",
+            "--github",
+        ])
+        .unwrap();
+        assert!(
+            matches!(cli.command, Some(crate::Commands::Native { command: Commands::Verify { provider: Provider::Claude, account: Some(account), github: true } }) if account == "new-account")
+        );
+    }
+
+    #[test]
+    fn startup_description_requires_an_account_and_accepts_no_prompt() {
+        assert!(crate::Cli::try_parse_from(["xcb", "native", "describe"]).is_err());
+        assert!(
+            crate::Cli::try_parse_from([
+                "xcb",
+                "native",
+                "describe",
+                "--account",
+                "new-account",
+                "--prompt",
+                "do work"
+            ])
+            .is_err()
+        );
+        let cli =
+            crate::Cli::try_parse_from(["xcb", "native", "describe", "--account", "new-account"])
+                .unwrap();
+        assert!(
+            matches!(cli.command, Some(crate::Commands::Native { command: Commands::Describe { account } }) if account == "new-account")
+        );
+    }
 }

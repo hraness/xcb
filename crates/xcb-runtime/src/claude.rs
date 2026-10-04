@@ -63,6 +63,76 @@ pub fn runtime_admitted_with_catalog(
     Ok(())
 }
 
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountInfo {
+    pub email: Option<String>,
+    pub organization: Option<String>,
+    pub subscription_type: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Metadata {
+    pub observed_at_ms: u64,
+    pub models: Vec<xcb_core::models::ModelChoice>,
+    pub account: AccountInfo,
+    pub commands: Vec<String>,
+    pub agents: Vec<String>,
+}
+
+impl Metadata {
+    pub fn parse(value: &Value, now: u64) -> Result<Self> {
+        let account = match value.get("account") {
+            None | Some(Value::Null) => AccountInfo::default(),
+            Some(account) if account.is_object() => AccountInfo {
+                email: optional_label(account, "email")?,
+                organization: optional_label(account, "organization")?,
+                subscription_type: optional_label(account, "subscriptionType")?,
+            },
+            _ => return Err(Error::Protocol("account metadata")),
+        };
+        Ok(Self {
+            observed_at_ms: now,
+            models: crate::runner::parse_models(value, now)?,
+            account,
+            commands: metadata_names(value, "commands", "name")?,
+            agents: metadata_names(value, "agents", "name")?,
+        })
+    }
+}
+
+fn optional_label(value: &Value, field: &str) -> Result<Option<String>> {
+    match value.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => {
+            xcb_core::label(value, 200).map_err(|_| Error::Protocol("account metadata label"))?;
+            Ok(Some(value.clone()))
+        }
+        _ => Err(Error::Protocol("account metadata label")),
+    }
+}
+
+fn metadata_names(value: &Value, field: &str, key: &str) -> Result<Vec<String>> {
+    let rows = match value.get(field) {
+        None | Some(Value::Null) => return Ok(vec![]),
+        Some(Value::Array(rows)) if rows.len() <= 128 => rows,
+        _ => return Err(Error::Protocol("metadata inventory bound")),
+    };
+    let mut names = std::collections::BTreeSet::new();
+    for row in rows {
+        let name = row
+            .get(key)
+            .and_then(Value::as_str)
+            .ok_or(Error::Protocol("metadata inventory name"))?;
+        xcb_core::label(name, 200).map_err(|_| Error::Protocol("metadata inventory name"))?;
+        if !names.insert(name.to_owned()) {
+            return Err(Error::Protocol("duplicate metadata inventory name"));
+        }
+    }
+    Ok(names.into_iter().collect())
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct QuotaObservation {
     pub window: String,
@@ -468,6 +538,38 @@ pub fn parse_value(value: Value) -> Result<Event> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn startup_metadata_is_bounded_and_drops_credentials_and_unknown_fields() {
+        let mut value = json!({"models":[{"value":"sonnet","displayName":"Sonnet","supportsAutoMode":true}],"account":{"email":"fixture@example.invalid","organization":"Fixture","subscriptionType":"max","token":"SYNTHETIC_PRIVATE_TOKEN","tokenSource":"SYNTHETIC_PRIVATE_TOKEN","apiKeySource":"SYNTHETIC_PRIVATE_TOKEN"},"commands":[{"name":"status","description":"SYNTHETIC_PRIVATE_TOKEN"}],"agents":[{"name":"Explore","prompt":"SYNTHETIC_PRIVATE_TOKEN"}]});
+        let metadata = Metadata::parse(&value, 42).unwrap();
+        assert_eq!(
+            metadata.account.email.as_deref(),
+            Some("fixture@example.invalid")
+        );
+        assert_eq!(metadata.commands, ["status"]);
+        assert_eq!(metadata.agents, ["Explore"]);
+        assert_eq!(metadata.observed_at_ms, 42);
+        assert!(
+            !serde_json::to_string(&metadata)
+                .unwrap()
+                .contains("SYNTHETIC_PRIVATE_TOKEN")
+        );
+        value["commands"] = json!([{"name":"duplicate"},{"name":"duplicate"}]);
+        assert!(Metadata::parse(&value, 42).is_err());
+        value["commands"] = json!([]);
+        value["agents"] = json!(vec![json!({"name":"x"}); 129]);
+        assert!(Metadata::parse(&value, 42).is_err());
+        value["agents"] = json!([]);
+        value["account"]["email"] = json!("x\nprivate");
+        assert!(Metadata::parse(&value, 42).is_err());
+        value["account"]["email"] = json!("x".repeat(201));
+        assert!(Metadata::parse(&value, 42).is_err());
+        let legacy = Metadata::parse(&json!({"models":[]}), 43).unwrap();
+        assert!(legacy.account.email.is_none());
+        assert!(legacy.commands.is_empty());
+        assert!(legacy.agents.is_empty());
+    }
 
     fn quota(value: Value) -> (Vec<QuotaObservation>, Option<Failure>, Option<&'static str>) {
         match parse_event(&serde_json::to_vec(&value).unwrap()).unwrap() {

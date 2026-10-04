@@ -38,6 +38,15 @@
 - Account-specific Claude checks must use `xcb run --account <id>` and an
   observed Auto-compatible model such as Sonnet. Haiku does not support Auto
   mode and can fail the effective permission assertion before inference;
-  never relax that assertion to make a sign-in check pass. The current native
-  verifier has no account selector, so it cannot attest a particular new
-  account merely because provider-wide verification succeeds.
+  never relax that assertion to make a sign-in check pass. The task-branch
+  native verifier accepts `--account` and must retain it through routing;
+  provider-wide verification alone cannot attest a particular new account.
+- `xcb native describe --account <id>` performs quota-free startup and usage
+  queries through the existing supervised probe. Project only bounded model,
+  account-display, command-name and agent-name fields; never expose raw
+  initialization, credentials, credential-source fields or agent prompts.
+  Discovery is observational and does not authorize commands or delegation.
+- Claude cooperative interruption is one-shot and only for an active turn.
+  It does not replace process-group join, tool-effect settlement or retained
+  account custody. Session/MCP/settings mutators require separate host-owned
+  contracts and inventory revalidation; never add raw SDK pass-throughs.

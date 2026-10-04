@@ -49,6 +49,41 @@ and recovery evidence. Enabling a tool or changing a configuration flag cannot
 reuse the broker-only evidence. Devin execution remains retired; older account
 and session records remain readable, but cannot acquire new execution grants.
 
+## Claude integration methods
+
+The task-branch implementation adds `xcb native describe --account <id>`.
+It starts the private Claude profile and reads startup and usage metadata
+without submitting a model prompt. Its JSON includes the exact checked
+provider build, the named account, Auto-compatible model choices, bounded
+command and agent names, and allowlisted account display fields. Credential
+source fields, unknown provider fields, descriptions, and agent prompts are
+not returned. Describing an account does not prove usable quota or enable
+commands, agents, tools, or workspace access.
+
+`xcb native verify --provider claude --account <id>` pins live acceptance to
+that account rather than letting routing pick another. Unlike `describe`,
+verification submits a model prompt and needs subscription usage. The
+provider process still must stop cleanly and its command effects must be
+recorded before any account can be released.
+
+| Claude SDK operation | xcb integration stage |
+| --- | --- |
+| `initializationResult`, `supportedModels`, `accountInfo` | Startup projection and account-specific model/identity refresh. Haiku and models reporting `supportsAutoMode: false` are excluded from executable catalogs; effective Auto mode is checked again at launch. |
+| `supportedCommands`, `supportedAgents` | Bounded names in the startup projection only. Commands and delegated agents remain disabled. |
+| `streamInput`, streamed output | Host-owned single-turn input and streamed replies. Arbitrary background input queues are not exposed. |
+| `interrupt`, `close` | One cooperative interrupt for an active cancelled turn, followed by the existing bounded process-group stop and independent exit checks. An interrupt reply is not process-exit evidence. |
+| `setModel`, session continuation | xcb owns model selection and durable context replay. These are not unchecked mid-turn model changes or provider transcript resume. |
+| `mcpServerStatus`, `getContextUsage` | Next read-only stage: exact-session requests and redacted snapshots. Context inspection must request `summary` to avoid extra token-count API calls. Not implemented by `describe` yet. |
+| Provider resume/fork, `reinitialize` | Require exact account/process identity, retained scope, context lineage, and configuration revalidation before activation. Not enabled. |
+| `reconnectMcpServer`, `toggleMcpServer`, `setMcpServers` | Require host-owned server grants and a fresh effective tool inventory. Arbitrary SDK configuration is not accepted. |
+| `setPermissionMode`, `applyFlagSettings`, thinking controls | Require a reviewed host contract; no permission widening or provider-policy overrides. Not exposed as raw controls. |
+| `rewindFiles`, `stopTask` | Require explicit target ownership, effect records, and independently verified cleanup. Provider-managed child tasks and filesystem rewinds remain unavailable. |
+
+The first stage is offline-testable while an account is at its weekly limit.
+The later stages remain separate work, not capabilities silently enabled by
+successful startup. The deployed runtime and live provider checks must match
+the final artifact before operational activation.
+
 ## When a provider denies an action
 
 A permission denial stops automatic continuation and provider switching.

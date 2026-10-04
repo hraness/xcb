@@ -16,6 +16,9 @@ pub(crate) struct ClaudeProtocol {
     completed_output: u64,
     current_output: u64,
     permission_denied: bool,
+    active: bool,
+    interrupted: bool,
+    metadata: Option<claude::Metadata>,
 }
 impl ClaudeProtocol {
     pub(crate) fn new(tools: bool, cwd: PathBuf, model: ModelChoice) -> Self {
@@ -27,19 +30,50 @@ impl ClaudeProtocol {
             completed_output: 0,
             current_output: 0,
             permission_denied: false,
+            active: false,
+            interrupted: false,
+            metadata: None,
         }
     }
 }
 impl Protocol for ClaudeProtocol {
+    fn account_identity(&self) -> (Option<String>, Option<String>) {
+        self.metadata.as_ref().map_or((None, None), |metadata| {
+            (
+                metadata.account.email.clone(),
+                metadata
+                    .account
+                    .subscription_type
+                    .as_ref()
+                    .map(|plan| format!("Claude {plan}")),
+            )
+        })
+    }
+
+    fn interruption(&mut self) -> Option<Value> {
+        if !self.active || self.interrupted {
+            return None;
+        }
+        self.interrupted = true;
+        Some(
+            json!({"type":"control_request","request_id":"xcb_interrupt","request":{"subtype":"interrupt"}}),
+        )
+    }
+
     async fn initialize(
         &mut self,
         process: &mut StreamProcess,
         instructions: &str,
     ) -> Result<Vec<ModelChoice>> {
-        runner::handshake(process, self.tools, instructions).await
+        let metadata = runner::handshake(process, self.tools, instructions).await?;
+        let models = metadata.models.clone();
+        self.metadata = Some(metadata);
+        Ok(models)
     }
     async fn start(&mut self, process: &mut StreamProcess, prompt: Prompt) -> Result<()> {
         self.permission_denied = false;
+        self.active = true;
+        self.interrupted = false;
         let mut content = vec![json!({"type":"text","text":prompt.text})];
         for image in prompt.images {
             content.push(json!({"type":"image","source":{"type":"base64","media_type":image.media_type,"data":image.base64}}));
@@ -119,6 +153,7 @@ impl Protocol for ClaudeProtocol {
                 models,
                 mut failure,
             } => {
+                self.active = false;
                 if failure == Some(xcb_core::policy::Failure::Policy) || self.permission_denied {
                     self.record_denial(&mut events);
                     terminal = xcb_core::policy::Terminal::Failed;
@@ -239,6 +274,49 @@ impl ClaudeProtocol {
 mod tests {
     use super::*;
     use xcb_core::{Id, Provider, models::Mode};
+    #[tokio::test]
+    async fn cooperative_interrupt_is_one_shot_and_only_for_an_active_turn() {
+        let root = tempfile::tempdir().unwrap();
+        let model = ModelChoice {
+            provider: Provider::Claude,
+            id: Id::new("fixture-model").unwrap(),
+            label: "Fixture".into(),
+            mode: Mode::Fixed,
+            resolved: None,
+            effort: None,
+            observed_at_ms: 1,
+        };
+        let mut protocol = ClaudeProtocol::new(false, root.path().to_owned(), model);
+        let mut process = StreamProcess::spawn(tokio::process::Command::new("/bin/cat")).unwrap();
+        assert!(protocol.interruption().is_none());
+        protocol
+            .start(
+                &mut process,
+                Prompt {
+                    text: "fixture".into(),
+                    images: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            protocol.interruption(),
+            Some(
+                json!({"type":"control_request","request_id":"xcb_interrupt","request":{"subtype":"interrupt"}})
+            )
+        );
+        assert!(protocol.interruption().is_none());
+        protocol
+            .receive(
+                &mut process,
+                br#"{"type":"result","subtype":"success","is_error":false,"result":"done"}"#,
+            )
+            .await
+            .unwrap();
+        assert!(protocol.interruption().is_none());
+        assert!(process.join().await);
+    }
+
     #[tokio::test]
     async fn advisory_denial_is_sticky_and_final_list_cannot_clear_it() {
         let model = ModelChoice {
