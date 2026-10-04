@@ -570,7 +570,7 @@ impl ReferenceTransport {
                     .as_deref()
                     .is_none_or(|entity| entity == event.entity_id)
         }) {
-            if result.len() >= query.limit + 1 {
+            if result.len() > query.limit {
                 break;
             }
             let projection = EventProjection {
@@ -877,8 +877,10 @@ mod tests {
     #[test]
     fn schema_digest_options_fail_closed() {
         let factory = ReferenceFactory::new();
-        let mut options = ClientOptions::default();
-        options.expected_schema_digest = "0".repeat(64);
+        let options = ClientOptions {
+            expected_schema_digest: "0".repeat(64),
+            ..Default::default()
+        };
         assert!(factory.client_with_options(options).is_err());
         assert!(events_read(&EventQuery::default()).is_ok());
     }

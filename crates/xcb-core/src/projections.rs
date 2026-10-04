@@ -95,7 +95,7 @@ impl CapabilitySet {
     pub fn all() -> Self {
         Self(Capability::ALL.to_vec())
     }
-    pub fn from_iter(values: impl IntoIterator<Item = Capability>) -> Result<Self> {
+    pub fn from_values(values: impl IntoIterator<Item = Capability>) -> Result<Self> {
         let mut set = BTreeSet::new();
         for value in values {
             set.insert(value);
@@ -483,12 +483,12 @@ mod tests {
         let digest = schema_digest();
         assert_eq!(digest.len(), 64);
         check_schema_digest(&digest).expect("digest");
-        let caps = CapabilitySet::from_iter([Capability::EventsRead, Capability::StatusRead])
+        let caps = CapabilitySet::from_values([Capability::EventsRead, Capability::StatusRead])
             .expect("caps");
         assert!(caps.contains(Capability::StatusRead));
         assert_eq!(caps.names(), ["status-read", "events-read"]);
         assert!(
-            CapabilitySet::from_iter([Capability::StatusRead, Capability::EventsRead])
+            CapabilitySet::from_values([Capability::StatusRead, Capability::EventsRead])
                 .unwrap()
                 .validate()
                 .is_ok()
