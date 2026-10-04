@@ -124,6 +124,32 @@ Hooks and external projections consume sanitized, bounded events. They do not
 receive provider secrets or arbitrary host paths. Every effect that can be
 retried has a stable identity and a settlement receipt.
 
+### Durable task ownership
+
+Long-running work is a bounded ownership tree, not a flat list of provider
+turns. Each task records its parent (when any), workspace owner, foreground or
+background policy, cancellation propagation, required or optional join
+children, and the checkpoint and effect receipts that establish its progress.
+A parent cannot settle while a required child is unsettled. Cancellation,
+detachment, and child failure are explicit state transitions; none may widen a
+capability grant or turn an uncertain effect into a successful result.
+
+A checkpoint identifies the logical step, input and capability digests,
+provider/session identity, last settled effect, and next resumable step. It
+must say whether replay is safe, forbidden, or requires reconciliation. This
+is the boundary between resuming useful work and accidentally repeating an
+external mutation after a provider or host failure.
+
+### Replaceable storage with one contract
+
+The local journal and Valhalla transport are implementations of one storage
+contract. A backend must pass the same conformance cases for append, replay,
+bounded paging, duplicate delivery, body conflicts, crash recovery, restart,
+retention, and uncertain settlement. Storage replacement is admitted only
+with those receipts and with migration evidence that preserves task ownership,
+event identity, and effect receipts. A new backend does not create a second
+state model.
+
 ## Transport direction: Valhalla replaces the relay
 
 Valhalla is the intended transport for shared xcb state. Its signed messages,
@@ -182,6 +208,11 @@ updated compatibility docs, a migration path for saved conversations, and
 operator acceptance proving that every former daily operation has an agent or
 JSON equivalent. It should not be hidden inside a refactor or inferred from a
 crate deletion.
+
+The kernel may expose signed, capability-scoped extension manifests for
+adapters, projections, or hooks. Extensions carry an executable or schema
+digest and an explicit owner; mutable ambient extensions and provider-specific
+UI behavior remain outside the kernel contract.
 
 ## ALGAL intersection and hill-climbing
 
