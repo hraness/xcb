@@ -136,6 +136,11 @@ install_aicharts() {
     current=$("$aicharts" --version 2>/dev/null | sed -n 's/^aicharts \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' || true)
     if [ -z "$current" ] || version_older "$current" "$AICHARTS_VERSION"; then
       fetch_aicharts "$1" "$2" || return 0
+      # xcb usage connect pins the aicharts build it registered; renew it.
+      if [ -x "$1/xcb" ] && "$1/xcb" --json tools list 2>/dev/null | grep -q '"name":"aicharts"'; then
+        "$1/xcb" usage connect >/dev/null 2>&1 \
+          || warn "run xcb usage connect so tasks use the updated aicharts tools"
+      fi
     fi
   fi
   [ "$3" = yes ] || return 0

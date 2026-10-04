@@ -600,6 +600,26 @@ test("bootstrap adds the checked aicharts and turns on local usage history on a 
   expect(history).toBe("enabled\n");
 });
 
+test("bootstrap renews a connected aicharts tool registration after replacing aicharts", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "xcb-bootstrap-prefix-")));
+  roots.push(root);
+  const log = join(root, "xcb.log");
+  // An existing xcb whose tools include aicharts; it records each command.
+  const existing = `#!/bin/sh
+echo "$*" >> ${JSON.stringify(log)}
+case "$*" in '--json tools list') echo '{"servers":[{"name":"aicharts","tools":[]}]}' ;; esac
+`;
+  const prefix = join(root, "prefix");
+  mkdirSync(join(prefix, "bin"), { recursive: true });
+  writeFileSync(join(prefix, "bin/xcb"), existing, { mode: 0o755 });
+  const { result, history } = bootstrap("Linux", "x86_64", "200", aichartsEnv({ XCB_INSTALL_PREFIX: prefix }));
+  expect(result.status).toBe(0);
+  expect(existsSync(join(prefix, "bin/aicharts"))).toBe(true);
+  expect(readFileSync(log, "utf8").trim().split("\n")).toEqual(["--json tools list", "usage connect"]);
+  // xcb was already installed, so the history choice stays with the user.
+  expect(history).toBeNull();
+});
+
 test("bootstrap aicharts opt-outs and failures leave the xcb install alone", () => {
   const off = bootstrap("Linux", "x86_64", "200", aichartsEnv({ XCB_USAGE_HISTORY: "no" }));
   expect(off.result.status).toBe(0);
