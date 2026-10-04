@@ -867,7 +867,7 @@ mod tests {
             limit: 2,
             ..EventQuery::default()
         };
-        let mut iterator = client.events(query).expect("events");
+        let iterator = client.events(query).expect("events");
         let events = run(iterator.collect(8));
         assert_eq!(events.len(), 3);
         assert!(events.iter().all(|event| event.redacted));
