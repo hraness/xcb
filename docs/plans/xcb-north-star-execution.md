@@ -75,6 +75,66 @@ The first task may be released immediately. The protocol, journal, SDK,
 testing, Valhalla, migration, and benchmark tasks should remain independently
 reviewable and may be released in parallel once their dependency is satisfied.
 
+## Next local increment: state-driven progress and recovery
+
+This increment refines P1–P3 before expanding remote execution or autonomous
+policy changes. The [protocol seam](../protocol-seam.md) and
+[assurance record](../assurance.md) describe the implemented slices; the
+requirements below are follow-up work, not claims that the full loop ships.
+
+1. **Completion contract:** distinguish safety invariants from task completion
+   predicates. Bind predicates and evaluator versions to the task owner and
+   accepted inputs. Keep a provider summary or
+   `managed_program::ProgramSliceOutcome::Complete` as execution evidence,
+   never a substitute for product acceptance, required joins, or settled effects.
+2. **Observe and commit one step:** bind each proposal to its observed revision,
+   input and program digests, project grant, and checks. Validate again before
+   a new dispatch or publication. Preserve the existing atomic
+   checkpoint/child publication in `managed_program_state.rs`; stale work must
+   not dispatch, overwrite a newer head, or manufacture completion.
+3. **Durable recovery choices:** expose bounded choices through task/attention
+   projections and the SDK, tied to the failed command, expected revision, and
+   capability grant. Re-observation, verified checkpoint continuation,
+   reconciliation, and stopping have distinct meanings. No permanent TUI or
+   prompt-only restart menu is required. Wire changes require versioned
+   schemas and new Rust/TypeScript vectors rather than extending P1 silently.
+4. **Acceptance battery:** retain named cases for stale observation, changed
+   permissions, a rejected pure proposal, false completion from model text,
+   unresolved required children, crash before dispatch, and crash after a
+   possibly executed effect. Include a restart while awaiting a recovery
+   choice and a changed-head rejection of that choice. An uncertain effect
+   must remain held without a second dispatch, and the prior evidence remains
+   replayable.
+
+These cases extend P3's local ledger and both SDKs' conformance tests. Live
+provider process-exit and sandbox evidence remain separate requirements for
+activation; synthetic protocol evidence does not qualify them. Existing
+program budgets and generation limits remain in force, so a task that has not
+met its predicates stops, waits, or reports exhaustion rather than looping
+without a limit.
+
+## ALGAL consumer coordination
+
+xcb is an ALGAL consumer through `crates/xcb-runtime/Cargo.toml`, not only a
+reference for ALGAL's architecture. Its native dependency, `Cargo.lock`,
+managed-program adapter, digest-pinned controllers, persisted checkpoints,
+and scheduled occurrences belong in ALGAL's portfolio adoption register.
+
+For each relevant ALGAL change, the ALGAL integration owner coordinates a
+bounded xcb task with an xcb owner, supported immutable revision, changed
+contract scope, conformance cases, and recovery plan. The xcb owner verifies
+native replay, checkpoint/child publication, permissions, provider ownership,
+and protocol/SDK compatibility before delivering the update. A core repin
+alone cannot establish those outcomes.
+
+Previously accepted occurrences and historical evidence keep their original
+program and effect identities. Re-admit future controllers through the normal
+schedule and project-grant path; do not rewrite existing schedules, grants, or
+checkpoints to pick up a new runtime implicitly. Publication of ALGAL and
+activation of xcb remain separate decisions under each repository's checks.
+A compatibility hold has an owner and expiry and stays visible as unfinished
+portfolio adoption work. This plan update changes no running schedule.
+
 ## Testing investment and hill-climbing
 
 The assurance portfolio in `docs/vision.md` is the baseline classification.
