@@ -430,10 +430,10 @@ impl EventJournal {
         if path.as_os_str().is_empty() {
             return Err(Error::PrivateState);
         }
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
         }
         let mut connection = Connection::open(&path)?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
@@ -474,16 +474,16 @@ impl EventJournal {
             }
             return Err(Error::Conflict("event body or causal metadata changed"));
         }
-        if let Some(key) = &draft.idempotency_key {
-            if let Some(existing) = find_event_by_key(&tx, key)? {
-                if existing.event_digest == event_digest {
-                    tx.commit()?;
-                    return Ok(AppendOutcome::Duplicate(existing));
-                }
-                return Err(Error::Conflict(
-                    "idempotency key was reused with another body",
-                ));
+        if let Some(key) = &draft.idempotency_key
+            && let Some(existing) = find_event_by_key(&tx, key)?
+        {
+            if existing.event_digest == event_digest {
+                tx.commit()?;
+                return Ok(AppendOutcome::Duplicate(existing));
             }
+            return Err(Error::Conflict(
+                "idempotency key was reused with another body",
+            ));
         }
         let head = find_head(&tx, &draft.entity_id)?;
         validate_causality(&tx, head.as_ref(), draft.parent.as_ref(), draft.revision)?;
@@ -676,17 +676,14 @@ impl EventJournal {
         let mut last = std::collections::BTreeMap::new();
         for event in &page.events {
             event.validate_integrity()?;
-            if let Some(parent) = &event.parent {
-                if let Some(previous) = page
+            if let Some(parent) = &event.parent
+                && let Some(previous) = page
                     .events
                     .iter()
                     .find(|candidate| candidate.id == parent.id)
-                {
-                    if previous.sequence >= event.sequence || previous.event_digest != parent.digest
-                    {
-                        return Err(Error::Conflict("event causal order changed"));
-                    }
-                }
+                && (previous.sequence >= event.sequence || previous.event_digest != parent.digest)
+            {
+                return Err(Error::Conflict("event causal order changed"));
             }
             last.insert(event.entity_id.clone(), event.clone());
         }
