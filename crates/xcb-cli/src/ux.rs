@@ -235,7 +235,7 @@ mod tests {
 pub fn start_text() -> String {
     format!(
         "\
-Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin
+Excalibur (xcb) routes coding tasks across the Claude and Codex
 subscriptions you already pay for.
 
 Start here
@@ -260,7 +260,7 @@ xcb {}
 /// lines. Hidden internal commands are left out, and the rest that aren't
 /// here are in [`ADVANCED`]; a test keeps both lists in step with the parser.
 pub const ROOT_HELP: &str = "\
-Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin
+Excalibur (xcb) routes coding tasks across the Claude and Codex
 subscriptions you already pay for. Plain `xcb` opens your thread from any
 directory; xcb picks each task's project directory and says which.
 

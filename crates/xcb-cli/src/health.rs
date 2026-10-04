@@ -427,15 +427,6 @@ mod tests {
             account(measured, Health::Ready { busy: false }),
             account(
                 row(
-                    "a_deadbeefaaaaaaaaaaaaaaaaaaaaaaaa",
-                    Provider::Devin,
-                    "devin/a_deadbee",
-                    "Imported subscription",
-                ),
-                Health::Off,
-            ),
-            account(
-                row(
                     "a_00000000aaaaaaaaaaaaaaaaaaaaaaaa",
                     Provider::Claude,
                     "claude/a_0000000",
@@ -449,35 +440,30 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(
             lines[0],
-            "  ID           ACCOUNT           PROVIDER  PLAN      STATUS"
+            "  ID           ACCOUNT           PROVIDER  PLAN     STATUS"
         );
         assert_eq!(
             lines[1],
-            "  a_64b454c1…  user@example.com  codex     ChatGPT   needs sign-in"
+            "  a_64b454c1…  user@example.com  codex     ChatGPT  needs sign-in"
         );
         assert_eq!(
             lines[2],
-            "  a_7042a73e…  работа@例え.jp    codex     ChatGPT   limited · retry in ~8h 15m"
+            "  a_7042a73e…  работа@例え.jp    codex     ChatGPT  limited · retry in ~8h 15m"
         );
         assert_eq!(
             lines[3],
-            "> a_12345678…  me@example.com    claude    Max       ready · 62% left, resets in ~3h 10m"
+            "> a_12345678…  me@example.com    claude    Max      ready · 62% left, resets in ~3h 10m"
         );
         assert_eq!(
             lines[4],
-            "  a_deadbeef…  devin/a_deadbee   devin     Imported  off"
-        );
-        assert_eq!(
-            lines[5],
-            "  a_00000000…  claude/a_0000000  claude    –         busy"
+            "  a_00000000…  claude/a_0000000  claude    –        busy"
         );
         // The STATUS column starts at the same display column on every row,
         // including the one with wide characters.
         let status_column = width(lines[0].split("STATUS").next().unwrap());
-        for (line, status) in
-            lines[1..=5]
-                .iter()
-                .zip(["needs sign-in", "limited", "ready", "off", "busy"])
+        for (line, status) in lines[1..=4]
+            .iter()
+            .zip(["needs sign-in", "limited", "ready", "busy"])
         {
             let start = line.rfind(&format!("  {status}")).unwrap() + 2;
             assert_eq!(width(&line[..start]), status_column, "{line}");
@@ -502,18 +488,5 @@ mod tests {
         }
         assert!(text.contains("a.very.long.email"));
         assert!(text.contains('…'));
-    }
-
-    #[test]
-    fn devin_sign_in_keeps_the_same_account() {
-        let id = Id::new("a_devin").unwrap();
-        assert_eq!(
-            sign_in_step(Provider::Devin, &id),
-            "xcb accounts login a_devin"
-        );
-        assert_eq!(
-            sign_in_step(Provider::Codex, &id),
-            "xcb accounts login a_devin"
-        );
     }
 }

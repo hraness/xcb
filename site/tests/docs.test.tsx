@@ -134,25 +134,22 @@ describe("organized documentation", () => {
     expect(attributeValues(provider, '.xcb-docs-table-wrap[role="region"]', "aria-labelledby"))
       .toEqual(["provider-status-caption"]);
     expect(provider).toContain(`Claude Code ${supportedBuilds.claudeMinimum} or later within version 2`);
-    for (const build of [...supportedBuilds.codex, ...supportedBuilds.devin]) expect(provider).toContain(build);
+    for (const build of supportedBuilds.codex) expect(provider).toContain(build);
     for (const status of Object.values(providerStatus)) expect(occurrences(provider, rendered(status))).toBe(1);
     expect(textOf(provider)).toContain("xcb setup codex");
     expect(textOf(provider)).toContain("xcb accounts add claude --plan Max");
     expect(textOf(provider)).toContain("xcb accounts login <account-id>");
     expect(textOf(provider)).toContain("xcb accounts refresh <account-id>");
     expect(textOf(provider)).toContain("xcb accounts import-codex --source");
-    expect(textOf(provider)).toContain("xcb accounts import-devin --source");
     expect(textOf(provider)).toContain("xcb doctor --provider claude --qualify-sandbox");
     expect(textOf(provider)).toContain("profile xcb-bwrap /usr/bin/bwrap flags=(unconfined)");
-    expect(provider).toContain('id="devin"');
   });
 
   test("lists only provider builds the runtime or the reviewed catalog supports", async () => {
-    const [catalogSource, claude, codex, devin] = await Promise.all([
+    const [catalogSource, claude, codex] = await Promise.all([
       readFile(join(repository, "qualified-builds.json"), "utf8"),
       readFile(join(repository, "crates/xcb-runtime/src/claude.rs"), "utf8"),
       readFile(join(repository, "crates/xcb-runtime/src/codex/config.rs"), "utf8"),
-      readFile(join(repository, "crates/xcb-runtime/src/devin/config.rs"), "utf8"),
     ]);
     const catalog = JSON.parse(catalogSource) as Record<string, unknown>;
     const catalogVersions = (provider: string): string[] =>
@@ -161,9 +158,6 @@ describe("organized documentation", () => {
     expect(claude).toContain("pub const MAX_MAJOR: u64 = 2;");
     for (const build of supportedBuilds.codex) {
       expect(catalogVersions("codex").includes(build) || codex.includes(`"${build}"`)).toBe(true);
-    }
-    for (const build of supportedBuilds.devin) {
-      expect(catalogVersions("devin").includes(build) || devin.includes(`"${build}"`)).toBe(true);
     }
   });
 

@@ -199,9 +199,9 @@ certification on it is optimistic; see the measurements below.
 
 ## Measured on operator history
 
-A private corpus of 2,428 follow-up messages from Claude Code, Codex and
-Devin sessions, each paired with the assistant turn before it and its tool
-call count. Only aggregate numbers are published.
+A private corpus of 2,428 follow-up messages from coding-agent sessions,
+each paired with the assistant turn before it and its tool call count.
+Only aggregate numbers are published.
 
 | | |
 | --- | --- |

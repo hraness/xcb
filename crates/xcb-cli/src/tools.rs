@@ -16,7 +16,7 @@ pub enum Commands {
     List,
     /// Connect the installed desktop browser and computer tools with automatic review.
     SetupComputer,
-    /// Connect Claude's Chrome extension to Codex, Claude, and Devin.
+    /// Connect Claude's Chrome extension to Codex and Claude.
     ///
     /// Opens full Claude sign-in if needed and requires a signed-in extension.
     /// On macOS, refresh credentials use a dedicated xcb Keychain entry.
@@ -119,7 +119,7 @@ pub async fn execute(store: &Store, command: Commands, machine: bool) -> Result<
                     "Configured desktop browser and computer tools for Codex with automatic approval review."
                 );
                 println!(
-                    "Tasks that need a signed-in browser or native desktop control stay with Codex, including work handed off by Claude or Devin."
+                    "Tasks that need a signed-in browser or native desktop control stay with Codex, including work handed off by Claude."
                 );
             }
         }
@@ -199,10 +199,10 @@ pub async fn execute(store: &Store, command: Commands, machine: bool) -> Result<
             if machine {
                 println!(
                     "{}",
-                    json!({"configured":"claude_browser", "providers":["codex","claude","devin"]})
+                    json!({"configured":"claude_browser", "providers":["codex","claude"]})
                 );
             } else {
-                println!("Configured Claude's Chrome extension for Codex, Claude, and Devin.");
+                println!("Configured Claude's Chrome extension for Codex and Claude.");
                 println!(
                     "The extension's browser group stays open between tasks; xcb closes only tabs created by each task."
                 );
@@ -282,7 +282,7 @@ pub async fn execute(store: &Store, command: Commands, machine: bool) -> Result<
 
 fn providers(server: &CapabilityServer) -> Vec<&'static str> {
     match server.transport {
-        CapabilityTransport::Shared => vec!["codex", "claude", "devin"],
+        CapabilityTransport::Shared => vec!["codex", "claude"],
         CapabilityTransport::CodexNative => vec!["codex"],
     }
 }

@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 /** The docs overview's headline and meta description, shared with its share card. */
 export const docsHeadline = "Set up xcb and route your first task";
-export const docsDescription = "Guides to installing xcb, connecting Claude, Codex, or Devin accounts, and sending it work from its terminal, another agent, or your own app.";
+export const docsDescription = "Guides to installing xcb, connecting Claude or Codex accounts, and sending it work from its terminal, another agent, or your own app.";
 
 /** Sidebar and overview groups, in order: both readers, then each reader. */
 export const docsGroups = [
@@ -13,9 +13,9 @@ export const docsGroups = [
 export const docsTopics = [
   { slug: "getting-started", title: "Getting started", description: "Install xcb, connect a Claude account, and send your first task, ending with a fix xcb routed to one of your accounts and made in a practice project.", group: "Start here" },
   { slug: "how-routing-works", title: "How routing works", description: "How xcb picks an account and model for each task: which accounts can take it, how models are ranked, and why the account stays held until the provider exits.", group: "Start here" },
-  { slug: "security", title: "Security and privacy", description: "What stays on your machine, what xcb sends to Claude, Codex, and Devin, what the optional judge sees, and where credentials live outside your projects.", group: "Start here" },
+  { slug: "security", title: "Security and privacy", description: "What stays on your machine, what xcb sends to Claude and Codex, what the optional judge sees, and where credentials live outside your projects.", group: "Start here" },
   { slug: "projects-and-tasks", title: "Projects and tasks", description: "Work from one thread across your projects: how xcb picks each task's folder, and how to follow, guide, cancel, and resume tasks that outlive the terminal.", group: "Daily use" },
-  { slug: "providers", title: "Accounts and models", description: "Connect Claude, Codex, or Devin accounts, check which provider builds xcb supports, and choose an account or model when you want a specific one.", group: "Daily use" },
+  { slug: "providers", title: "Accounts and models", description: "Connect Claude or Codex accounts, check which provider builds xcb supports, and choose an account or model when you want a specific one.", group: "Daily use" },
   { slug: "workspace", title: "Tests and builds", description: "Set up the offline Linux VM that runs your project's tests and builds on macOS ARM64, prepare public dependencies, and see what the runner can't do.", group: "Daily use" },
   { slug: "customization", title: "Customize xcb", description: "Change panes, continuation, context management, the per-turn deadline, hooks, and the optional routing judge, and see where each setting is stored.", group: "Daily use" },
   { slug: "reflexes", title: "Learned routing and continuation", description: "How xcb learns which model tier you want and notices when a worker stopped short, and how to inspect, teach, and roll it back.", group: "Daily use" },

@@ -42,12 +42,12 @@ export default function NotFound() {
             {
               href: "/docs/providers",
               label: "Accounts & models",
-              description: "Connect Claude, Codex, or Devin and choose the account and model for each task.",
+              description: "Connect Claude or Codex and choose the account and model for each task.",
             },
             {
               href: "/compare",
               label: "Compare",
-              description: "Where xcb fits next to Claude Code, Codex, OpenCode, and Devin.",
+              description: "Where xcb fits next to Claude Code, Codex, and OpenCode.",
             },
             {
               href: "/install",

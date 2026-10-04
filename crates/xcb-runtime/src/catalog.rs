@@ -62,10 +62,7 @@ impl Catalog {
             return Err(Error::Protocol("catalog version"));
         }
         let mut catalog = Catalog::default();
-        for (provider, builds) in [
-            (Provider::Claude, raw.claude),
-            (Provider::Codex, raw.codex),
-        ] {
+        for (provider, builds) in [(Provider::Claude, raw.claude), (Provider::Codex, raw.codex)] {
             let Some(builds) = builds else { continue };
             if builds.len() > ENTRY_LIMIT {
                 return Err(Error::Protocol("catalog size"));
@@ -89,7 +86,10 @@ impl Catalog {
         }
         if let Some(deny) = raw.deny {
             for (provider, digests) in deny {
-                if !Provider::SUPPORTED.iter().any(|known| known.as_str() == provider) {
+                if !Provider::SUPPORTED
+                    .iter()
+                    .any(|known| known.as_str() == provider)
+                {
                     return Err(Error::Protocol("catalog deny provider"));
                 }
                 if digests.len() > ENTRY_LIMIT {

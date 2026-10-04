@@ -21,7 +21,7 @@ export const routerModes: readonly RouterMode[] = ["reset", "limit"];
 export type BoardAccount = Readonly<{
   id: string;
   name: string;
-  provider: "claude" | "codex" | "devin";
+  provider: "claude" | "codex";
   plan: string;
   /** Percent of the current usage window left, or null when the provider reports no meter. */
   left: number | null;
@@ -39,13 +39,11 @@ export const boardAccounts: Readonly<Record<RouterMode, readonly BoardAccount[]>
     { id: "a_3f9c0e12…", name: "work", provider: "claude", plan: "Max", left: 62, status: "ready · 62% left, resets in ~38m" },
     { id: "a_7b21d4aa…", name: "personal", provider: "claude", plan: "Max", left: 81, status: "ready · 81% left, resets in ~4d" },
     { id: "a_c0de5a77…", name: "chatgpt", provider: "codex", plan: "Plus", left: 45, status: "busy · 45% left, resets in ~2h 10m" },
-    { id: "a_d0e1f2a3…", name: "team", provider: "devin", plan: "Team", left: null, status: "ready" },
   ],
   limit: [
     { id: "a_3f9c0e12…", name: "work", provider: "claude", plan: "Max", left: 0, status: "limited · retry in ~1h 52m" },
     { id: "a_7b21d4aa…", name: "personal", provider: "claude", plan: "Max", left: 79, status: "busy · 79% left, resets in ~4d" },
     { id: "a_c0de5a77…", name: "chatgpt", provider: "codex", plan: "Plus", left: 45, status: "busy · 45% left, resets in ~2h 4m" },
-    { id: "a_d0e1f2a3…", name: "team", provider: "devin", plan: "Team", left: null, status: "ready" },
   ],
 };
 
@@ -86,12 +84,10 @@ export const taskRows: Readonly<Record<RouterMode, readonly string[]>> = {
   reset: [
     "t_8d21  running · Fix the failing parser test · worker is running · quota leader · claude/opus · a_3f9c0e12",
     "t_77c0  needs input · Rename the billing module · Which name: billing or invoicing? · codex/gpt-codex · a_c0de5a77",
-    "t_5a93  completed · Add a CSV export · Export added with tests · devin/swe · a_d0e1f2a3",
   ],
   limit: [
     "t_8d21  running · Fix the failing parser test · worker is running · quota leader · claude/opus · a_7b21d4aa",
     "t_77c0  needs input · Rename the billing module · Which name: billing or invoicing? · codex/gpt-codex · a_c0de5a77",
-    "t_5a93  completed · Add a CSV export · Export added with tests · devin/swe · a_d0e1f2a3",
   ],
 };
 

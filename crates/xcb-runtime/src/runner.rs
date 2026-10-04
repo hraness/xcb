@@ -2268,7 +2268,9 @@ pub async fn probe(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<Vec
         return probe_codex(store, pin, account).await;
     }
     if pin.provider == Provider::Devin {
-        return Err(Error::Unavailable("Devin support was removed; use Claude or Codex"));
+        return Err(Error::Unavailable(
+            "Devin support was removed; use Claude or Codex",
+        ));
     }
     let now = now_ms();
     let model = ModelChoice {
@@ -2620,7 +2622,9 @@ pub async fn run(
         return run_prepared(store, input, cancel, observer, launch, protocol, workspace).await;
     }
     if session.model.provider == Provider::Devin {
-        return Err(Error::Unavailable("Devin support was removed; use Claude or Codex"));
+        return Err(Error::Unavailable(
+            "Devin support was removed; use Claude or Codex",
+        ));
     }
     if session.model.provider != Provider::Claude {
         return Err(Error::Unavailable(

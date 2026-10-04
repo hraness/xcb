@@ -66,25 +66,25 @@ export async function runCliChat(options: { workspace: string; sessionId?: strin
       sessions.close();
       return 2;
     }
-    try {
-      workspacePath = await resolveWorkspace(resumed.workspace);
-    } catch {
-      process.stderr.write(`${red("xcb-compat:")} session workspace is gone: ${resumed.workspace}\n`);
-      sessions.close();
-      return 2;
-    }
-  } else {
-    try {
-      workspacePath = await resolveWorkspace(options.workspace);
-    } catch (error) {
-      process.stderr.write(`${red("xcb-compat:")} ${error instanceof Error ? error.message : "invalid workspace"}\n`);
-      sessions.close();
-      return 2;
-    }
+  }
+  const recordedProvider = resumed?.provider;
+  if (recordedProvider === "devin") {
+    process.stderr.write(`${red("xcb-compat:")} Devin support was removed; saved sessions and transcripts remain on disk.\n`);
+    sessions.close();
+    return 2;
+  }
+  try {
+    workspacePath = await resolveWorkspace(resumed?.workspace ?? options.workspace);
+  } catch (error) {
+    const detail = resumed === null ? (error instanceof Error ? error.message : "invalid workspace")
+      : `session workspace is gone: ${resumed.workspace}`;
+    process.stderr.write(`${red("xcb-compat:")} ${detail}\n`);
+    sessions.close();
+    return 2;
   }
   try { assertWorkspaceStateSeparation(workspacePath, stateRoot); }
   catch (error) { sessions.close(); throw error; }
-  const providerName: CliProviderName = options.provider ?? resumed?.provider ?? "claude";
+  const providerName: CliProviderName = options.provider ?? recordedProvider ?? "claude";
   if (resumed !== null && resumed.provider !== providerName) {
     process.stderr.write(`${red("xcb-compat:")} session ${resumed.id} belongs to provider ${resumed.provider} — resume with \`--provider ${resumed.provider}\`.\n`);
     sessions.close();

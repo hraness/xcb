@@ -65,7 +65,7 @@ export const filmCopy: FilmCopy = {
   proof: {
     caption: "Your own sign-ins. No API keys. Free and MIT licensed.",
     items: [
-      { value: factNumber(launchFacts.providers.value), label: "providers: Claude, Codex, Devin" },
+      { value: factNumber(launchFacts.providers.value), label: "providers: Claude and Codex" },
       { value: factNumber(launchFacts.meterMaxAge.value), suffix: " min", label: "longest a usage reading counts" },
     ],
   },

@@ -1,6 +1,6 @@
 # Browser, computer, and shared tools
 
-The current source build of xcb can connect host MCP tool servers to Claude, Codex, and Devin. Registered
+The current source build of xcb can connect host MCP tool servers to Claude and Codex. Registered
 shared tools are available through each provider's xcb tool bridge.
 Screenshots from shared MCP servers are stored privately with the session
 and can be reopened after a provider handoff.
@@ -21,10 +21,10 @@ tool directory before connecting it. A changed or unsupported installation
 must be connected again. Your browser profiles and account sign-ins stay in
 their existing locations.
 
-This connector is available to Codex. Claude and Devin can use shared MCP
+This connector is available to Codex. Claude can use shared MCP
 servers and can hand a task to Codex when it needs your signed-in browser or
 native desktop application control. Codex then finishes that task; this is
-not a nested desktop-tool session inside Claude or Devin.
+not a nested desktop-tool session inside Claude.
 An approval denial does not grant permission to try the same action through
 another provider.
 
@@ -58,7 +58,7 @@ to that token. Full Claude browser sign-in is currently available on macOS;
 use the Codex browser connector on other platforms when available.
 
 This connection supports screenshots, page reading, navigation, clicks, and
-form input for Codex, Claude, and Devin. It uses the checked Claude Code
+form input for Codex and Claude. It uses the checked Claude Code
 2.1.285 browser server. If several Claude accounts are enabled in xcb, use
 `xcb tools setup-browser --account NAME` to select the account matching your
 extension. xcb holds that account while its browser server runs; the other
@@ -121,7 +121,7 @@ xcb run --desktop -p 'Inspect the open document in the desktop app and summarize
 
 xcb requires Codex for this work and prefers Astra among available Codex
 routes. The requirement stays with the session across retries, account
-changes, and resumptions. A conflicting Claude or Devin pin reports that
+changes, and resumptions. A conflicting Claude pin reports that
 conflict instead of silently changing the pin. If no suitable Codex account
 is available, the task waits or reports the unavailable route.
 

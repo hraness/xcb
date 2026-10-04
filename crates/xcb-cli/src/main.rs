@@ -467,9 +467,6 @@ enum Commands {
     /// Supervise one owned background process and bound its diagnostic logs.
     #[command(hide = true)]
     ServiceRun,
-    /// Internal: stdio bridge used by a provider's MCP helper.
-    #[command(name = "broker-stdio", hide = true)]
-    BrokerStdio,
     /// Internal: reviewed native computer-use transport.
     #[command(name = "native-mcp-stdio", hide = true)]
     NativeMcpStdio,
@@ -873,7 +870,7 @@ enum RoutingCommand {
 enum NeverCommand {
     /// Exclude every route the pattern matches (provider/model-glob[/effort]).
     Add {
-        /// Route pattern such as devin/swe-* or codex/gpt-5.6-sol/low.
+        /// Route pattern such as claude/opus*/max or codex/gpt-5.6-sol/low.
         pattern: String,
     },
     /// Stop excluding a pattern.
@@ -1060,19 +1057,6 @@ fn import_acknowledgement(id: &Id) -> serde_json::Value {
     json!({"version":1,"account":id,"sourcePreserved":true})
 }
 
-async fn broker_stdio() -> Result<i32> {
-    let socket = std::env::var_os("XCB_BROKER_SOCKET")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .ok_or(Error::Unavailable("broker socket is unavailable"))?;
-    let token = zeroize::Zeroizing::new(
-        std::env::var("XCB_BROKER_TOKEN")
-            .map_err(|_| Error::Unavailable("broker authority is unavailable"))?,
-    );
-    xcb_runtime::devin::broker_stdio(&socket, &token).await?;
-    Ok(0)
-}
-
 async fn native_mcp_stdio() -> Result<i32> {
     #[cfg(unix)]
     {
@@ -1218,7 +1202,9 @@ fn provider_name(provider: Provider) -> &'static str {
 /// sign-in after `xcb accounts add` works without a separate doctor step.
 async fn ensure_pin(root: &std::path::Path, provider: Provider) -> Result<Pin> {
     if provider == Provider::Devin {
-        return Err(Error::Unavailable("Devin support was removed; use Claude or Codex"));
+        return Err(Error::Unavailable(
+            "Devin support was removed; use Claude or Codex",
+        ));
     }
     if Pin::recorded(root, provider) {
         return Pin::load(root, provider);
@@ -1246,7 +1232,9 @@ async fn ensure_pin(root: &std::path::Path, provider: Provider) -> Result<Pin> {
 /// Refuse a provider build xcb can't run, saying why and what fixes it.
 fn require_supported(root: &std::path::Path, pin: &Pin) -> Result<()> {
     if pin.provider == Provider::Devin {
-        return Err(Error::Unavailable("Devin support was removed; use Claude or Codex"));
+        return Err(Error::Unavailable(
+            "Devin support was removed; use Claude or Codex",
+        ));
     }
     if runner::provider_admitted(root, pin) {
         return Ok(());
@@ -1598,12 +1586,6 @@ async fn dispatch_inner(
         Some(Commands::Update { .. } | Commands::Upgrade { .. })
     );
     process::initialize_host()?;
-    // The provider's MCP helper must not open application state or emit any
-    // ordinary CLI output on its protocol-only standard streams.
-    if matches!(&cli.command, Some(Commands::BrokerStdio)) {
-        *installation = xcb_runtime::update::hold_installation(std::path::Path::new("/"))?;
-        return broker_stdio().await;
-    }
     if matches!(&cli.command, Some(Commands::NativeMcpStdio)) {
         *installation = xcb_runtime::update::hold_installation(std::path::Path::new("/"))?;
         return native_mcp_stdio().await;
@@ -1896,7 +1878,7 @@ async fn dispatch_inner(
                 // Install both handlers before routing, which can start provider
                 // work, and before any provider starts. SIGTERM must use the same
                 // independent join/custody path as interactive Ctrl-C.
-                let stop = stop::Stop::install()?;
+                let mut stop = stop::Stop::install()?;
                 let _interrupt = AbortOnDrop(tokio::spawn(async move {
                     stop.recv().await;
                     let _ = cancel.send(true);
@@ -2264,7 +2246,7 @@ async fn dispatch_inner(
                         format!("xcb --json accounts add {provider}"),
                     ));
                 }
-                let mut stop = stop::Stop::install()?;
+                let stop = stop::Stop::install()?;
                 let accounts: Vec<_> = store
                     .accounts()?
                     .into_iter()
@@ -2757,11 +2739,14 @@ async fn dispatch_inner(
             Ok(0)
         }
         Some(Commands::Offers { refresh }) => {
-            let state = if refresh {
+            let mut state = if refresh {
                 xcb_runtime::offers::refresh(store.root())?
             } else {
                 xcb_runtime::offers::load(store.root())?
             };
+            state
+                .offers
+                .retain(|offer| Provider::SUPPORTED.contains(&offer.provider));
             if cli.json {
                 print_json(state)?;
             } else {
@@ -3872,7 +3857,6 @@ async fn dispatch_inner(
             target_port,
             child,
         }) => egress_forward(&socket, port, &lo_up, &env_file, target_port, &child).await,
-        Some(Commands::BrokerStdio) => broker_stdio().await,
         Some(Commands::NativeMcpStdio) => native_mcp_stdio().await,
         // Dispatched before any state opens.
         Some(Commands::SandboxProbe { .. }) => Ok(2),
@@ -4282,7 +4266,6 @@ async fn main() {
         Some(
             Commands::ManagedDaemon
                 | Commands::ServiceRun
-                | Commands::BrokerStdio
                 | Commands::NativeMcpStdio
                 | Commands::EgressForward { .. }
                 | Commands::SandboxProbe { .. }
@@ -5016,7 +4999,7 @@ mod tests {
 
     #[test]
     fn account_add_interactive_policy_keeps_automation_create_only() {
-        for provider in [Provider::Claude, Provider::Codex, Provider::Devin] {
+        for provider in Provider::SUPPORTED {
             assert!(super::interactive_account_add(false, provider, true));
             assert!(!super::interactive_account_add(true, provider, true));
             assert!(!super::interactive_account_add(false, provider, false));
@@ -5413,88 +5396,8 @@ mod tests {
         assert!(parse(&["--inspect", "--expected-generation", &expected]).is_err());
     }
 
-    #[test]
-    fn devin_import_requires_an_explicit_source() {
-        let cli = Cli::try_parse_from([
-            "xcb",
-            "accounts",
-            "import-devin",
-            "--source",
-            "/private/source/credentials.toml",
-        ])
-        .unwrap();
-        assert!(matches!(cli.command, Some(Commands::Accounts {
-            command: Some(AccountCommand::ImportDevin { source }),
-        }) if source == std::path::Path::new("/private/source/credentials.toml")));
-        assert!(Cli::try_parse_from(["xcb", "accounts", "import-devin"]).is_err());
-        assert!(
-            Cli::try_parse_from(["xcb", "accounts", "import-devin", "--label", "Work account"])
-                .is_err()
-        );
-        assert!(
-            Cli::try_parse_from(["xcb", "accounts", "import-devin", "--token", "synthetic"])
-                .is_err()
-        );
-    }
-
     fn joined((added, next): (String, String)) -> String {
         format!("{added}\nNext: {next}")
-    }
-
-    #[test]
-    fn devin_added_account_explains_token_and_explicit_import_paths() {
-        let id = Id::new("a_devin").unwrap();
-        let account = PublicAccount {
-            id: &id,
-            provider: Provider::Devin,
-            name: "devin/a_devin".into(),
-            email: None,
-            subscription: "Subscription",
-            enabled: true,
-        };
-        let message = joined(account.added_message());
-        assert!(message.contains("xcb accounts login a_devin"));
-        assert!(!message.contains("<path"));
-    }
-
-    #[test]
-    fn catalog_selection_requires_explicit_devin_credentials_and_rejects_ambient_discovery() {
-        let directory = xcb_core::canonical(std::env::temp_dir())
-            .unwrap()
-            .join(xcb_runtime::new_id("xcb_cli").as_str());
-        let store = Store::open(&directory).unwrap();
-        let devin = store
-            .add_account(Provider::Devin, "Subscription", now_ms(), None)
-            .unwrap();
-        let claude = store
-            .add_account(Provider::Claude, "Subscription", now_ms(), None)
-            .unwrap();
-        assert!(catalog_account(&store, Provider::Devin, None, false).is_err());
-        assert!(catalog_account(&store, Provider::Devin, Some(devin.id.as_str()), false).is_err());
-        xcb_runtime::devin::auth::store_token(&store, &devin.id, b"synthetic-token").unwrap();
-        assert_eq!(
-            catalog_account(&store, Provider::Devin, Some(devin.id.as_str()), false).unwrap(),
-            Some(devin.id.clone())
-        );
-        assert!(catalog_account(&store, Provider::Devin, Some(claude.id.as_str()), false).is_err());
-        for provider in Provider::SUPPORTED {
-            let error = catalog_account(&store, provider, None, true).unwrap_err();
-            assert!(error.to_string().contains("--from-native"));
-        }
-        assert!(catalog_account(&store, Provider::Devin, Some(devin.id.as_str()), true).is_err());
-        assert!(
-            catalog_account(&store, Provider::Claude, None, false)
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            catalog_account(&store, Provider::Codex, None, false)
-                .unwrap()
-                .is_none()
-        );
-        assert!(store.unsettled_runs().unwrap().is_empty());
-        drop(store);
-        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -5541,26 +5444,13 @@ mod tests {
     }
 
     #[test]
-    fn broker_helper_accepts_no_credentials_as_arguments_and_stays_hidden() {
-        assert!(matches!(
-            Cli::try_parse_from(["xcb", "broker-stdio"])
-                .unwrap()
-                .command,
-            Some(Commands::BrokerStdio)
-        ));
+    fn internal_commands_stay_hidden() {
         assert!(matches!(
             Cli::try_parse_from(["xcb", "managed-daemon"])
                 .unwrap()
                 .command,
             Some(Commands::ManagedDaemon)
         ));
-        assert!(Cli::try_parse_from(["xcb", "broker-stdio", "--token", "synthetic"]).is_err());
-        assert!(
-            !Cli::command()
-                .render_long_help()
-                .to_string()
-                .contains("broker-stdio")
-        );
         assert!(
             !Cli::command()
                 .render_long_help()
@@ -5639,13 +5529,13 @@ mod tests {
         assert_eq!(output["outcome"]["failure"], "no_reply");
         // The recorded facts are unchanged; only the report names the gap.
         assert_eq!(result.facts.failure, None);
-        let error = no_reply_error(Provider::Devin, &session);
+        let error = no_reply_error(Provider::Claude, &session);
         assert_eq!(
             ux::next_step(&error).as_deref(),
             Some("xcb resume s_silent")
         );
         let sentence = ux::sentence(&error);
-        assert!(sentence.starts_with("Devin ended the turn without a reply or file changes"));
+        assert!(sentence.starts_with("Claude Code ended the turn without a reply or file changes"));
         assert!(sentence.contains("--model"));
         // Settled file changes without a reply still succeed.
         result.facts.effects = EffectState::Settled;

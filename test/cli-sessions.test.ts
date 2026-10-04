@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 
 import { CliSessionStore } from "../src/cli/sessions.ts";
 import { privateDirectory } from "../src/cli/state.ts";
+import { openAccountDatabase } from "../src/sqlite-port.ts";
 
 async function fixture() {
   const base = await realpath(await mkdtemp(join(tmpdir(), "xcb-t-")));
@@ -26,6 +27,34 @@ describe("cli session store", () => {
     } finally {
       store.close();
     }
+  });
+
+  test("keeps retired-provider history readable without creating or extending sessions", async () => {
+    const { base, open } = await fixture();
+    const original = await open();
+    const session = await original.create({ provider: "claude", accountId: "local", workspace: "/w", model: "retired-model", now: 1 });
+    const entries = [{ role: "user" as const, text: "historical task", at: 2 }];
+    await original.record(session, entries, 3);
+    original.close();
+    const database = await openAccountDatabase(join(base, "sessions", "sessions.sqlite"));
+    database.query("UPDATE xcb_cli_sessions SET provider='devin' WHERE id=?").run(session.id);
+    database.close();
+    const store = await open();
+    try {
+      const archived = store.get(session.id)!;
+      expect(archived.provider).toBe("devin");
+      expect(store.list().map(({ provider }) => provider)).toEqual(["devin"]);
+      expect(await store.transcript(session.id)).toEqual(entries);
+      await expect(store.create({ provider: "devin" as never, accountId: "local", workspace: "/w", model: "retired-model", now: 4 })).rejects.toThrow("SESSION_PROVIDER_INVALID");
+      await expect(store.record(archived, entries, 4)).rejects.toThrow("SESSION_PROVIDER_REMOVED");
+      expect(await store.transcript(session.id)).toEqual(entries);
+      expect(store.list()).toHaveLength(1);
+    } finally {
+      store.close();
+    }
+    const reopened = await open();
+    try { expect(reopened.get(session.id)?.provider).toBe("devin"); }
+    finally { reopened.close(); }
   });
 
   test("records bounded transcript entries and titles", async () => {

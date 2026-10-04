@@ -79,7 +79,7 @@ export function renderReleaseNotes(input: ReleaseNotesInput): string {
       `cd xcb && XCB_VERSION=${version} ./scripts/install-native.sh`,
       "```",
     ].join("\n"),
-    "On Windows x86_64, this installs `xcb.exe` from the release's `.zip` into `%LOCALAPPDATA%\\Programs\\xcb\\bin`. It is not code-signed, and Claude Code, Codex, and Devin run only in the Linux build inside WSL2:",
+    "On Windows x86_64, this installs `xcb.exe` from the release's `.zip` into `%LOCALAPPDATA%\\Programs\\xcb\\bin`. It is not code-signed, and Claude Code and Codex run only in the Linux build inside WSL2:",
     [
       "```powershell",
       `$env:XCB_VERSION = '${version}'; irm https://raw.githubusercontent.com/${repository}/${tag}/scripts/install.ps1 | iex`,

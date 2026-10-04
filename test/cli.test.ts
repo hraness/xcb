@@ -1,4 +1,5 @@
 import { CliSessionStore } from "../src/cli/sessions.ts";
+import { openAccountDatabase } from "../src/sqlite-port.ts";
 import { describe, expect, test } from "bun:test";
 import { mkdtemp, realpath, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -123,6 +124,29 @@ describe("xcb CLI", () => {
     const { code, stderr } = await cli(["resume", "s_nonexistent"]);
     expect(code).toBe(2);
     expect(stderr).toContain("session not found");
+  });
+
+  test("lists retired-provider sessions but refuses resume without creating provider state", async () => {
+    const root = await stateDir();
+    const sessions = await CliSessionStore.open(join(root, "sessions"));
+    const session = await sessions.create({ provider: "claude", accountId: "local", workspace: ROOT, model: "retired-model", now: 1 });
+    sessions.close();
+    const database = await openAccountDatabase(join(root, "sessions", "sessions.sqlite"));
+    database.query("UPDATE xcb_cli_sessions SET provider='devin' WHERE id=?").run(session.id);
+    database.close();
+    const listed = await cli(["sessions"], "", root);
+    expect(listed.code, listed.stderr).toBe(0);
+    expect(listed.stdout).toContain(session.id);
+    expect(listed.stdout).toContain("devin");
+    for (const args of [["resume", session.id], ["resume", session.id, "--provider", "claude"]]) {
+      const resumed = await cli(args, "", root);
+      expect(resumed.code, resumed.stderr).toBe(2);
+      expect(resumed.stderr).toContain("Devin support was removed");
+    }
+    await expect(stat(join(root, "account-leases.sqlite"))).rejects.toMatchObject({ code: "ENOENT" });
+    const reopened = await CliSessionStore.open(join(root, "sessions"));
+    try { expect(reopened.get(session.id)?.provider).toBe("devin"); }
+    finally { reopened.close(); }
   });
 
   test("resume inherits the stored provider when --provider is omitted", async () => {

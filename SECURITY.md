@@ -8,7 +8,7 @@ builds whose executable it has checked; the
 [security and privacy](https://xcb.sh/docs/security) pages describe what that
 covers. A model list, a passing metadata check, or a synthetic test is not a
 security guarantee for a provider build. The `xcb-compat` CLI keeps its Codex
-and Devin task routes disabled.
+task routes disabled.
 
 Owner-registered host MCP servers run outside the provider sandbox and can
 access resources beyond the project according to their own permissions.

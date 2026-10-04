@@ -49,7 +49,7 @@ test("the homepage leads with the registry headline and installs with one comman
   const heroSummary: string[] = [];
   new HTMLRewriter().on('header[aria-labelledby="hero-title"] .hraness-marketing-hero__summary', { text(chunk) { heroSummary.push(chunk.text); } }).transform(html);
   expect(heroSummary.join("")).toBe(productMessaging.hero.summary);
-  for (const provider of ["Claude", "Codex", "Devin"]) expect(heroHeadings.join("")).toContain(provider);
+  for (const provider of ["Claude", "Codex"]) expect(heroHeadings.join("")).toContain(provider);
   expect(heroSummary.join("")).toContain("account");
   if (publishedRelease === null) {
     expect(html).toContain("./scripts/install-native.sh");

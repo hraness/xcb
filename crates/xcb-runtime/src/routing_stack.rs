@@ -77,6 +77,10 @@ impl RoutePattern {
     /// Parses `provider/model-glob[/effort]`; every rejection names the
     /// segment at fault.
     pub fn parse(text: &str) -> Result<Self> {
+        Self::parse_saved(text, false)
+    }
+
+    fn parse_saved(text: &str, allow_retired: bool) -> Result<Self> {
         if text.is_empty() || text.len() > MAX_PATTERN_BYTES {
             return Err(xcb_core::Error::Invalid("routing pattern length").into());
         }
@@ -94,7 +98,10 @@ impl RoutePattern {
             )
             .into());
         }
-        if provider != "*" && provider.parse::<Provider>().is_err() {
+        if provider != "*"
+            && provider.parse::<Provider>().is_err()
+            && !(allow_retired && provider == Provider::Devin.as_str())
+        {
             return Err(xcb_core::Error::Invalid(
                 "routing pattern provider; use claude, codex or *",
             )
@@ -255,7 +262,7 @@ impl Default for TierPatterns {
 }
 
 /// `routing` in `config.json`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RoutingConfig {
     /// Routes never used: not by automatic routing, not by failover, and not
@@ -267,16 +274,6 @@ pub struct RoutingConfig {
     pub tiers: TierPatterns,
 }
 
-impl Default for RoutingConfig {
-    fn default() -> Self {
-        Self {
-            never: Vec::new(),
-            fallback_providers: Vec::new(),
-            tiers: TierPatterns::default(),
-        }
-    }
-}
-
 impl RoutingConfig {
     pub fn validate(&self) -> Result<()> {
         for list in [&self.never].into_iter().chain(self.tier_lists()) {
@@ -284,10 +281,10 @@ impl RoutingConfig {
                 return Err(xcb_core::Error::Limit("routing patterns").into());
             }
             for pattern in list {
-                RoutePattern::parse(pattern)?;
+                RoutePattern::parse_saved(pattern, true)?;
             }
         }
-        if self.fallback_providers.len() > Provider::SUPPORTED.len() {
+        if self.fallback_providers.len() > Provider::ALL.len() {
             return Err(xcb_core::Error::Limit("routing fallback providers").into());
         }
         Ok(())
@@ -312,7 +309,7 @@ impl RoutingConfig {
     }
 
     /// A parsed pattern list; patterns that fail to parse are skipped, which
-    /// a validated configuration never has.
+    /// includes inactive patterns saved for retired providers.
     fn parsed(patterns: &[String]) -> impl Iterator<Item = RoutePattern> + '_ {
         patterns
             .iter()
@@ -331,7 +328,9 @@ impl RoutingConfig {
     /// Zero-based index of the first pattern in the tier that matches the
     /// model; `None` when no pattern does.
     pub fn position(&self, tier: Tier, model: &ModelChoice) -> Option<usize> {
-        Self::parsed(self.patterns(tier)).position(|pattern| pattern.matches(model))
+        self.patterns(tier).iter().position(|pattern| {
+            RoutePattern::parse(pattern).is_ok_and(|pattern| pattern.matches(model))
+        })
     }
 }
 
@@ -506,8 +505,9 @@ mod tests {
         long.tiers.meaty = vec!["codex/gpt-*/high".into(); MAX_PATTERNS + 1];
         assert!(long.validate().is_err());
         let mut bad = RoutingConfig::default();
-        bad.never.push("devin/swe-*".into());
+        bad.never.push("devin/swe-*/turbo".into());
         assert!(bad.validate().is_err());
+        assert!(RoutePattern::parse("devin/swe-*").is_err());
     }
 
     #[test]

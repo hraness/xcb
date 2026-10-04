@@ -12,9 +12,7 @@
 - `src/` owns provider-neutral routing, account leases, model selection,
   scoped tool contracts, the `router.ts` subscription-router entry point
   (`createSubscriptionRouter`) that bundles the lease store and qualified task
-  adapters for embedding hosts, the unqualified Devin ACP task adapter
-  (`devin-acp.ts`, `devin-client.ts`, `devin-adapter.ts`, `devin-mcp.ts`),
-  per-account browser-session custody (`browser-session.ts`), and the
+  adapters for embedding hosts, per-account browser-session custody (`browser-session.ts`), and the
   provider-neutral managed-account controller (`managed-account.ts`), and
   the OS-confinement port every provider launcher plans through
   (`os-sandbox.ts`; never add a silent unsandboxed fallback), and the
@@ -157,7 +155,7 @@ Public copy is the site, README, `docs/`, `llms.txt`, `package.json` and GitHub
 descriptions, CLI help, and TUI text. Follow `STYLE.md` and `WRITING.md`.
 
 - The canonical one-line description, used as the README and `llms.txt` lead, is
-  “Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin
+  “Excalibur (xcb) routes coding tasks across the Claude and Codex
   subscriptions you already pay for.” The page descriptions, README lead,
   `llms.txt` lead, `package.json` description, support value proposition, and
   CLI `about` use this sentence or a shortening of it. The portfolio registry
@@ -238,10 +236,43 @@ Internal terms and what to write on public pages instead:
 ## ALGAL skills
 
 - Prefer the globally installed `algal-*` skills for bounded git state, diffs, repository survey/search, test and release gates, CI polling, and web fetches instead of repeated raw tool output.
-- At session start, if the `algal` skill is unavailable, install the current skill pack for Claude Code, Codex, and Devin for Terminal with `bunx skills add 0thernet/algal-skills --global --agent claude-code codex devin --skill '*' --copy --yes`.
+- At session start, if the `algal` skill is unavailable, install the current skill pack for Claude Code and Codex for Terminal with `bunx skills add 0thernet/algal-skills --global --agent claude-code codex --skill '*' --copy --yes`.
 - Confirm installation with `bunx skills list --global`. If Bun or network access is unavailable, continue with repository-native tools instead of blocking delivery.
 - Treat ALGAL receipts as execution evidence, not provider attestation, and preserve the repository's normal verification and release gates.
 <!-- algal-skills:end -->
+
+## Implementation research and north-star coordination
+
+- Coordinate with `docs/vision.md` and `docs/plans/xcb-north-star-execution.md`.
+  Preserve the agent-first local protocol, SDK, journal, and projection work;
+  do not restore retired terminal or remote entry points during integration.
+- ALGAL supplies replayable procedures and experiment evidence; xcb owns
+  subscription admission, account custody, and settled failover. Candidate
+  generation never changes those boundaries or promotes its own evaluator.
+- The owner reports existing XAI and Gemini API credentials on the host. For
+  optional research, use `XAI_API_KEY` or `GEMINI_API_KEY` from the owner's
+  approved environment loader. Never discover, copy, print, or commit key values,
+  or put API credentials in provider account homes, manifests, or receipts.
+- Use a separately reviewed ALGAL Bun CLI (`ALGAL_CLI`), a checked manifest with
+  an explicit model-call budget (`MANIFEST`), and non-secret arguments (`ARGS`).
+  Choose an observed model in `XAI_MODEL` or `GEMINI_MODEL`, not an inferred
+  latest alias. The existing OpenAI-compatible executor accepts these flags:
+
+  ```sh
+  bun "$ALGAL_CLI" check "$MANIFEST"
+  bun "$ALGAL_CLI" run "$MANIFEST" --args "$ARGS" \
+    --base-url https://api.x.ai/v1 --model "$XAI_MODEL" \
+    --credential-env XAI_API_KEY > "$RECEIPT"
+  bun "$ALGAL_CLI" run "$MANIFEST" --args "$ARGS" \
+    --base-url https://generativelanguage.googleapis.com/v1beta/openai/ \
+    --model "$GEMINI_MODEL" --credential-env GEMINI_API_KEY > "$RECEIPT"
+  ```
+
+- These are alternative research executors, not additional xcb coding providers
+  or a required sibling checkout. Use separate result paths per experiment;
+  retain failures and uncertain completion without automatic replay of effects.
+  Verify receipt consistency separately from model quality and provider billing.
+  No live inference or credential availability is established by offline tests.
 
 ## CI
 
