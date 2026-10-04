@@ -6192,6 +6192,9 @@ mod relay_lock_tests {
 }
 
 pub async fn daemon(root: PathBuf) -> Result<i32> {
+    // Watchdog-owned services stay resident so heartbeat and scheduler
+    // ownership remain continuous across idle periods.
+    let service_managed = std::env::var_os("XCB_SERVICE_PARENT").is_some();
     // A detached supervisor's stderr goes nowhere: every startup failure is
     // written where the client that spawned it looks.
     let started = crate::os::Terminate::install()
@@ -6302,7 +6305,7 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
                 }
                 let nonterminal = managed.has_habitat_work().unwrap_or(true);
                 if supervisor.active.is_empty() && draining { break Ok(0); }
-                if supervisor.active.is_empty() && !nonterminal {
+                if !service_managed && supervisor.active.is_empty() && !nonterminal {
                     if idle_since.elapsed() >= IDLE_EXIT {
                         // Settle the in-flight offer refresh while still holding
                         // the lock, then re-check: a client that committed a task
