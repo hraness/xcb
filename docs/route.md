@@ -54,6 +54,13 @@ field except `version`, `workspace`, and `task` is optional.
   persist with the saved session, and a conflicting provider, account, or
   model pin is rejected. See
   [browser and shared tools](tools.md) for setup and handoff behavior.
+- `requirements: {"native_execution": true}` requires the selected provider's
+  native file, shell, and network tools. It does not pin Codex and may be
+  combined with browser or desktop requirements. Current source records this
+  requirement but returns `unavailable` before selecting or launching a
+  provider, including for a dry run: none of the native-tool backends is
+  implemented and qualified yet. It never substitutes the offline VM. See
+  the [native execution direction](vision.md#native-provider-execution).
 
 Pins limit the choice; xcb never falls back outside them. With no pins, xcb
 considers accounts with a supported provider build that are signed in,

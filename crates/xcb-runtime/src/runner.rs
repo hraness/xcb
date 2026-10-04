@@ -2513,6 +2513,7 @@ pub async fn run(
     if *cancel.borrow() {
         return Err(Error::Unavailable("cancelled before launch"));
     }
+    crate::native_backend::require_execution(session.requirements)?;
     if session.requirements.signed_in_browser
         && !input.pane_generation
         && !input.config.capabilities.servers.iter().any(|server| {

@@ -40,6 +40,7 @@ pub mod managed;
 pub mod managed_program;
 pub(crate) mod managed_relay;
 mod managed_supervisor;
+pub mod native_backend;
 #[cfg(unix)]
 pub mod native_mcp;
 pub mod offers;

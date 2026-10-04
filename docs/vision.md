@@ -124,6 +124,47 @@ Hooks and external projections consume sanitized, bounded events. They do not
 receive provider secrets or arbitrary host paths. Every effect that can be
 retried has a stable identity and a settlement receipt.
 
+### Native provider execution
+
+Claude Code, Codex, and Devin should run with their own native file, shell,
+and network tools in the granted workspace. xcb should coordinate accounts,
+routes, durable tasks, observations, and recovery around those sessions rather
+than replace ordinary development with offline command replay. This applies to
+all three providers; native execution is not a Codex-only desktop capability.
+After each backend passes its activation checks, native execution should be the
+normal choice for factory coding tasks. Brokered isolation remains an explicit
+caller choice, not an invisible substitute for missing native capabilities.
+
+Native execution is an explicit, persistent task requirement. Resume,
+continuation, quota failover, and cross-provider handoff preserve that
+requirement and the workspace capability grant. They cannot satisfy it with
+broker-only tools or silently fall back to the offline VM. The existing
+brokered execution mode and offline command runner remain separate options for
+callers that need their narrower isolation contract.
+
+Each native backend uses a versioned provider transport: Codex app-server,
+Claude's structured stream, or Devin ACP. It preserves supported provider
+approval controls and organization policy. Claude Auto and Codex automatic
+approval review are distinct from Devin's permission modes; xcb must verify the
+actual mode and cannot equate `auto`, `accept-edits`, Smart, Autonomous, or
+bypass across providers. Additional approval requests and denials stop automatic
+work rather than grant permission through a different provider.
+
+The host validates the effective native tool inventory, filesystem and network
+limits, isolated account/configuration state, and exact executable before
+activation. A broker-only provider receipt does not establish these claims.
+Workspace shell tools and authorized Git/network operations require their own
+live acceptance cases. Native mutations carry durable effect identities;
+timeouts, missing replies, and process exit alone do not make those mutations
+safe to replay. Unknown or partially settled effects retain account custody.
+
+The current implementation records `native_execution` in task requirements
+and refuses unimplemented or unqualified native execution before routing or
+launch. It does not yet activate a native-tool backend for any provider.
+[`native_backend.rs`](../crates/xcb-runtime/src/native_backend.rs) reports each
+candidate and its required acceptance cases without converting planned work
+into an availability claim.
+
 ### Durable task ownership
 
 Long-running work is a bounded ownership tree, not a flat list of provider
@@ -324,6 +365,14 @@ regressions; they are never silently retried until they pass.
 - **M1 — agent-first local kernel:** remove the Ratatui surface, preserve
   agent/JSON parity, and pass native, compatibility, recovery, and operator
   acceptance checks.
+- **M1N — native workers:** implement Claude Code, Codex, and Devin native
+  tool backends under the same durable task contract. For each exact runtime,
+  pass the declared native inventory, shell/toolchain, DNS/HTTPS, workspace
+  confinement, private account/configuration, authorized Git effects, approval
+  readback/denial, descendant cancellation, uncertain recovery, resume, and
+  cross-provider handoff cases before activation. Promote native execution to
+  the normal coding path only with rollback evidence; keep existing tasks and
+  uncertain runs under their original execution grants during migration.
 - **M2 — SDK and projections:** release Rust and TypeScript clients, a reference
   `/status` projection, schema-digest checks, and external-agent examples.
 - **M3 — measured harness:** connect ALGAL evidence and hill-climbing to route,

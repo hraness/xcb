@@ -610,6 +610,7 @@ pub async fn smart_route(
     config: &Config,
     request: RouteRequest<'_>,
 ) -> Result<RouteDecision> {
+    crate::native_backend::require_execution(request.requirements)?;
     let admitted = admitted_providers(store);
     route_with_admitted(store, config, request, &admitted).await
 }
@@ -633,6 +634,7 @@ pub async fn failover_routes(
     config: &Config,
     request: FailoverRequest<'_>,
 ) -> Result<FailoverRoutes> {
+    crate::native_backend::require_execution(request.requirements)?;
     let admitted = admitted_providers(store);
     failover_routes_with_admitted(store, config, request, &admitted).await
 }

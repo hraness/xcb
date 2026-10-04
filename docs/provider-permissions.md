@@ -30,6 +30,22 @@ native `skill` tool. The
 [bypass test results](../qualification/devin-bypass-3000.11.3-assessment.json)
 record both failures for that exact executable.
 
+## Native execution direction
+
+The [north star](vision.md#native-provider-execution) calls for native file,
+shell, and network tools for Claude Code, Codex, and Devin. Current provider
+qualification covers the brokered execution described above, not those native
+tools. A task with `native_execution: true` records that requirement but is
+refused before routing or launch until its backend is implemented and
+qualified; it never falls back to offline replay.
+
+Native backends must retain each provider's approval controls and verify their
+reported mode. A native shell requires fresh filesystem, network, cancellation,
+and recovery evidence. Enabling a tool or changing a configuration flag cannot
+reuse the broker-only evidence. Devin's native approval contract needs its own
+qualification; the CLI's `auto` alias and ACP `accept-edits` mode do not provide
+Claude's Auto classifier or Codex's automatic reviewer.
+
 ## When a provider denies an action
 
 A permission denial stops automatic continuation and provider switching.
