@@ -65,5 +65,5 @@ export default () => defineStory({
     lead: "Ask your agent:", prompt: "Install xcb from xcb.sh",
     terms: "Free and MIT licensed · Apple silicon Macs and Linux", url: "xcb.sh",
   },
-  formats: ["wide", "square"],
+  formats: ["wide", "square", "portrait"],
 });
