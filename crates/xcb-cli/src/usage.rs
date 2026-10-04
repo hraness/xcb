@@ -368,6 +368,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn the_registration_pins_the_build_and_names_the_record() {
         let folder =
             std::env::temp_dir().join(format!("xcb-usage-registration-{}", std::process::id()));
@@ -411,6 +412,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn locate_prefers_the_explicit_path_then_path_then_local_bin() {
         use std::os::unix::fs::PermissionsExt;
         let root = std::env::temp_dir().join(format!("xcb-usage-{}", std::process::id()));
