@@ -7,10 +7,10 @@
 //! writer cannot silently fork a task's history. Reads and replay are bounded
 //! and may be resumed with an opaque sequence cursor.
 
-use crate::{digest, now_ms, Error, Result};
-use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use crate::{Error, Result, digest, now_ms};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
@@ -73,11 +73,26 @@ pub struct CausalParent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EventBody {
-    State { snapshot: Value },
-    Receipt { receipt_id: String, receipt: Value },
-    CommandAccepted { command_id: String, command: Value },
-    CommandSettled { command_id: String, receipt_id: String, result: Value },
-    Fault { code: String, detail: String },
+    State {
+        snapshot: Value,
+    },
+    Receipt {
+        receipt_id: String,
+        receipt: Value,
+    },
+    CommandAccepted {
+        command_id: String,
+        command: Value,
+    },
+    CommandSettled {
+        command_id: String,
+        receipt_id: String,
+        result: Value,
+    },
+    Fault {
+        code: String,
+        detail: String,
+    },
 }
 
 /// An event before local sequence and content digests are assigned.
@@ -103,7 +118,13 @@ impl EventDraft {
         snapshot: Value,
         parent: Option<CausalParent>,
     ) -> Result<Self> {
-        Self::new(EventType::State, entity_id, revision, parent, EventBody::State { snapshot })
+        Self::new(
+            EventType::State,
+            entity_id,
+            revision,
+            parent,
+            EventBody::State { snapshot },
+        )
     }
     pub fn receipt(
         entity_id: impl Into<String>,
@@ -117,7 +138,10 @@ impl EventDraft {
             entity_id,
             revision,
             parent,
-            EventBody::Receipt { receipt_id: receipt_id.into(), receipt },
+            EventBody::Receipt {
+                receipt_id: receipt_id.into(),
+                receipt,
+            },
         )
     }
     pub fn command_accepted(
@@ -132,7 +156,10 @@ impl EventDraft {
             entity_id,
             revision,
             parent,
-            EventBody::CommandAccepted { command_id: command_id.into(), command },
+            EventBody::CommandAccepted {
+                command_id: command_id.into(),
+                command,
+            },
         )
     }
     pub fn command_settled(
@@ -167,7 +194,10 @@ impl EventDraft {
             entity_id,
             revision,
             parent,
-            EventBody::Fault { code: code.into(), detail: detail.into() },
+            EventBody::Fault {
+                code: code.into(),
+                detail: detail.into(),
+            },
         )
     }
     fn new(
@@ -246,11 +276,17 @@ pub struct JournalEvent {
 }
 impl JournalEvent {
     pub fn causal_parent(&self) -> CausalParent {
-        CausalParent { id: self.id.clone(), digest: self.event_digest.clone() }
+        CausalParent {
+            id: self.id.clone(),
+            digest: self.event_digest.clone(),
+        }
     }
     pub fn receipt_digest(&self) -> Option<String> {
         match &self.body {
-            EventBody::Receipt { receipt, .. } | EventBody::CommandSettled { result: receipt, .. } => body_value_digest(receipt).ok(),
+            EventBody::Receipt { receipt, .. }
+            | EventBody::CommandSettled {
+                result: receipt, ..
+            } => body_value_digest(receipt).ok(),
             _ => None,
         }
     }
@@ -383,7 +419,9 @@ pub struct EventJournal {
 }
 impl std::fmt::Debug for EventJournal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EventJournal").field("path", &self.path).finish_non_exhaustive()
+        f.debug_struct("EventJournal")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
     }
 }
 impl EventJournal {
@@ -403,7 +441,10 @@ impl EventJournal {
             "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF;",
         )?;
         migrate(&mut connection)?;
-        Ok(Self { path, connection: Mutex::new(connection) })
+        Ok(Self {
+            path,
+            connection: Mutex::new(connection),
+        })
     }
     pub fn open_in(directory: impl AsRef<Path>) -> Result<Self> {
         Self::open(directory.as_ref().join("events.sqlite"))
@@ -412,7 +453,9 @@ impl EventJournal {
         &self.path
     }
     fn db(&self) -> Result<MutexGuard<'_, Connection>> {
-        self.connection.lock().map_err(|_| Error::Conflict("event journal lock is poisoned"))
+        self.connection
+            .lock()
+            .map_err(|_| Error::Conflict("event journal lock is poisoned"))
     }
 
     /// Append atomically. A duplicate stable ID or idempotency key returns the
@@ -437,7 +480,9 @@ impl EventJournal {
                     tx.commit()?;
                     return Ok(AppendOutcome::Duplicate(existing));
                 }
-                return Err(Error::Conflict("idempotency key was reused with another body"));
+                return Err(Error::Conflict(
+                    "idempotency key was reused with another body",
+                ));
             }
         }
         let head = find_head(&tx, &draft.entity_id)?;
@@ -503,12 +548,19 @@ impl EventJournal {
         receipt: Value,
         parent: Option<CausalParent>,
     ) -> Result<AppendOutcome> {
-        self.append(EventDraft::receipt(entity_id, revision, receipt_id, receipt, parent)?)
+        self.append(EventDraft::receipt(
+            entity_id, revision, receipt_id, receipt, parent,
+        )?)
     }
 
     /// Read at most `limit` events. A limit+1 probe only determines `has_more`
     /// and is never returned, keeping every page bounded.
-    pub fn read_page(&self, entity_id: Option<&str>, cursor: Option<&str>, limit: usize) -> Result<EventPage> {
+    pub fn read_page(
+        &self,
+        entity_id: Option<&str>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<EventPage> {
         validate_limit(limit)?;
         if let Some(entity_id) = entity_id {
             validate_id(entity_id)?;
@@ -521,10 +573,17 @@ impl EventJournal {
         let fetch = sql_u64((limit + 1) as u64, "event page")?;
         let rows = if let Some(entity_id) = entity_id {
             let mut statement = db.prepare("SELECT sequence,id,event_type,entity_id,revision,parent_id,parent_digest,idempotency_key,body_digest,event_digest,body,occurred_at_ms FROM journal_events WHERE entity_id=?1 AND sequence>?2 ORDER BY sequence LIMIT ?3")?;
-            statement.query_map(params![entity_id, sql_u64(after, "event cursor")?, fetch], load_row)?.collect::<rusqlite::Result<Vec<_>>>()?
+            statement
+                .query_map(
+                    params![entity_id, sql_u64(after, "event cursor")?, fetch],
+                    load_row,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?
         } else {
             let mut statement = db.prepare("SELECT sequence,id,event_type,entity_id,revision,parent_id,parent_digest,idempotency_key,body_digest,event_digest,body,occurred_at_ms FROM journal_events WHERE sequence>?1 ORDER BY sequence LIMIT ?2")?;
-            statement.query_map(params![sql_u64(after, "event cursor")?, fetch], load_row)?.collect::<rusqlite::Result<Vec<_>>>()?
+            statement
+                .query_map(params![sql_u64(after, "event cursor")?, fetch], load_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
         };
         let mut events = Vec::with_capacity(limit);
         for row in rows {
@@ -534,10 +593,28 @@ impl EventJournal {
         if has_more {
             events.truncate(limit);
         }
-        let next_cursor = has_more.then(|| events.last().map(|event| EventCursor { after_sequence: event.sequence }.encode())).flatten();
-        Ok(EventPage { events, next_cursor, has_more })
+        let next_cursor = has_more
+            .then(|| {
+                events.last().map(|event| {
+                    EventCursor {
+                        after_sequence: event.sequence,
+                    }
+                    .encode()
+                })
+            })
+            .flatten();
+        Ok(EventPage {
+            events,
+            next_cursor,
+            has_more,
+        })
     }
-    pub fn read_events(&self, entity_id: Option<&str>, cursor: Option<&str>, limit: usize) -> Result<EventPage> {
+    pub fn read_events(
+        &self,
+        entity_id: Option<&str>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<EventPage> {
         self.read_page(entity_id, cursor, limit)
     }
     pub fn event(&self, id: &str) -> Result<Option<JournalEvent>> {
@@ -545,7 +622,12 @@ impl EventJournal {
         let db = self.db()?;
         find_event_by_id(&db, id)
     }
-    pub fn replay_slice(&self, entity_id: &str, cursor: Option<&str>, limit: usize) -> Result<ReplaySlice> {
+    pub fn replay_slice(
+        &self,
+        entity_id: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<ReplaySlice> {
         validate_id(entity_id)?;
         let page = self.read_page(Some(entity_id), cursor, limit)?;
         let projection = fold(entity_id, &page.events)?;
@@ -595,8 +677,13 @@ impl EventJournal {
         for event in &page.events {
             event.validate_integrity()?;
             if let Some(parent) = &event.parent {
-                if let Some(previous) = page.events.iter().find(|candidate| candidate.id == parent.id) {
-                    if previous.sequence >= event.sequence || previous.event_digest != parent.digest {
+                if let Some(previous) = page
+                    .events
+                    .iter()
+                    .find(|candidate| candidate.id == parent.id)
+                {
+                    if previous.sequence >= event.sequence || previous.event_digest != parent.digest
+                    {
                         return Err(Error::Conflict("event causal order changed"));
                     }
                 }
@@ -605,7 +692,8 @@ impl EventJournal {
         }
         let db = self.db()?;
         for (entity, event) in last {
-            let indexed = find_head(&db, &entity)?.ok_or(Error::Conflict("event head is missing"))?;
+            let indexed =
+                find_head(&db, &entity)?.ok_or(Error::Conflict("event head is missing"))?;
             if indexed.id != event.id || indexed.event_digest != event.event_digest {
                 return Err(Error::Conflict("event head index changed"));
             }
@@ -635,7 +723,10 @@ fn fold(entity_id: &str, events: &[JournalEvent]) -> Result<Projection> {
                 projection.state = Some(snapshot.clone());
                 projection.state_revision = Some(event.revision);
             }
-            EventBody::Receipt { receipt_id, receipt } => {
+            EventBody::Receipt {
+                receipt_id,
+                receipt,
+            } => {
                 if projection.receipts.len() >= MAX_REPLAY_RECEIPTS {
                     return Err(xcb_core::Error::Limit("event replay receipts").into());
                 }
@@ -655,7 +746,9 @@ fn fold(entity_id: &str, events: &[JournalEvent]) -> Result<Projection> {
                     projection.pending_commands.push(command_id.clone());
                 }
             }
-            EventBody::CommandSettled { command_id, .. } => projection.pending_commands.retain(|id| id != command_id),
+            EventBody::CommandSettled { command_id, .. } => {
+                projection.pending_commands.retain(|id| id != command_id)
+            }
             EventBody::Fault { code, .. } => projection.faults.push(code.clone()),
         }
     }
@@ -665,7 +758,9 @@ fn fold(entity_id: &str, events: &[JournalEvent]) -> Result<Projection> {
 fn migrate(db: &mut Connection) -> Result<()> {
     let version: u32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if version > JOURNAL_VERSION {
-        return Err(Error::Unavailable("event journal schema is newer than this build"));
+        return Err(Error::Unavailable(
+            "event journal schema is newer than this build",
+        ));
     }
     if version != JOURNAL_VERSION {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -682,10 +777,24 @@ pub fn stable_event_id(entity_id: &str, event_type: EventType, revision: u64) ->
     if revision == 0 || revision > i64::MAX as u64 {
         return Err(Error::Conflict("event revision is invalid"));
     }
-    Ok(format!("evt_{}", digest(format!("xcb-local-event-id-v1\0{}\0{}\0{}", entity_id, event_type.as_str(), revision))))
+    Ok(format!(
+        "evt_{}",
+        digest(format!(
+            "xcb-local-event-id-v1\0{}\0{}\0{}",
+            entity_id,
+            event_type.as_str(),
+            revision
+        ))
+    ))
 }
 fn validate_id(value: &str) -> Result<()> {
-    if value.is_empty() || value.len() > MAX_ID_BYTES || !value.as_bytes()[0].is_ascii_alphanumeric() || !value.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_.:-[]".contains(&byte)) {
+    if value.is_empty()
+        || value.len() > MAX_ID_BYTES
+        || !value.as_bytes()[0].is_ascii_alphanumeric()
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_.:-[]".contains(&byte))
+    {
         return Err(Error::Conflict("event identifier is invalid"));
     }
     Ok(())
@@ -704,23 +813,59 @@ fn validate_parent(parent: Option<&CausalParent>) -> Result<()> {
     Ok(())
 }
 fn validate_value(value: &Value) -> Result<()> {
-    let encoded = xcb_core::protocol::canonical_json(value).map_err(|_| Error::Conflict("event value is not canonical JSON"))?;
+    let encoded = xcb_core::protocol::canonical_json(value)
+        .map_err(|_| Error::Conflict("event value is not canonical JSON"))?;
     if encoded.len() > MAX_EVENT_BODY_BYTES {
         return Err(xcb_core::Error::Limit("event value").into());
     }
     Ok(())
 }
 fn validate_body(event_type: EventType, body: &EventBody) -> Result<()> {
-    let compatible = matches!((event_type, body), (EventType::State, EventBody::State { .. }) | (EventType::Receipt, EventBody::Receipt { .. }) | (EventType::CommandAccepted, EventBody::CommandAccepted { .. }) | (EventType::CommandSettled, EventBody::CommandSettled { .. }) | (EventType::Fault, EventBody::Fault { .. }));
+    let compatible = matches!(
+        (event_type, body),
+        (EventType::State, EventBody::State { .. })
+            | (EventType::Receipt, EventBody::Receipt { .. })
+            | (
+                EventType::CommandAccepted,
+                EventBody::CommandAccepted { .. }
+            )
+            | (EventType::CommandSettled, EventBody::CommandSettled { .. })
+            | (EventType::Fault, EventBody::Fault { .. })
+    );
     if !compatible {
         return Err(Error::Conflict("event type and body disagree"));
     }
     match body {
         EventBody::State { snapshot } => validate_value(snapshot)?,
-        EventBody::Receipt { receipt_id, receipt } => { validate_id(receipt_id)?; validate_value(receipt)?; }
-        EventBody::CommandAccepted { command_id, command } => { validate_id(command_id)?; validate_value(command)?; }
-        EventBody::CommandSettled { command_id, receipt_id, result } => { validate_id(command_id)?; validate_id(receipt_id)?; validate_value(result)?; }
-        EventBody::Fault { code, detail } => { validate_id(code)?; if detail.len() > 2_048 || detail.chars().any(char::is_control) { return Err(Error::Conflict("event fault detail is invalid")); } }
+        EventBody::Receipt {
+            receipt_id,
+            receipt,
+        } => {
+            validate_id(receipt_id)?;
+            validate_value(receipt)?;
+        }
+        EventBody::CommandAccepted {
+            command_id,
+            command,
+        } => {
+            validate_id(command_id)?;
+            validate_value(command)?;
+        }
+        EventBody::CommandSettled {
+            command_id,
+            receipt_id,
+            result,
+        } => {
+            validate_id(command_id)?;
+            validate_id(receipt_id)?;
+            validate_value(result)?;
+        }
+        EventBody::Fault { code, detail } => {
+            validate_id(code)?;
+            if detail.len() > 2_048 || detail.chars().any(char::is_control) {
+                return Err(Error::Conflict("event fault detail is invalid"));
+            }
+        }
     }
     if canonical_body(body)?.len() > MAX_EVENT_BODY_BYTES {
         return Err(xcb_core::Error::Limit("event body").into());
@@ -729,11 +874,18 @@ fn validate_body(event_type: EventType, body: &EventBody) -> Result<()> {
 }
 fn canonical_body(body: &EventBody) -> Result<String> {
     let value = serde_json::to_value(body)?;
-    xcb_core::protocol::canonical_json(&value).map_err(|_| Error::Conflict("event body is not canonical JSON"))
+    xcb_core::protocol::canonical_json(&value)
+        .map_err(|_| Error::Conflict("event body is not canonical JSON"))
 }
 fn body_value_digest(value: &Value) -> Result<String> {
     validate_value(value)?;
-    Ok(format!("sha256:{}", digest(xcb_core::protocol::canonical_json(value).map_err(|_| Error::Conflict("event value is not canonical JSON"))?)))
+    Ok(format!(
+        "sha256:{}",
+        digest(
+            xcb_core::protocol::canonical_json(value)
+                .map_err(|_| Error::Conflict("event value is not canonical JSON"))?
+        )
+    ))
 }
 fn body_digest(body: &EventBody) -> Result<String> {
     Ok(format!("sha256:{}", digest(canonical_body(body)?)))
@@ -753,17 +905,27 @@ fn digest_material(draft: &EventDraft, body_digest: &str) -> Value {
 }
 fn draft_event_digest(draft: &EventDraft, body_digest: &str) -> Result<String> {
     let material = digest_material(draft, body_digest);
-    let canonical = xcb_core::protocol::canonical_json(&material).map_err(|_| Error::Conflict("event digest material is not canonical JSON"))?;
+    let canonical = xcb_core::protocol::canonical_json(&material)
+        .map_err(|_| Error::Conflict("event digest material is not canonical JSON"))?;
     Ok(format!("sha256:{}", digest(canonical)))
 }
 fn sql_u64(value: u64, what: &'static str) -> Result<i64> {
     i64::try_from(value).map_err(|_| Error::Conflict(what))
 }
 fn next_sequence(tx: &Transaction<'_>) -> Result<u64> {
-    let value: i64 = tx.query_row("SELECT COALESCE(MAX(sequence),0)+1 FROM journal_events", [], |row| row.get(0))?;
+    let value: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(sequence),0)+1 FROM journal_events",
+        [],
+        |row| row.get(0),
+    )?;
     u64::try_from(value).map_err(|_| Error::Conflict("event sequence is invalid"))
 }
-fn validate_causality(tx: &Transaction<'_>, head: Option<&JournalEvent>, parent: Option<&CausalParent>, revision: u64) -> Result<()> {
+fn validate_causality(
+    tx: &Transaction<'_>,
+    head: Option<&JournalEvent>,
+    parent: Option<&CausalParent>,
+    revision: u64,
+) -> Result<()> {
     if let Some(head) = head {
         if revision < head.revision {
             return Err(Error::Conflict("event revision is stale"));
@@ -773,7 +935,13 @@ fn validate_causality(tx: &Transaction<'_>, head: Option<&JournalEvent>, parent:
             return Err(Error::Conflict("event causal parent is not the local head"));
         }
     } else if let Some(parent) = parent {
-        let existing: Option<String> = tx.query_row("SELECT event_digest FROM journal_events WHERE id=?1", [parent.id.as_str()], |row| row.get(0)).optional()?;
+        let existing: Option<String> = tx
+            .query_row(
+                "SELECT event_digest FROM journal_events WHERE id=?1",
+                [parent.id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
         if existing.as_deref() != Some(parent.digest.as_str()) {
             return Err(Error::Conflict("event causal parent is not present"));
         }
@@ -781,8 +949,15 @@ fn validate_causality(tx: &Transaction<'_>, head: Option<&JournalEvent>, parent:
     Ok(())
 }
 fn find_head(db: &Connection, entity_id: &str) -> Result<Option<JournalEvent>> {
-    let id: Option<String> = db.query_row("SELECT event_id FROM journal_heads WHERE entity_id=?1", [entity_id], |row| row.get(0)).optional()?;
-    id.map(|id| find_event_by_id(db, &id)?.ok_or(Error::Conflict("event head row is missing"))).transpose()
+    let id: Option<String> = db
+        .query_row(
+            "SELECT event_id FROM journal_heads WHERE entity_id=?1",
+            [entity_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    id.map(|id| find_event_by_id(db, &id)?.ok_or(Error::Conflict("event head row is missing")))
+        .transpose()
 }
 fn find_event_by_id(db: &Connection, id: &str) -> Result<Option<JournalEvent>> {
     let row = db.query_row("SELECT sequence,id,event_type,entity_id,revision,parent_id,parent_digest,idempotency_key,body_digest,event_digest,body,occurred_at_ms FROM journal_events WHERE id=?1", [id], load_row).optional()?;
@@ -792,29 +967,71 @@ fn find_event_by_key(db: &Connection, key: &str) -> Result<Option<JournalEvent>>
     let row = db.query_row("SELECT sequence,id,event_type,entity_id,revision,parent_id,parent_digest,idempotency_key,body_digest,event_digest,body,occurred_at_ms FROM journal_events WHERE idempotency_key=?1", [key], load_row).optional()?;
     row.map(decode_row).transpose()
 }
-type EventRow = (i64, String, String, String, i64, Option<String>, Option<String>, Option<String>, String, String, String, i64);
+type EventRow = (
+    i64,
+    String,
+    String,
+    String,
+    i64,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+    String,
+    i64,
+);
 fn load_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EventRow> {
-    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?, row.get(11)?))
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
+        row.get(9)?,
+        row.get(10)?,
+        row.get(11)?,
+    ))
 }
 fn decode_row(row: EventRow) -> Result<JournalEvent> {
-    let (sequence, id, event_type, entity_id, revision, parent_id, parent_digest, idempotency_key, body_digest, event_digest, body, occurred_at_ms) = row;
+    let (
+        sequence,
+        id,
+        event_type,
+        entity_id,
+        revision,
+        parent_id,
+        parent_digest,
+        idempotency_key,
+        body_digest,
+        event_digest,
+        body,
+        occurred_at_ms,
+    ) = row;
     let parent = match (parent_id, parent_digest) {
         (None, None) => None,
         (Some(id), Some(digest)) => Some(CausalParent { id, digest }),
         _ => return Err(Error::Conflict("event causal fields are incomplete")),
     };
     let event = JournalEvent {
-        sequence: u64::try_from(sequence).map_err(|_| Error::Conflict("event sequence is invalid"))?,
+        sequence: u64::try_from(sequence)
+            .map_err(|_| Error::Conflict("event sequence is invalid"))?,
         id,
         event_type: EventType::parse(&event_type)?,
         entity_id,
-        revision: u64::try_from(revision).map_err(|_| Error::Conflict("event revision is invalid"))?,
+        revision: u64::try_from(revision)
+            .map_err(|_| Error::Conflict("event revision is invalid"))?,
         parent,
         idempotency_key,
         body_digest,
         event_digest,
         body: serde_json::from_str(&body)?,
-        occurred_at_ms: u64::try_from(occurred_at_ms).map_err(|_| Error::Conflict("event timestamp is invalid"))?,
+        occurred_at_ms: u64::try_from(occurred_at_ms)
+            .map_err(|_| Error::Conflict("event timestamp is invalid"))?,
     };
     event.validate_integrity()?;
     Ok(event)
@@ -841,30 +1058,82 @@ mod tests {
     #[test]
     fn duplicate_is_idempotent_and_body_change_conflicts() {
         let (_dir, journal) = fixture();
-        let first = state("task_1", 1, "one", None).with_idempotency_key("idem_1").expect("key");
+        let first = state("task_1", 1, "one", None)
+            .with_idempotency_key("idem_1")
+            .expect("key");
         let id = first.id.clone();
-        assert!(!journal.append(first.clone()).expect("append").is_duplicate());
+        assert!(
+            !journal
+                .append(first.clone())
+                .expect("append")
+                .is_duplicate()
+        );
         let duplicate = journal.append(first).expect("duplicate");
         assert!(duplicate.is_duplicate());
         assert_eq!(duplicate.event().id, id);
-        let changed = state("task_1", 1, "two", None).with_idempotency_key("idem_1").expect("key");
+        let changed = state("task_1", 1, "two", None)
+            .with_idempotency_key("idem_1")
+            .expect("key");
         assert!(matches!(journal.append(changed), Err(Error::Conflict(_))));
-        let changed_key = state("task_1", 1, "two", None).with_idempotency_key("idem_2").expect("key");
-        assert!(matches!(journal.append(changed_key), Err(Error::Conflict(_))));
-        assert_eq!(journal.read_page(None, None, 16).expect("read").events.len(), 1);
+        let changed_key = state("task_1", 1, "two", None)
+            .with_idempotency_key("idem_2")
+            .expect("key");
+        assert!(matches!(
+            journal.append(changed_key),
+            Err(Error::Conflict(_))
+        ));
+        assert_eq!(
+            journal
+                .read_page(None, None, 16)
+                .expect("read")
+                .events
+                .len(),
+            1
+        );
     }
     #[test]
     fn causal_parent_replay_and_receipt_projection() {
         let (_dir, journal) = fixture();
-        let first = journal.append(state("task_2", 1, "one", None)).expect("first").event().clone();
-        let receipt = journal.append(EventDraft::receipt("task_2", 1, "rcpt_1", json!({"ok": true}), Some(first.causal_parent())).expect("receipt")).expect("receipt").event().clone();
-        journal.append(state("task_2", 2, "two", Some(receipt.causal_parent()))).expect("next");
+        let first = journal
+            .append(state("task_2", 1, "one", None))
+            .expect("first")
+            .event()
+            .clone();
+        let receipt = journal
+            .append(
+                EventDraft::receipt(
+                    "task_2",
+                    1,
+                    "rcpt_1",
+                    json!({"ok": true}),
+                    Some(first.causal_parent()),
+                )
+                .expect("receipt"),
+            )
+            .expect("receipt")
+            .event()
+            .clone();
+        journal
+            .append(state("task_2", 2, "two", Some(receipt.causal_parent())))
+            .expect("next");
         let replay = journal.replay("task_2", 16).expect("replay");
         assert_eq!(replay.state, Some(json!({"value": "two"})));
         assert_eq!(replay.state_revision, Some(2));
         assert_eq!(replay.receipts.len(), 1);
-        assert!(replay.head.as_ref().is_some_and(|head| head.id.starts_with("evt_") && head.digest.starts_with("sha256:")));
-        let bad = state("task_2", 3, "three", Some(CausalParent { id: receipt.id, digest: format!("sha256:{}", "0".repeat(64)) }));
+        assert!(
+            replay.head.as_ref().is_some_and(
+                |head| head.id.starts_with("evt_") && head.digest.starts_with("sha256:")
+            )
+        );
+        let bad = state(
+            "task_2",
+            3,
+            "three",
+            Some(CausalParent {
+                id: receipt.id,
+                digest: format!("sha256:{}", "0".repeat(64)),
+            }),
+        );
         assert!(matches!(journal.append(bad), Err(Error::Conflict(_))));
     }
     #[test]
@@ -872,27 +1141,43 @@ mod tests {
         let (dir, journal) = fixture();
         let mut parent = None;
         for revision in 1..=5 {
-            let event = journal.append(state("task_3", revision, &revision.to_string(), parent)).expect("append").event().clone();
+            let event = journal
+                .append(state("task_3", revision, &revision.to_string(), parent))
+                .expect("append")
+                .event()
+                .clone();
             parent = Some(event.causal_parent());
         }
         let first = journal.read_page(Some("task_3"), None, 2).expect("first");
         assert_eq!(first.events.len(), 2);
         assert!(first.has_more);
-        let second = journal.read_page(Some("task_3"), first.next_cursor.as_deref(), 2).expect("second");
-        let third = journal.read_page(Some("task_3"), second.next_cursor.as_deref(), 2).expect("third");
+        let second = journal
+            .read_page(Some("task_3"), first.next_cursor.as_deref(), 2)
+            .expect("second");
+        let third = journal
+            .read_page(Some("task_3"), second.next_cursor.as_deref(), 2)
+            .expect("third");
         assert_eq!(second.events.len(), 2);
         assert_eq!(third.events.len(), 1);
         assert!(!third.has_more);
-        assert!(matches!(journal.read_page(None, None, MAX_PAGE_SIZE + 1), Err(Error::Core(xcb_core::Error::Limit("event page")))));
+        assert!(matches!(
+            journal.read_page(None, None, MAX_PAGE_SIZE + 1),
+            Err(Error::Core(xcb_core::Error::Limit("event page")))
+        ));
         drop(journal);
         let reopened = EventJournal::open_in(dir.path()).expect("reopen");
         assert_eq!(reopened.verify(16).expect("verify"), 5);
-        assert_eq!(reopened.replay("task_3", 16).expect("replay").events.len(), 5);
+        assert_eq!(
+            reopened.replay("task_3", 16).expect("replay").events.len(),
+            5
+        );
     }
     #[test]
     fn fault_and_restart_keep_the_local_journal_authoritative() {
         let (dir, journal) = fixture();
-        journal.append(EventDraft::fault("task_4", 1, "evidence_hold", "retain", None).expect("fault")).expect("append");
+        journal
+            .append(EventDraft::fault("task_4", 1, "evidence_hold", "retain", None).expect("fault"))
+            .expect("append");
         drop(journal);
         // A malformed row simulates a torn/corrupt local write. Reopen never
         // repairs or skips it; readers retain the evidence and fail closed.
@@ -900,17 +1185,52 @@ mod tests {
         connection.execute("INSERT INTO journal_events(sequence,id,event_type,entity_id,revision,parent_id,parent_digest,idempotency_key,body_digest,event_digest,body,occurred_at_ms) VALUES(2,'evt_bad','fault','task_4',1,NULL,NULL,NULL,'sha256:bad','sha256:bad','{}',0)", []).expect("fault insert");
         drop(connection);
         let reopened = EventJournal::open_in(dir.path()).expect("reopen");
-        assert!(matches!(reopened.read_page(None, None, 8), Err(Error::Json(_)) | Err(Error::Conflict(_))));
+        assert!(matches!(
+            reopened.read_page(None, None, 8),
+            Err(Error::Json(_)) | Err(Error::Conflict(_))
+        ));
     }
     /// Retained minimized history used as a deterministic shrink target for
     /// stateful crash/restart runs.
     #[test]
     fn retained_shrunk_history_replays_after_fault() {
         let (_dir, journal) = fixture();
-        let first = journal.append(state("task_5", 1, "open", None)).expect("state").event().clone();
-        let receipt = journal.append(EventDraft::receipt("task_5", 1, "rcpt_5", json!({"ok": true}), Some(first.causal_parent())).expect("receipt")).expect("receipt").event().clone();
-        let second = journal.append(state("task_5", 2, "closed", Some(receipt.causal_parent()))).expect("state").event().clone();
-        journal.append(EventDraft::fault("task_5", 2, "replay_hold", "shrunk history", Some(second.causal_parent())).expect("fault")).expect("fault");
+        let first = journal
+            .append(state("task_5", 1, "open", None))
+            .expect("state")
+            .event()
+            .clone();
+        let receipt = journal
+            .append(
+                EventDraft::receipt(
+                    "task_5",
+                    1,
+                    "rcpt_5",
+                    json!({"ok": true}),
+                    Some(first.causal_parent()),
+                )
+                .expect("receipt"),
+            )
+            .expect("receipt")
+            .event()
+            .clone();
+        let second = journal
+            .append(state("task_5", 2, "closed", Some(receipt.causal_parent())))
+            .expect("state")
+            .event()
+            .clone();
+        journal
+            .append(
+                EventDraft::fault(
+                    "task_5",
+                    2,
+                    "replay_hold",
+                    "shrunk history",
+                    Some(second.causal_parent()),
+                )
+                .expect("fault"),
+            )
+            .expect("fault");
         let replay = journal.replay("task_5", 8).expect("replay");
         assert_eq!(replay.events.len(), 4);
         assert_eq!(replay.faults, vec!["replay_hold"]);

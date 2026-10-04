@@ -201,7 +201,7 @@ uncertain effect. The following measurements make that objective testable:
 | Agent ergonomics | time to initialize, time to first accepted command, commands per accepted outcome, projection bytes, and the percentage of operations completed without a UI-specific path |
 | Correctness | duplicate, dropped, clipped, stale, unauthorized, and uncertain command counts; replay convergence; receipt verification failures |
 | Work quality | task acceptance rate, resumable completion rate, attention resolution time, and provider usage observations keyed by stable identity |
-| Factory efficiency | account idle time, quota lost to avoidable routing, provider start and cleanup latency, event batching, CPU, memory, binary size, and cold start |
+| Factory efficiency | account idle time, quota lost to avoidable routing, provider start and cleanup latency, event batching, CPU, memory, binary size, cold start, acceptance latency, projection bytes, journal growth, and replay time |
 | ALGAL learning | qualified procedure reuse, challenge pass rate, regression rate on held-out cases, evidence age, and rollback frequency |
 | Valhalla transport | signature rejects, offline queue age, replay time, convergence time, peer availability, bounded journal growth, and migration reconciliation count |
 | Portability | successful native and SDK qualification on macOS, Linux, Windows, and embedded/headless hosts under the same protocol tests |
@@ -210,7 +210,12 @@ Metrics are observations, not claims of improvement. Token savings require
 provider-reported usage, billing claims require billing evidence, and quality
 claims require the same acceptance checks on the same workload. Synthetic
 protocol tests prove replay and custody behavior; they do not qualify a live
-provider or prove lower cost.
+provider or prove lower cost. The P3 baseline contract fixes a workload,
+seed, warmup, repetition count, units, aggregation, and comparison identity in
+[`docs/evidence/p3-baselines.json`](evidence/p3-baselines.json); its generator
+is [`scripts/assurance-baseline.ts`](../scripts/assurance-baseline.ts). A
+contract-only receipt has null host-specific observations rather than invented
+numbers.
 
 ## Assurance portfolio and hill-climbing loop
 
@@ -228,10 +233,10 @@ what a nearby test might suggest.
 | Technique | Status and location | Claim actually exercised | Gap or next action |
 | --- | --- | --- | --- |
 | Pure property-based testing | ✅ Rust `proptest` in xcb and ALGAL; fast-check in the TS portfolio; Hypothesis in Python | Round trips, parser/normalizer laws, bounded record invariants | Keep vectors receipt-bound and add protocol schema properties to both SDKs |
-| Stateful/model-based PBT with shadow oracle | ✅ ALGAL interleaved draw model; fast-check production-reducer schedules | The model and reducer agree for generated local histories | Add an xcb command/receipt shadow model and preserve shrunk histories |
-| Single-process fault-injection PBT | ✅ Generative crash, uncertain-commit, and storage-fault drivers; gobstopper custody model | Recovery and custody invariants under injected local failures | Add Valhalla journal and provider-process fault adapters |
+| Stateful/model-based PBT with shadow oracle | ✅ ALGAL interleaved draw model; fast-check production-reducer schedules; xcb `src/assurance.ts` shadow command/receipt model | The model and reducer agree for generated local histories; xcb CAS/idempotency receipts are stable | Preserve shrunk histories and add protocol schema properties to both SDKs |
+| Single-process fault-injection PBT | ✅ Generative crash, uncertain-commit, and storage-fault drivers; gobstopper custody model; xcb named six-case battery | Recovery and custody invariants under injected local failures | Add Valhalla journal and provider-process fault adapters |
 | UI fuzzing/autonomous UX exploration | ✅ Bombadil CI campaigns, diagnostic only; failures promoted to regressions | Reachability and diagnostic UX behavior for explored UI paths | The removed TUI no longer needs this gate; apply the same driver to reference projections and agent clients |
-| Seeded bespoke fuzz and bounded stress | ✅ aicharts-fuzz named seeds; gobstopper deterministic 159-test suite and nightly multiplier | Reproducible stress and known crash/restart/corruption cases | Add named xcb protocol seeds and a bounded long-run local journal battery |
+| Seeded bespoke fuzz and bounded stress | ✅ aicharts-fuzz named seeds; gobstopper deterministic 159-test suite and nightly multiplier; xcb `0x5101`–`0x5106` battery | Reproducible stress and known crash/restart/corruption cases | Add named xcb protocol seeds and a bounded long-run local journal battery |
 | Coverage-guided fuzzing | ❌ No cargo-fuzz/libFuzzer/AFL targets | No coverage-guided claim is made | Rank a small parser/envelope target after protocol schema freeze |
 | TLA+ model checking | ✅ Pinned TLC inventories and mutants in Valhalla, ALGAL-cloud, gobstopper | Model invariants, counterexamples, and witnesses for the specified cases | Add xcb custody/receipt model or explicitly bind xcb to an existing model |
 | Quint/Apalache plus production trace replay | ✅ Ghostget seeded simulation, bounded checking, mutants, and ITF replay | Model traces replay into production code for the declared adapter | Reuse the trace format for xcb/Valhalla convergence |
@@ -244,18 +249,18 @@ what a nearby test might suggest.
 | Refinement proof model→code | ❌ Correspondence is tested, not extracted/proved | No formal refinement claim | Treat conformance tests and trace replay as the current boundary |
 | Cross-implementation differential | ✅ Dual-runtime parity and byte-identical receipts | Implementations agree on the declared receipt and codec vectors | Make Rust/TS xcb protocol parity a release gate |
 | Independent oracles | ✅ Dev Rust JCS/URL oracles and sampled model-vs-production checks | Implementation agrees with an independently written oracle | Keep oracle code isolated and forbid shared bug-shaped helpers |
-| Golden vectors and fixtures | ✅ Frozen cross-implementation and standard-library vectors | Exact bytes, schemas, and error categories stay compatible | Publish versioned xcb/Valhalla vectors with negative cases |
-| Explicit metamorphic relations | ◐ Implicit in shadow models and oracles | Some transformations preserve outcomes, but they are not catalogued | Name relations for idempotent replay, page slicing, redaction, and projection order |
+| Golden vectors and fixtures | ✅ Frozen cross-implementation and standard-library vectors; xcb protocol and assurance vectors | Exact bytes, schemas, error categories, and named local receipt outcomes stay compatible | Publish versioned xcb/Valhalla vectors with more transport-negative cases |
+| Explicit metamorphic relations | ◐ Named xcb idempotent replay, page slicing, redaction, and projection-order relations are partially catalogued | Some transformations preserve outcomes; counterfactual manifest changes are reported as divergence | Complete relation catalog when projections and transport are frozen |
 | Spec mutants | ✅ Mutant configurations require expected counterexamples | The test suite detects specified invariant violations | Add mutants for xcb expected-revision and capability narrowing |
 | Proof-level mutants | ✅ Verus mutant proofs | Proof obligations fail when the model is weakened | Keep mutant receipts in the assurance ledger |
-| Source mutants | ✅ Nightly register maps each defect to the one test that must fail | Regression tests detect mapped source defects | Add xcb protocol and adapter mutants to the register |
-| Record/replay determinism | ✅ Platform property: no wall-clock in receipts; declared nondeterminism only | Replayed effects verify bit-for-bit where promised | Extend the receipt boundary to transport envelopes and SDK event iterators |
-| Counterfactual replay | ✅ Revised manifests compare recorded effects | The system reports identical or divergent outcomes under a changed manifest | Add routing and projection counterfactuals to release evidence |
+| Source mutants | ✅ Nightly register maps each defect to the one test that must fail; xcb `docs/evidence/p3-mutation-register.json` registers receipt mutants | Regression tests detect mapped source defects | Run the register on a pinned tree and retain receipts |
+| Record/replay determinism | ✅ Platform property: no wall-clock in receipts; xcb `verifyDeterministicReplay` and native journal verification | Replayed local effects verify bit-for-bit where promised | Extend the receipt boundary to transport envelopes and SDK event iterators |
+| Counterfactual replay | ✅ Revised manifests compare recorded effects; xcb `counterfactualReceiptCheck` names the first divergence | The system reports identical or divergent outcomes under a changed manifest | Add routing and projection counterfactuals to release evidence |
 | Deterministic contention probes | ◐ Serial CAS-head race records | Contention cases are reproducible probes, explicitly not linearizability | Keep the narrow wording; pair with async/convergence testing |
 | True deterministic simulation | ❌ No Antithesis/FoundationDB-style DST SDK | No system-level deterministic distributed execution claim | Defer until Valhalla's failure model and adapter boundaries are stable |
-| Assurance ledgers | ✅ Claims→evidence registries with explicit not-verified scopes | Reviewers can inspect why a claim is admitted | Make the xcb north-star milestones consume one ledger format |
+| Assurance ledgers | ✅ Claims→evidence registries with explicit not-verified scopes; xcb `docs/evidence/p3-claim-evidence.json` | Reviewers can inspect why a claim is admitted | Make the xcb north-star milestones consume one ledger format |
 | Checker attestation | ✅ Pinned checker hashes, receipt-bound inputs, RunnerProbe audits | The named checker ran on the named tree and inputs | Bind SDK and Valhalla qualification receipts to the same attestation |
-| Regression promotion | ✅ Shrunk failures and seeds become named example tests | A found failure stays reproducible in ordinary CI | Require promotion before a fuzzer seed is discarded |
+| Regression promotion | ✅ Shrunk failures and seeds become named example tests; xcb vectors and six-case battery are ordinary tests | A found failure stays reproducible in ordinary CI | Require promotion before a fuzzer seed is discarded |
 | Deployed chaos engineering | ❌ No production nemesis | No claim about live partition or degraded-service behavior | Add opt-in, data-preserving Valhalla staging chaos before production activation |
 | Ranking/coverage-guided exploration at scale | ❌ Bombadil is the only feedback-driven fuzzer | No portfolio-wide exploration optimization claim | Rank protocol paths by failure history, state novelty, and untested capability edges |
 
@@ -292,7 +297,8 @@ regressions; they are never silently retried until they pass.
   `/status` projection, schema-digest checks, and external-agent examples.
 - **M3 — measured harness:** connect ALGAL evidence and hill-climbing to route,
   procedure, hook, and projection versions without enabling unqualified
-  self-modification.
+  self-modification; consume the P3 shadow model, seeded battery, replay,
+  mutation register, claim ledger, and comparable baseline receipt.
 - **M4 — Valhalla transport:** pass signed replay, offline, convergence,
   custody, and recovery qualification against the local protocol.
 - **M5 — migration:** reconcile Convex identities and pending work, switch

@@ -12,7 +12,6 @@ test("renders the repository README with stable heading fragments and repository
   expect(html).toContain('<h2 id="install">Install</h2>');
   expect(html).toContain('<h2 id="use-it-as-your-coding-agent">Use it as your coding agent</h2>');
   expect(html).toContain('href="https://github.com/hraness/xcb/blob/main/docs/compatibility.md"');
-  expect(html).toContain('href="https://github.com/hraness/xcb/blob/main/MANAGED-CODEX.md"');
   expect(html).not.toContain("<script");
 });
 
@@ -22,7 +21,7 @@ test("extracts the landing block between the shared Hraness markers", async () =
   expect(source.indexOf(LANDING_END)).toBeGreaterThan(source.indexOf(LANDING_START));
   const landing = readmeLanding(source);
   expect(landing.title).toBe("Excalibur (xcb)");
-  expect(landing.lead).toContain("subscription router");
+  expect(landing.lead).toContain("routes coding tasks");
   expect(landing.markdown).toContain("headless JSON route");
 });
 

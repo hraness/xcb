@@ -1,0 +1,55 @@
+{
+  "schema": "xcb.assurance.mutation-register.v1",
+  "status": "registered-not-run",
+  "scope": {
+    "implementation": "src/assurance.ts",
+    "vectors": "protocol/assurance-v1-vectors.json",
+    "tests": ["test/assurance.test.ts"]
+  },
+  "mutants": [
+    {
+      "id": "M01",
+      "mutation": "ignore expectedRevision",
+      "mustFail": ["assurance golden vector: revision-conflict", "idempotency and stale revisions never apply a second effect"]
+    },
+    {
+      "id": "M02",
+      "mutation": "apply a duplicate idempotency key as a new effect",
+      "mustFail": ["assurance golden vector: idempotent-replay", "assurance golden vector: uncertain-is-held-on-retry"]
+    },
+    {
+      "id": "M03",
+      "mutation": "return a new receipt ID for a replay",
+      "mustFail": ["idempotency and stale revisions never apply a second effect", "the named crash/restart/storage-fault battery is reproducible"]
+    },
+    {
+      "id": "M04",
+      "mutation": "auto-settle an uncertain receipt after restart",
+      "mustFail": ["the named crash/restart/storage-fault battery is reproducible"]
+    },
+    {
+      "id": "M05",
+      "mutation": "omit routing/projection manifest from effect digest",
+      "mustFail": ["shadow receipts are deterministic and counterfactual manifests are explicit"]
+    },
+    {
+      "id": "M06",
+      "mutation": "accept non-prefixed or negative identifiers/revisions",
+      "mustFail": ["assurance negative vector: bad-command-id", "assurance negative vector: bad-idempotency-key", "assurance negative vector: negative-revision"]
+    },
+    {
+      "id": "M07",
+      "mutation": "skip receipt integrity verification",
+      "mustFail": ["the named crash/restart/storage-fault battery is reproducible"]
+    },
+    {
+      "id": "M08",
+      "mutation": "include wall-clock data in deterministic receipt material",
+      "mustFail": ["shadow receipts are deterministic and counterfactual manifests are explicit", "the named crash/restart/storage-fault battery is reproducible"]
+    }
+  ],
+  "unverified": [
+    "A mutation runner has not yet executed this register on a pinned source tree.",
+    "No source mutation result is evidence of provider or distributed behavior."
+  ]
+}

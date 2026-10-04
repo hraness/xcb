@@ -1,0 +1,70 @@
+{
+  "schema": "xcb.evidence.claim-ledger.v1",
+  "milestone": "P3 assurance",
+  "implementationTree": {
+    "protocol": "protocol/assurance-v1-vectors.json",
+    "shadowModel": "src/assurance.ts",
+    "tests": "test/assurance.test.ts",
+    "baselineGenerator": "scripts/assurance-baseline.ts",
+    "nativeJournal": "crates/xcb-runtime/src/event_journal_v1.rs"
+  },
+  "claims": [
+    {
+      "id": "P3-C01",
+      "claim": "A same-body command retry is idempotent and returns the original receipt reference.",
+      "evidence": ["test/assurance.test.ts:assurance golden vector: idempotent-replay", "docs/evidence/p3-mutation-register.json:M02-M03"],
+      "scope": "pure TypeScript shadow model",
+      "unverified": ["live provider effects", "remote or peer delivery"]
+    },
+    {
+      "id": "P3-C02",
+      "claim": "A stale expected revision is rejected without advancing the target revision.",
+      "evidence": ["test/assurance.test.ts:assurance golden vector: revision-conflict", "test/assurance.test.ts:idempotency and stale revisions never apply a second effect", "docs/evidence/p3-mutation-register.json:M01"],
+      "scope": "pure TypeScript shadow model",
+      "unverified": ["all real asynchronous schedules"]
+    },
+    {
+      "id": "P3-C03",
+      "claim": "The named crash/restart/storage-fault histories are reproducible and preserve the local uncertain-effect boundary.",
+      "evidence": ["test/assurance.test.ts:the named crash/restart/storage-fault battery is reproducible", "docs/assurance.md#named-seeded-battery"],
+      "scope": "single-process deterministic fixture",
+      "unverified": ["filesystem power loss", "multi-process races", "distributed partitions"]
+    },
+    {
+      "id": "P3-C04",
+      "claim": "The same command history under the same manifest produces byte-stable receipt and state digests.",
+      "evidence": ["test/assurance.test.ts:shadow receipts are deterministic and counterfactual manifests are explicit", "protocol/assurance-v1-vectors.json"],
+      "scope": "canonical JSON shadow receipts",
+      "unverified": ["provider output determinism", "network or peer convergence"]
+    },
+    {
+      "id": "P3-C05",
+      "claim": "A named routing/projection counterfactual reports receipt divergence instead of silently treating it as equivalent.",
+      "evidence": ["test/assurance.test.ts:shadow receipts are deterministic and counterfactual manifests are explicit", "docs/evidence/p3-mutation-register.json:M05"],
+      "scope": "pure local counterfactual comparison",
+      "unverified": ["quality improvement", "cost or token savings"]
+    },
+    {
+      "id": "P3-C06",
+      "claim": "Acceptance latency, projection bytes, CPU, memory, journal growth, and replay time have a comparable measurement contract.",
+      "evidence": ["docs/evidence/p3-baselines.json", "scripts/assurance-baseline.ts"],
+      "scope": "fixture baseline generator and receipt schema",
+      "unverified": ["host-specific measured values until a baseline command is run", "native cross-host comparability"]
+    },
+    {
+      "id": "P3-C07",
+      "claim": "The local event journal stores typed append-only records with bounded replay and integrity checks.",
+      "evidence": ["crates/xcb-runtime/src/event_journal_v1.rs", "crates/xcb-runtime/src/event_journal_v1.rs:tests"],
+      "scope": "single local SQLite journal tests",
+      "unverified": ["async linearizability", "Valhalla convergence", "Jepsen-style fault histories"]
+    }
+  ],
+  "notVerified": [
+    "coverage-guided fuzzing",
+    "exhaustive async concurrency model checking",
+    "Jepsen-style nemesis/history checking",
+    "true deterministic distributed simulation",
+    "deployed chaos engineering",
+    "live provider, billing, quality, or public availability claims"
+  ]
+}
