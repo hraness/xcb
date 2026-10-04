@@ -180,8 +180,18 @@ Linux and Windows native commands remain unavailable rather than run without
 OS confinement. These checks do not claim live remote writes, provider-built-in
 approval classification, or all planned acceptance cases.
 
-On the reference macOS host, Codex passed native shell, DNS/HTTPS, local Git,
-and read-only authenticated GitHub acceptance through this command bridge.
+On the development Mac, Codex passed native shell, DNS/HTTPS, local Git,
+and read-only authenticated GitHub checks through this command bridge,
+including with the login service's system-only environment. The installed
+supervisor then completed the same checks in a durable managed task:
+`t_1eb83a062043af67d63e59c04318fe6d1eeabc1a82fb8219c719940f6914f0b6`.
+It made one native command call, returned all four expected markers with exit
+code zero, confirmed process exit and settled effects, and produced one local
+Git commit. Its task record verified. The tested executable's SHA-256 is
+`ff2b38dab24fe2b9923327ded6158189151bf78d79598134a9e19dd57cdeacc7`.
+Host credential helpers resolve trusted absolute toolchain paths independently
+of the restricted PATH supplied by the login service. No remote write was tested.
+
 Claude's effective tool boundary passed startup checks, but its signed-in
 session reported that the organization had disabled Claude Code subscription
 access. Claude native execution remains unavailable until authorized sign-in

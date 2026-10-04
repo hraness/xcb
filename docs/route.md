@@ -59,8 +59,10 @@ field except `version`, `workspace`, and `task` is optional.
   Codex and may be combined with browser or desktop requirements. On macOS,
   run `xcb native qualify`, verify each selected provider with
   `xcb native verify --provider <provider>`, and grant the workspace with
-  `xcb --cwd /absolute/path/to/project native grant`. Use `--github` on both
-  verification and granting if commands need host GitHub credentials.
+  `xcb --cwd /absolute/path/to/project native grant --provider codex`
+  for a Codex-only grant; repeat `--provider` to select both supported providers.
+  Use `--github` on both verification and granting if commands need host
+  GitHub credentials.
   Add `--read-only-root` for toolchains outside system directories and
   `--git-metadata` for a worktree's external Git directories. A matching
   workspace grant also requests native execution for new direct routes and

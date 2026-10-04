@@ -16,3 +16,15 @@
   interrupted, failed or unproven command must retain uncertain effects and
   account custody; never infer a retry from a timeout or missing response.
   Preserve the existing provider qualification, run-owner and account gates.
+- `workspace_native_exec` is the separately granted macOS command bridge for
+  supported providers. It requires current OS and provider checks for the exact
+  executable, a matching workspace/provider grant, and a persisted native task
+  requirement. It never substitutes offline replay or legacy host commands.
+- Native GitHub checks must cover the login-service environment as well as the
+  interactive CLI. Trusted credential helper lookup completes system-only PATH
+  with standard absolute toolchain directories; worker command PATH remains
+  limited to its explicitly granted roots. Never fetch or print live credentials
+  merely to diagnose executable discovery.
+- Verify actual native tool results, process/effect facts, and workspace changes
+  for managed smoke tests. A completed task or verified task journal alone does
+  not establish that its requested command ran successfully.
