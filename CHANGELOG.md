@@ -21,6 +21,11 @@ and SDK instead of the former interactive terminal or hosted remote commands.
 - Add `xcb usage`, which shows token use across your coding agents by day,
   agent, provider, and model from aicharts' record on your computer. It never
   uploads, and xcb forwards only aicharts' report and scheduling commands.
+- `curl -fsSL https://xcb.sh/install.sh | sh` also installs aicharts 0.3.1 on
+  macOS (Apple silicon) and Linux x86_64, checked against a pinned digest and,
+  on macOS, its Developer ID signature, and turns on local usage history on a
+  first install. `XCB_AICHARTS=no` skips it; `XCB_USAGE_HISTORY=no` leaves
+  history off.
 - Keep inbox replay, project isolation, managed-program restart, and cancellation
   checks on the headless path; preserve the current website and its checks.
 - Define the north-star execution plan with ALGAL, protocol and SDK milestones,
