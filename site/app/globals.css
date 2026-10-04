@@ -457,3 +457,31 @@ body > div[data-hraness-marketing-preset] { flex: 1; }
 .xcb-comparison-details dd { margin: 0; max-inline-size: 72ch; }
 .xcb-comparison-details dd + dd { margin-block-start: .5rem; }
 .xcb-comparison-details strong { color: var(--foreground); margin-inline-end: .4em; }
+
+/* The hero illustration leads with the visual; its choices sit beside it on
+   wide screens and follow it on phones. Numbers are quiet wayfinding, not
+   badges, so a first-time reader can scan the labels as prose. */
+.xcb-showcase-shell { display: grid; grid-template-columns: minmax(10rem, 14rem) minmax(0, 1fr); gap: .7rem 1rem; align-items: start; }
+.xcb-showcase-shell .hkm-showcase { display: contents; }
+.xcb-showcase-shell .hkm-tabs { grid-column: 1; grid-row: 1; display: flex; flex-direction: column; align-items: stretch; gap: .2rem; margin: 0; padding: .2rem 0; border: 0; overflow: visible; counter-reset: xcb-surface; }
+.xcb-showcase-shell .hkm-tab { justify-content: flex-start; min-block-size: 2.9rem; padding: .55rem .2rem; border-radius: .25rem; font-size: 1rem; text-align: start; }
+.xcb-showcase-shell .hkm-tab::before { counter-increment: xcb-surface; content: counter(xcb-surface, decimal-leading-zero); min-inline-size: 1.8rem; color: var(--muted); font: .85rem/1 var(--font-mono, ui-monospace, monospace); }
+.xcb-showcase-shell .hkm-tab[aria-selected="true"] { background: transparent; color: var(--foreground); font-weight: 600; }
+.xcb-showcase-shell .hkm-tab[aria-selected="true"]::before { color: var(--accent, currentColor); }
+.xcb-showcase-shell .hkm-showcase-stage { grid-column: 2; grid-row: 1; min-inline-size: 0; }
+.xcb-showcase-shell .hkm-showcase-caption { grid-column: 2; grid-row: 2; }
+.xcb-showcase-nav { grid-column: 2; grid-row: 3; display: flex; justify-content: flex-end; align-items: center; gap: .7rem; color: var(--muted); font: .75rem var(--font-mono, ui-monospace, monospace); }
+.xcb-showcase-nav button { inline-size: 2.5rem; block-size: 2.3rem; border: 1px solid var(--line); border-radius: .3rem; background: transparent; color: inherit; cursor: pointer; font: 1.6rem/1 var(--font-text, system-ui, sans-serif); }
+.xcb-showcase-nav button:hover { background: var(--surface-raised, color-mix(in srgb, currentColor 8%, transparent)); color: var(--foreground); }
+.xcb-showcase-nav button:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+@media (max-width: 48rem) {
+  .xcb-showcase-shell { grid-template-columns: minmax(0, 1fr); gap: .55rem 0; }
+  .xcb-showcase-shell .hkm-showcase-stage { grid-column: 1; grid-row: 1; }
+  .xcb-showcase-shell .hkm-tabs { grid-column: 1; grid-row: 2; flex-direction: row; align-items: center; gap: .15rem; padding: .2rem 0; overflow-x: auto; }
+  .xcb-showcase-shell .hkm-tab { flex: 0 0 auto; min-block-size: 3rem; padding: .55rem .5rem; font-size: 1.05rem; }
+  .xcb-showcase-shell .hkm-tab::before { min-inline-size: 1.9rem; font-size: .9rem; }
+  .xcb-showcase-shell .hkm-showcase-controls { padding-inline: .8rem; }
+  .xcb-showcase-shell .hkm-showcase-caption { grid-column: 1; grid-row: 4; }
+  .xcb-showcase-nav { grid-column: 1; grid-row: 3; }
+  .xcb-showcase-nav button { min-inline-size: 2.75rem; min-block-size: 2.75rem; }
+}
