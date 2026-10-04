@@ -2,5 +2,6 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "buildCommand": "bun run check",
   "framework": "nextjs",
+  "ignoreCommand": "git diff --quiet HEAD^ HEAD -- . ../src ../README.md ../package.json ../qualified-builds.json '../scripts/install.*' ../docs/sdk.md ../crates/xcb-runtime/src/claude.rs ../crates/xcb-runtime/src/codex/config.rs ../crates/xcb-runtime/src/devin/config.rs",
   "installCommand": "bun install --frozen-lockfile --ignore-scripts"
 }

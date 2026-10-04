@@ -1,25 +1,27 @@
+import { SiteAnalytics } from "./site-analytics";
 import type { Metadata, Viewport } from "next";
 import { getDesignPaletteTheme } from "@hraness/design-kit";
 import { DesignPaletteProvider, ThemeColorSync } from "@hraness/design-kit/react";
 import { HranessSiteFooter } from "@hraness/site-footer/react";
 import { siteDefaultPalette } from "../palette";
 import { supportProfile } from "../../src/support-profile";
-import { FoilController } from "./foil-controller";
+import { productMessaging, productName } from "./messaging";
 import "./globals.css";
 import "./docs/docs.css";
 import "./compare/compare.css";
+import "./blog/blog.css";
+import "./calm.css";
 
 /**
- * Paper is the site's own palette; the initial class supplies its compiled
+ * Tokyo Night is the site's own palette; the initial class supplies its compiled
  * values and the blocking bootstrap adds a concrete `data-theme` before
- * paint. With JavaScript disabled no `data-theme` is rendered, so Paper's
+ * paint. With JavaScript disabled no `data-theme` is rendered, so the palette's
  * light-dark() colors keep following the operating system.
  */
-const initialPalette = getDesignPaletteTheme("paper", "light");
+const initialPalette = getDesignPaletteTheme("tokyo-night", "light");
 
-const title = "xcb — One router for your Claude, Codex & Devin subscriptions";
-const description =
-  "Use the AI coding subscriptions you already pay for. xcb routes each task to an eligible Claude, Codex, or Devin account — one bounded turn, proven custody. Agents call a JSON contract; apps embed the TypeScript SDK. Open source.";
+const title = `${productName} · ${productMessaging.hero.heading.replace(/\.$/u, "")}`;
+const description = productMessaging.meta;
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://xcb.sh"),
@@ -27,12 +29,13 @@ export const metadata: Metadata = {
   description,
   alternates: { canonical: "/" },
   icons: {
-    icon: [{ type: "image/svg+xml", url: "/xcb.svg" }],
+    icon: [{ type: "image/svg+xml", url: "/favicon.svg" }],
+    apple: [{ url: "/apple-icon.png", sizes: "180x180" }],
   },
   openGraph: {
     title,
     description,
-    siteName: "xcb",
+    siteName: productName,
     type: "website",
     url: "/",
   },
@@ -45,8 +48,8 @@ export const metadata: Metadata = {
 
 export const viewport: Viewport = {
   themeColor: [
-    { color: "#f8f7f4", media: "(prefers-color-scheme: light)" },
-    { color: "#12100f", media: "(prefers-color-scheme: dark)" },
+    { color: "#e1e2e7", media: "(prefers-color-scheme: light)" },
+    { color: "#1a1b26", media: "(prefers-color-scheme: dark)" },
   ],
 };
 
@@ -58,7 +61,8 @@ export default function RootLayout({
       lang="en"
       data-hraness-theme="paper"
       data-hraness-material="lantern"
-      data-palette="paper"
+      data-palette="tokyo-night"
+      data-hraness-pattern="none"
       className={initialPalette.className}
       suppressHydrationWarning
     >
@@ -68,13 +72,13 @@ export default function RootLayout({
         <script src="/theme-bootstrap.js" />
       </head>
       <body>
+        <SiteAnalytics />
         <DesignPaletteProvider defaultPreference={siteDefaultPalette}>
           <ThemeColorSync />
           {children}
           <div className="network-footer">
-            <HranessSiteFooter placement="flow" mailingList={{ kind: "none" }} support={supportProfile} />
+            <HranessSiteFooter mailingList={{ kind: "none" }} support={supportProfile} />
           </div>
-          <FoilController />
         </DesignPaletteProvider>
       </body>
     </html>

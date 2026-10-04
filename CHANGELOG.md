@@ -10,6 +10,19 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## Unreleased
+
+xcb's current source build is agent-first: use the headless CLI, JSON route,
+and SDK instead of the former interactive terminal or hosted remote commands.
+
+- Remove the Ratatui frontend and native chat, resume, and remote entry points.
+  Saved conversations and task history remain readable through local commands.
+- Add `xcb conversations --new --json` for creating project views without a UI.
+- Keep inbox replay, project isolation, managed-program restart, and cancellation
+  checks on the headless path; preserve the current website and its checks.
+- Define the north-star execution plan with ALGAL, protocol and SDK milestones,
+  and a gated Valhalla transport direction. Valhalla syncing is not shipped.
+
 ## 0.17.11 - 2026-10-02
 
 Real Codex turns no longer die on an internal call budget far below the

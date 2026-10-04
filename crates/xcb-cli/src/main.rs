@@ -184,7 +184,10 @@ enum Commands {
         command: Option<TaskCommand>,
     },
     /// List saved conversations and project views.
-    Conversations,
+    Conversations {
+        #[arg(long, help = "Create a new project view in the current directory")]
+        new: bool,
+    },
     /// List, add, hide and explain project directories used by tasks.
     Workspaces {
         #[command(subcommand)]
@@ -1678,9 +1681,17 @@ async fn dispatch_inner(
             tokio::task::spawn_blocking(move || xcb_runtime::catalog::refresh(&catalog_root)).await;
         for provider in Provider::ALL {
             let report = process::refresh_provider(&root, provider, None, &home).await;
-            if let (process::RefreshOutcome::Adopted, _) = (report.outcome, report.detail.as_ref())
-            {
-                eprintln!("xcb: {provider}: adopted the updated build");
+            match (report.outcome, report.detail) {
+                (process::RefreshOutcome::Adopted, _) => {
+                    eprintln!("xcb: {provider}: adopted the updated build");
+                }
+                (
+                    process::RefreshOutcome::PendingCatalog | process::RefreshOutcome::Rejected,
+                    Some(detail),
+                ) => {
+                    eprintln!("xcb: {provider}: {detail}");
+                }
+                _ => {}
             }
         }
     }
@@ -3035,9 +3046,13 @@ async fn dispatch_inner(
             }
             Ok(0)
         }
-        Some(Commands::Conversations) => {
+        Some(Commands::Conversations { new }) => {
             let managed = xcb_runtime::managed::ManagedStore::open(store.root())?;
-            let conversations = listed_conversations(&managed)?;
+            let conversations = if new {
+                vec![managed.create_conversation(&cli.cwd).await?]
+            } else {
+                listed_conversations(&managed)?
+            };
             if cli.json {
                 print_json(conversation_rows(&conversations)?)?;
             } else if conversations.is_empty() {
@@ -5617,7 +5632,16 @@ mod tests {
     #[test]
     fn managed_task_cli_lists_and_inspects_without_exposing_daemon_controls() {
         let cli = Cli::try_parse_from(["xcb", "conversations"]).unwrap();
-        assert!(matches!(cli.command, Some(Commands::Conversations)));
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Conversations { new: false })
+        ));
+        let cli = Cli::try_parse_from(["xcb", "conversations", "--new", "--json"]).unwrap();
+        assert!(cli.json);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Conversations { new: true })
+        ));
         let cli = Cli::try_parse_from(["xcb", "tasks"]).unwrap();
         assert!(matches!(
             cli.command,

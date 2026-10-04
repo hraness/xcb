@@ -3,9 +3,9 @@
 
 Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin
 subscriptions you already pay for. Each task runs on an account that is signed
-in, idle, and not at a known usage limit, on a model that fits the work. Drive
-xcb with its headless JSON route, CLI, or SDK; build any UI you need from the
-same typed projections.
+in, idle, and not at a known usage limit, on a model that fits the work. Send
+work through the headless CLI, JSON contract, or SDK. The former interactive
+terminal and hosted remote commands are removed from the current source build.
 <!-- hraness:xcb-landing:end -->
 
 **Status:** [Latest release](https://github.com/hraness/xcb/releases/latest)
@@ -16,14 +16,14 @@ source build until they appear in the [release notes](https://github.com/hraness
 
 [Site](https://xcb.sh) · [Docs](https://xcb.sh/docs) ·
 [Getting started](https://xcb.sh/docs/getting-started) ·
-[Vision](docs/vision.md) · [Route contract](docs/route.md) ·
-[TypeScript SDK](docs/sdk.md) ·
+[Route contract](docs/route.md) · [TypeScript SDK](docs/sdk.md) ·
 [Compare](https://xcb.sh/compare) · [Changelog](CHANGELOG.md)
 
 With fresh Claude and Codex usage reports, xcb favors unused quota approaching
 a reset while preserving the task's quality requirements and your chosen
-provider, account, or model. Existing provider sessions can be discovered and
-imported as context for a new headless task.
+provider, account, or model. You can also [continue a Claude or Codex
+conversation](#continue-a-claude-or-codex-conversation) by importing work
+active in the last 24 hours.
 
 ## Install
 
@@ -37,8 +37,8 @@ and installs `~/.local/bin/xcb`:
 curl -fsSL https://xcb.sh/install.sh | sh
 ```
 
-New release installs update automatically before `xcb run`, `xcb route`, or
-`xcb doctor`, at most once a day and only when no other
+New release installs update automatically before an interactive `run` or
+`doctor` command, at most once a day and only when no other
 xcb command or service is using the installation. Run `xcb update disable` to
 turn this off, or `xcb update enable --policy notify` for notices only. Existing
 saved preferences stay in force. `HRANESS_NO_UPDATE=1`, CI, JSON output, and
@@ -55,9 +55,8 @@ not self-update; rerun the release installer to create a supported install.
 To run Claude Code on Windows, install the Linux build of xcb inside [WSL2](https://learn.microsoft.com/windows/wsl/install) with
 the command above. Claude is the supported provider on Linux; Codex and Devin
 require macOS. Releases also carry a native
-Windows x86_64 build that runs everything except the providers (the thread,
-`xcb doctor`, accounts, and `xcb route`, which refuses provider work with those
-WSL2 steps). Install it from PowerShell:
+Windows x86_64 build for local task inspection, `xcb doctor`, accounts, and
+`xcb route`, which refuses provider work with those WSL2 steps. Install it from PowerShell:
 
 ```powershell
 irm https://xcb.sh/install.ps1 | iex
@@ -87,7 +86,7 @@ Install Claude Code 2.1.268 or later, then connect an account and run a task:
 
 ```sh
 xcb setup claude
-xcb run -p "Describe the next task"
+xcb run -p "Explain this repository"
 ```
 
 `xcb setup` lets you choose an existing account or add another, checks the
@@ -98,14 +97,37 @@ separate from your usual Claude Code login. `xcb setup codex`
 works the same way; Devin connects by importing the Devin CLI's sign-in
 ([accounts and models](https://xcb.sh/docs/providers)).
 
-The native CLI is headless and scriptable. Run one task with `xcb run`, or
-send a versioned JSON request through `xcb --json route`. Managed tasks,
-projects, attention, schedules, and history are durable local state that an
-agent can read and change through JSON or the SDK. A UI can be built on demand
-from those projections; xcb does not require a terminal UI.
+`xcb run` picks an account and model and prints the result. `xcb --json route`
+runs exactly one turn and returns a JSON result; its caller owns any retry.
+For durable managed work, submit an explicitly scoped backlog item with
+`xcb backlog add /absolute/path/to/project "Fix the failing test" --ready`.
+Inspect it with `xcb tasks` and `xcb tasks show <task-id> --json`.
 
-The [route contract](docs/route.md) and [SDK quickstart](docs/sdk.md) show the
-stable machine-facing entry points.
+- `xcb tasks cancel <task-id> --revision <revision>` requests cancellation.
+- `xcb steer <task-id> <guidance>` adds guidance for the task's next turn.
+- `xcb attention` shows questions; `xcb backlog reply` answers one.
+- `xcb conversations --new --json` creates a project view without opening a UI.
+
+The [headless command guide](docs/terminal.md) covers retained local operations.
+
+## Continue a Claude or Codex conversation
+
+Bring conversation context into xcb so your next task can use its account and
+model selection. Discovery and import use a 24-hour activity window by default:
+
+```sh
+xcb sessions discover
+xcb sessions import --recent
+xcb conversations                           # saved conversations, including imports
+xcb history <conversation-id>
+xcb backlog add <conversation-id> "Continue the work" --ready
+```
+
+Submit a backlog task in the imported conversation to start work. Import copies user and
+assistant text, preserves the original files, and does not take over the
+provider process. For a conversation started in your home folder, select one
+result with `xcb sessions import <candidate-id> --workspace /path/to/project`.
+[Session import](docs/session-import.md) covers provider filters and limits.
 
 ## Build on it
 
@@ -169,7 +191,8 @@ a dedicated xcb Keychain entry on macOS. See
 ## Everyday commands
 
 ```sh
-xcb run -p "Describe the next task"      # one headless task
+xcb --help                             # discover local commands
+xcb conversations --new --json          # a project view for this directory
 xcb run -p "Explain this repository"   # one task here; prints the answer
 xcb tasks                              # managed tasks across projects
 xcb attention                          # questions and approvals waiting on you
@@ -189,20 +212,8 @@ command, setting, and exit code.
 - **Tools:** providers use xcb's workspace tools and registered host MCP servers. Native shells and unrelated provider plugins remain unavailable; see [browser and shared tools](docs/tools.md).
 - **Tests and builds:** the [command runner](docs/command-runner.md) is an offline Linux VM on macOS ARM64; Git is read-only there, and native macOS builds can't run.
 - **Concurrency:** each account runs one provider turn at a time by default; `max_runs_per_account` in `config.json` (1–32) raises how many tasks may share an account, while sign-in and account checks still take the account alone. Tasks in the same project folder take turns.
+- **Remote devices:** the hosted remote commands are removed. Valhalla integration is planned, not shipped ([north star](docs/vision.md)).
 - **Managed harness:** the self-tuning harness is in development; the current build does not run self-modifying routing policies ([design](docs/managed-harness.md)).
-
-## Readiness
-
-xcb is a source preview. The published contracts cover the headless JSON route,
-local state, and the TypeScript SDK; provider qualification remains tied to the
-exact executable, account, and host evidence recorded by `xcb doctor`.
-
-## Standalone package
-
-The retained TypeScript package provides host-owned routing, account custody,
-bounded tools, and provider adapters. It is separate from the native Rust app;
-see the [compatibility reference](docs/compatibility.md) for its package and
-CLI contract.
 
 ## Compared with
 

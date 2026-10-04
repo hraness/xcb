@@ -108,13 +108,14 @@ availability.
 ## xcb scheduler setup
 
 The project grant is named `xcb`, lasts 30 days, and permits up to 100 bounded
-follow-up tasks. A pinned controller runs hourly with four managed calls:
+follow-up tasks. A pinned controller runs hourly with five managed calls:
+inspection, implementation, verification, reporting, and delivery.
 
 ```sh
 xcb projects --json
 xcb schedules program /Users/bg/Documents/xcb \
   examples/xcb-north-star-controller.algal.json \
-  --workspace /Users/bg/Documents/xcb --managed-calls 4 --every 3600 \
+  --workspace /Users/bg/Documents/xcb --managed-calls 5 --every 3600 \
   --title "xcb north-star herder"
 ```
 
