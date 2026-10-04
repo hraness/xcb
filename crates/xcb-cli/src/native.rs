@@ -42,7 +42,7 @@ pub(crate) enum Commands {
     Grant {
         #[arg(
             long = "provider",
-            help = "Provider to grant; repeat to select several, omit for all three"
+            help = "Provider to grant; repeat to select several, omit for Claude and Codex"
         )]
         providers: Vec<Provider>,
         #[arg(
@@ -76,7 +76,7 @@ pub(crate) async fn execute(
         Commands::Inspect { session: None } => {
             let (config, _) = Config::load(store.root())?;
             let command_qualified = native_backend::require_qualification(store.root()).is_ok();
-            let backends: Vec<_> = Provider::ALL
+            let backends: Vec<_> = Provider::SUPPORTED
                 .into_iter()
                 .map(|provider| {
                     let mut status = native_backend::status(provider);
@@ -151,7 +151,7 @@ pub(crate) async fn execute(
             native_backend::require_qualification(store.root())?;
             let workspace = xcb_core::canonical(workspace)?;
             let providers = if providers.is_empty() {
-                Provider::ALL.to_vec()
+                Provider::SUPPORTED.to_vec()
             } else {
                 providers
             };

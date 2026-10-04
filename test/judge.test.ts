@@ -106,7 +106,7 @@ test("SystemOneJudge sends one bounded POST and parses the response", async () =
     }) as typeof fetch,
   });
   const answers = await judge.ask({ task: "fix the flaky test" }, {
-    route: { type: "choice", instructions: "pick one", criteria: { route_0: "claude", route_1: "devin" } },
+    route: { type: "choice", instructions: "pick one", criteria: { route_0: "claude", route_1: "codex" } },
   });
   expect(calls.length).toBe(1);
   expect(calls[0]!.url).toBe(SYSTEM_ONE_URL);

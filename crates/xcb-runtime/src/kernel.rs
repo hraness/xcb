@@ -44,6 +44,11 @@ pub fn choose_model(
     requested: Option<&str>,
     config: &Config,
 ) -> Result<ModelChoice> {
+    if !Provider::SUPPORTED.contains(&provider) {
+        return Err(Error::Unavailable(
+            "Devin support was removed; use Claude or Codex",
+        ));
+    }
     let mut choices: Vec<_> = store
         .models()?
         .into_iter()
@@ -92,7 +97,7 @@ pub async fn auto_route(
         Error::Unavailable("--model auto needs the judge: xcb judge token && xcb judge enable"),
     )?;
     let view = summary::snapshot(store, None, config, now_ms())?;
-    let admitted_providers: BTreeSet<_> = Provider::ALL
+    let admitted_providers: BTreeSet<_> = Provider::SUPPORTED
         .into_iter()
         .filter(|provider| {
             Pin::load(store.root(), *provider)
@@ -397,7 +402,8 @@ pub fn new_session_with_policy(
         }
     }
     let compatible = |candidate: &&crate::store::Account| {
-        candidate.enabled
+        Provider::SUPPORTED.contains(&candidate.provider)
+            && candidate.enabled
             && !unavailable_accounts.contains(&candidate.id)
             && requested_provider.is_none_or(|provider| candidate.provider == provider)
     };
@@ -457,9 +463,7 @@ fn credential_guidance(provider: Provider) -> &'static str {
         Provider::Codex => {
             "connect this Codex account with xcb accounts login <account>, or explicitly import auth.json with xcb accounts import-codex --source <path>"
         }
-        Provider::Devin => {
-            "connect this Devin account by piping a token into xcb accounts token <account>, or copy a CLI sign-in into a new account with xcb accounts import-devin --source <absolute credentials.toml path>"
-        }
+        Provider::Devin => "Devin support was removed; use a Claude or Codex account",
     }
 }
 
@@ -515,7 +519,8 @@ fn usable_account(
         })
     });
     for account in accounts {
-        if provider.is_none_or(|provider| account.provider == provider)
+        if Provider::SUPPORTED.contains(&account.provider)
+            && provider.is_none_or(|provider| account.provider == provider)
             && account.enabled
             && !store.authentication_required(&account.id)?
             && !probing.contains(&account.id)
@@ -1111,7 +1116,7 @@ async fn execute_inner(
                 quota_clear: false,
                 available: false,
             };
-            let admitted_providers: BTreeSet<_> = Provider::ALL
+            let admitted_providers: BTreeSet<_> = Provider::SUPPORTED
                 .into_iter()
                 .filter(|provider| {
                     Pin::load(store.root(), *provider)
@@ -1958,9 +1963,9 @@ pub async fn serve(
                                     queue(&outbox, Update::Notice("This turn is running in another terminal; cancel it there.".into()));
                                 }
                             }
-                            Intent::Conversation(_) => return Err(Error::Unavailable("managed conversations are available from plain xcb chat")),
-                            Intent::Habitat(_) | Intent::HabitatAt { .. } => return Err(Error::Unavailable("persistent backlog and schedules are available from plain xcb chat")),
-                            Intent::Focus(_) | Intent::MoveTask { .. } | Intent::ReleaseHold { .. } | Intent::AddWorkspace { .. } | Intent::NewProjectView { .. } => return Err(Error::Unavailable("projects are available from plain xcb chat")),
+                            Intent::Conversation(_) => return Err(Error::Unavailable("managed conversations are available through the JSON protocol or SDK")),
+                            Intent::Habitat(_) | Intent::HabitatAt { .. } => return Err(Error::Unavailable("persistent backlog and schedules are available through the JSON protocol or SDK")),
+                            Intent::Focus(_) | Intent::MoveTask { .. } | Intent::ReleaseHold { .. } | Intent::AddWorkspace { .. } | Intent::NewProjectView { .. } => return Err(Error::Unavailable("projects are available through the JSON protocol or SDK")),
                             Intent::Resume(id) => { if store.session(&id)?.is_none() { return Err(Error::Unavailable("session not found")); } current = Some(id); }
                             Intent::NewSession => current = Some(new_session(&store, &workspace, &config, None, None, None)?.id),
                             Intent::Account(account) => {
@@ -2765,7 +2770,7 @@ mod tests {
             failure: Failure::ModelQuota,
             tried: &BTreeSet::new(),
             limited_accounts: &BTreeSet::new(),
-            admitted: &Provider::ALL.into_iter().collect(),
+            admitted: &Provider::SUPPORTED.into_iter().collect(),
             credentialed: &credentialed,
             required_provider: Some(Provider::Devin),
             run_limit: 1,
@@ -2777,7 +2782,7 @@ mod tests {
             "{pinned}"
         );
         assert!(
-            pinned.contains(" · 1 without a recently seen model"),
+            pinned.contains(" · 1 on a provider build xcb has not checked"),
             "{pinned}"
         );
         view.accounts.truncate(1);
@@ -2907,9 +2912,9 @@ mod tests {
         assert!(credential_guidance(Provider::Claude).contains("accounts login"));
         assert!(credential_guidance(Provider::Codex).contains("accounts import-codex"));
         let devin = credential_guidance(Provider::Devin);
-        assert!(devin.contains("accounts token"));
-        assert!(devin.contains("accounts import-devin"));
-        assert!(!devin.contains("accounts login"));
+        assert!(devin.contains("support was removed"));
+        assert!(!devin.contains("accounts token"));
+        assert!(!devin.contains("accounts import-devin"));
     }
 
     #[test]
@@ -2962,19 +2967,20 @@ mod tests {
     }
 
     #[test]
-    fn publish_previews_the_pending_route_until_a_session_is_bound() {
+    fn retired_provider_state_is_preserved_without_creating_new_sessions() {
         let directory = tempfile::tempdir().unwrap();
         let base = xcb_core::canonical(directory.path()).unwrap();
-        let store = Store::open(&base.join("state")).unwrap();
         let workspace = crate::private::directory(&base.join("workspace")).unwrap();
-        let account = store
+        let state = base.join("state");
+        let store = Store::open(&state).unwrap();
+        let retired = store
             .add_account(Provider::Devin, "Subscription", 1, None)
             .unwrap();
-        crate::devin::auth::store_token(&store, &account.id, b"synthetic-token").unwrap();
-        let model = ModelChoice {
+        crate::devin::auth::store_token(&store, &retired.id, b"synthetic-token").unwrap();
+        let mut model = ModelChoice {
             provider: Provider::Devin,
-            id: Id::new("swe-2-high").unwrap(),
-            label: "SWE-2 High".into(),
+            id: Id::new("synthetic-retired").unwrap(),
+            label: "Retired model".into(),
             mode: xcb_core::models::Mode::Fixed,
             resolved: None,
             effort: None,
@@ -2982,6 +2988,103 @@ mod tests {
         };
         store
             .set_models(Provider::Devin, std::slice::from_ref(&model))
+            .unwrap();
+        let legacy = store
+            .create_session(&retired.id, model.clone(), &workspace, 2)
+            .unwrap();
+        drop(store);
+        let store = Store::open(&state).unwrap();
+        assert_eq!(
+            store.account(&retired.id).unwrap().provider,
+            Provider::Devin
+        );
+        assert_eq!(store.session(&legacy.id).unwrap().unwrap().model, model);
+        assert_eq!(
+            serde_json::from_str::<Provider>("\"devin\"").unwrap(),
+            Provider::Devin
+        );
+        assert!("devin".parse::<Provider>().is_err());
+        let config = Config {
+            default_account: Some(retired.id.clone()),
+            ..Config::default()
+        };
+        for requested in [
+            None,
+            Some(model.key()),
+            Some(model.id.to_string()),
+            Some(model.label.clone()),
+        ] {
+            assert!(
+                new_session(
+                    &store,
+                    &workspace,
+                    &config,
+                    Some(&retired.id),
+                    requested.as_deref(),
+                    None
+                )
+                .is_err()
+            );
+            assert!(
+                new_session(
+                    &store,
+                    &workspace,
+                    &config,
+                    None,
+                    requested.as_deref(),
+                    None
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            usable_account(&store, None, Some(&retired.id), &config)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(store.sessions(64).unwrap().len(), 1);
+        assert!(store.unsettled_runs().unwrap().is_empty());
+        let supported = store
+            .add_account(Provider::Claude, "Subscription", 3, None)
+            .unwrap();
+        model.provider = Provider::Claude;
+        model.id = Id::new("sonnet").unwrap();
+        store.set_models(Provider::Claude, &[model]).unwrap();
+        assert_eq!(
+            new_session(&store, &workspace, &config, None, None, None)
+                .unwrap()
+                .account,
+            supported.id
+        );
+        assert_eq!(store.sessions(64).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn publish_previews_the_pending_route_until_a_session_is_bound() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let workspace = crate::private::directory(&base.join("workspace")).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Subscription", 1, None)
+            .unwrap();
+        auth::store_token(
+            &store,
+            &account.id,
+            b"sk-ant-oat01-syntheticToken000000000000",
+        )
+        .unwrap();
+        let model = ModelChoice {
+            provider: Provider::Claude,
+            id: Id::new("sonnet").unwrap(),
+            label: "Sonnet".into(),
+            mode: xcb_core::models::Mode::Fixed,
+            resolved: None,
+            effort: None,
+            observed_at_ms: 1,
+        };
+        store
+            .set_models(Provider::Claude, std::slice::from_ref(&model))
             .unwrap();
         let config = Config::default();
         let outbox = Mutex::new(Outbox::default());
@@ -2992,9 +3095,9 @@ mod tests {
             _ => panic!("publish emits a full view"),
         };
         let route = view.pending_route.expect("pending route preview");
-        assert_eq!(route.provider, Provider::Devin);
+        assert_eq!(route.provider, Provider::Claude);
         assert_eq!(route.account, account.name());
-        assert_eq!(route.model, "devin/swe-2-high");
+        assert_eq!(route.model, "claude/sonnet");
 
         // A bound session replaces the preview with the committed route.
         let session = store
@@ -3018,7 +3121,7 @@ mod tests {
 
     #[tokio::test]
     async fn disabled_resumed_accounts_restore_drafts_before_any_turn_for_every_provider() {
-        for provider in Provider::ALL {
+        for provider in Provider::SUPPORTED {
             let directory = tempfile::tempdir().unwrap();
             let base = xcb_core::canonical(directory.path()).unwrap();
             let store = Arc::new(Store::open(&base.join("state")).unwrap());
@@ -3131,25 +3234,30 @@ mod tests {
         let state = xcb_core::canonical(directory.path()).unwrap().join("state");
         let store = Store::open(&state).unwrap();
         let current = store
-            .add_account(Provider::Devin, "Subscription", 1, None)
+            .add_account(Provider::Claude, "Subscription", 1, None)
             .unwrap();
         let default = store
-            .add_account(Provider::Devin, "Subscription", 2, None)
+            .add_account(Provider::Claude, "Subscription", 2, None)
             .unwrap();
         let fallback = store
-            .add_account(Provider::Devin, "Subscription", 3, None)
+            .add_account(Provider::Claude, "Subscription", 3, None)
             .unwrap();
         let unsigned = store
-            .add_account(Provider::Devin, "Subscription", 4, None)
+            .add_account(Provider::Claude, "Subscription", 4, None)
             .unwrap();
         let disabled = store
-            .add_account(Provider::Devin, "Subscription", 5, None)
+            .add_account(Provider::Claude, "Subscription", 5, None)
             .unwrap();
         let other = store
-            .add_account(Provider::Claude, "Subscription", 6, None)
+            .add_account(Provider::Codex, "Subscription", 6, None)
             .unwrap();
         for account in [&current, &default, &fallback, &disabled] {
-            crate::devin::auth::store_token(&store, &account.id, b"synthetic-token").unwrap();
+            auth::store_token(
+                &store,
+                &account.id,
+                b"sk-ant-oat01-syntheticToken000000000000",
+            )
+            .unwrap();
         }
         store.set_account_enabled(&disabled.id, false).unwrap();
         let mut config = Config {
@@ -3157,34 +3265,34 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(
-            model_account(&store, Provider::Devin, Some(&current.id), &config).unwrap(),
+            model_account(&store, Provider::Claude, Some(&current.id), &config).unwrap(),
             current.id
         );
         assert_eq!(
-            model_account(&store, Provider::Devin, Some(&other.id), &config).unwrap(),
+            model_account(&store, Provider::Claude, Some(&other.id), &config).unwrap(),
             default.id
         );
         assert_eq!(
-            model_account(&store, Provider::Devin, Some(&unsigned.id), &config).unwrap(),
+            model_account(&store, Provider::Claude, Some(&unsigned.id), &config).unwrap(),
             default.id
         );
         let current_run = store.prepare_probe(&current.id, None, 7).unwrap();
         assert_eq!(
-            model_account(&store, Provider::Devin, Some(&current.id), &config).unwrap(),
+            model_account(&store, Provider::Claude, Some(&current.id), &config).unwrap(),
             default.id
         );
         let default_run = store.prepare_probe(&default.id, None, 8).unwrap();
         assert_eq!(
-            model_account(&store, Provider::Devin, Some(&current.id), &config).unwrap(),
+            model_account(&store, Provider::Claude, Some(&current.id), &config).unwrap(),
             fallback.id
         );
         config.default_account = Some(unsigned.id);
         assert_eq!(
-            model_account(&store, Provider::Devin, None, &config).unwrap(),
+            model_account(&store, Provider::Claude, None, &config).unwrap(),
             fallback.id
         );
         store.set_account_enabled(&fallback.id, false).unwrap();
-        assert!(model_account(&store, Provider::Devin, Some(&current.id), &config).is_err());
+        assert!(model_account(&store, Provider::Claude, Some(&current.id), &config).is_err());
         assert_eq!(store.unsettled_runs().unwrap().len(), 2);
         store.settle(&current_run, State::Idle, 9).unwrap();
         store.settle(&default_run, State::Idle, 10).unwrap();
@@ -3311,25 +3419,38 @@ mod tests {
                 .key(),
             "codex/gpt-6-astra/high"
         );
-        assert_eq!(
+        assert!(
             choose_model(&store, Provider::Devin, None, &config)
-                .unwrap()
-                .key(),
-            "devin/gpt-6-astra-max"
+                .unwrap_err()
+                .to_string()
+                .contains("support was removed")
         );
         // A pinned model that routing.never excludes is refused, not widened.
-        let refused = choose_model(&store, Provider::Devin, Some("devin/swe-2-high"), &config)
-            .unwrap_err()
-            .to_string();
+        let mut excluded = config.clone();
+        excluded.routing.never.push("claude/sonnet/max".into());
+        let refused = choose_model(
+            &store,
+            Provider::Claude,
+            Some("claude/sonnet/max"),
+            &excluded,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(refused.contains("routing.never"), "{refused}");
-        let mut allowed = Config::default();
-        allowed.routing.never.clear();
         assert_eq!(
-            choose_model(&store, Provider::Devin, Some("devin/swe-2-high"), &allowed)
+            choose_model(&store, Provider::Claude, Some("claude/sonnet/max"), &config)
                 .unwrap()
                 .key(),
-            "devin/swe-2-high"
+            "claude/sonnet/max"
         );
+        for requested in ["devin/swe-2-high", "swe-2-high", "gpt-6-astra-max"] {
+            assert!(
+                choose_model(&store, Provider::Devin, Some(requested), &config)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("support was removed")
+            );
+        }
     }
 
     #[test]
@@ -3339,20 +3460,20 @@ mod tests {
         let workspace = crate::private::directory(&base.join("workspace")).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let unsigned = store
-            .add_account(Provider::Devin, "Subscription", 1, None)
+            .add_account(Provider::Claude, "Subscription", 1, None)
             .unwrap();
         let connected = store
-            .add_account(Provider::Devin, "Subscription", 2, None)
+            .add_account(Provider::Claude, "Subscription", 2, None)
             .unwrap();
-        let claude = store
-            .add_account(Provider::Claude, "Subscription", 3, None)
+        let codex = store
+            .add_account(Provider::Codex, "Subscription", 3, None)
             .unwrap();
         let config = Config {
             default_account: Some(unsigned.id.clone()),
             ..Config::default()
         };
         let model = ModelChoice {
-            provider: Provider::Devin,
+            provider: Provider::Claude,
             id: Id::new("synthetic-test").unwrap(),
             label: "Synthetic".into(),
             mode: xcb_core::models::Mode::Fixed,
@@ -3361,14 +3482,19 @@ mod tests {
             observed_at_ms: 1,
         };
         store
-            .set_models(Provider::Devin, std::slice::from_ref(&model))
+            .set_models(Provider::Claude, std::slice::from_ref(&model))
             .unwrap();
-        crate::devin::auth::store_token(&store, &connected.id, b"synthetic-token").unwrap();
+        auth::store_token(
+            &store,
+            &connected.id,
+            b"sk-ant-oat01-syntheticToken000000000000",
+        )
+        .unwrap();
         let chosen =
             new_session(&store, &workspace, &config, None, Some(&model.key()), None).unwrap();
         assert_eq!(chosen.account, connected.id);
         let other_default = Config {
-            default_account: Some(claude.id),
+            default_account: Some(codex.id),
             ..config.clone()
         };
         assert_eq!(
@@ -3393,7 +3519,12 @@ mod tests {
         );
         assert_eq!(store.unsettled_runs().unwrap().len(), 1);
         store.settle(&run, State::Idle, 5).unwrap();
-        crate::devin::auth::store_token(&store, &unsigned.id, b"synthetic-token").unwrap();
+        auth::store_token(
+            &store,
+            &unsigned.id,
+            b"sk-ant-oat01-syntheticToken000000000000",
+        )
+        .unwrap();
         assert_eq!(
             new_session(&store, &workspace, &config, None, Some(&model.key()), None)
                 .unwrap()

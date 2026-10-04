@@ -22,18 +22,10 @@ tools remain unavailable.
 Provider account or organization restrictions can make an approval mode
 unavailable; xcb cannot grant access the provider has withheld.
 
-Devin uses its CLI `auto` setting and ACP `accept-edits` mode. xcb answers
-allowed workspace-tool requests automatically for one call at a time. Devin
-bypass is not enabled: the pinned 3000.11.3 build executed a native web request
-despite a deny rule, and its separate tool-disable setting did not disable the
-native `skill` tool. The
-[bypass test results](../qualification/devin-bypass-3000.11.3-assessment.json)
-record both failures for that exact executable.
-
 ## Native execution direction
 
 The [north star](vision.md#native-provider-execution) calls for native file,
-shell, and network tools for Claude Code, Codex, and Devin. On macOS,
+shell, and network tools for Claude Code and Codex. On macOS,
 `workspace_native_exec` runs commands in the granted worktree through each
 provider's native tool protocol. It uses an OS policy that allows DNS and
 outbound TCP 443, clears the inherited environment, and supplies a private
@@ -54,9 +46,8 @@ legacy Codex host command tool. Linux and Windows refuse native commands.
 Native backends must retain each provider's approval controls and verify their
 reported mode. A native shell requires fresh filesystem, network, cancellation,
 and recovery evidence. Enabling a tool or changing a configuration flag cannot
-reuse the broker-only evidence. Devin's native approval contract needs its own
-qualification; the CLI's `auto` alias and ACP `accept-edits` mode do not provide
-Claude's Auto classifier or Codex's automatic reviewer.
+reuse the broker-only evidence. Devin execution remains retired; older account
+and session records remain readable, but cannot acquire new execution grants.
 
 ## When a provider denies an action
 

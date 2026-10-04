@@ -40,7 +40,11 @@ impl NativeConfig {
         let mut workspaces = std::collections::BTreeSet::new();
         for scope in &self.scopes {
             if scope.providers.is_empty()
-                || scope.providers.len() > Provider::ALL.len()
+                || scope.providers.len() > Provider::SUPPORTED.len()
+                || scope
+                    .providers
+                    .iter()
+                    .any(|provider| !Provider::SUPPORTED.contains(provider))
                 || scope
                     .providers
                     .iter()
@@ -404,7 +408,7 @@ pub fn status(provider: Provider) -> NativeBackendStatus {
         provider,
         transport,
         approval,
-        implemented: cfg!(target_os = "macos"),
+        implemented: cfg!(target_os = "macos") && Provider::SUPPORTED.contains(&provider),
         qualified: false,
         fallback_permitted: false,
         required_cases: ACCEPTANCE_CASES,
@@ -438,7 +442,7 @@ pub fn inspect_session(store: &Store, id: &xcb_core::Id) -> Result<serde_json::V
 }
 
 pub fn statuses() -> Vec<NativeBackendStatus> {
-    Provider::ALL.into_iter().map(status).collect()
+    Provider::SUPPORTED.into_iter().map(status).collect()
 }
 
 pub fn require_execution(config: &Config, requirements: TaskRequirements) -> Result<()> {
@@ -460,7 +464,7 @@ mod tests {
         assert!(legacy.get("native_execution").is_none());
         let scope = NativeScope {
             workspace: PathBuf::from("/tmp/project"),
-            providers: vec![Provider::Claude, Provider::Devin],
+            providers: vec![Provider::Claude, Provider::Codex],
             github_credentials: false,
             read_only_roots: vec![],
             git_metadata: vec![],
@@ -476,14 +480,18 @@ mod tests {
         );
         assert!(
             config
-                .scope(Path::new("/tmp/project"), Provider::Devin)
+                .scope(Path::new("/tmp/project"), Provider::Codex)
                 .is_some()
         );
         assert!(
             config
-                .scope(Path::new("/tmp/project"), Provider::Codex)
+                .scope(Path::new("/tmp/project"), Provider::Devin)
                 .is_none()
         );
+        let mut retired = config.clone();
+        retired.scopes[0].providers = vec![Provider::Devin];
+        assert!(retired.validate().is_err());
+        assert!(!status(Provider::Devin).implemented);
         assert!(
             config
                 .scope(Path::new("/tmp/project/nested"), Provider::Claude)
@@ -513,7 +521,7 @@ mod tests {
         let workspace = crate::private::directory(&base.join("workspace")).unwrap();
         let mut scope = NativeScope {
             workspace,
-            providers: Provider::ALL.to_vec(),
+            providers: Provider::SUPPORTED.to_vec(),
             github_credentials: false,
             read_only_roots: vec![],
             git_metadata: vec![],
@@ -613,8 +621,8 @@ mod tests {
     #[test]
     fn native_candidates_cover_every_provider_without_claiming_activation() {
         let statuses = statuses();
-        assert_eq!(statuses.len(), Provider::ALL.len());
-        for (provider, status) in Provider::ALL.into_iter().zip(statuses) {
+        assert_eq!(statuses.len(), Provider::SUPPORTED.len());
+        for (provider, status) in Provider::SUPPORTED.into_iter().zip(statuses) {
             assert_eq!(status.provider, provider);
             assert_eq!(status.implemented, cfg!(target_os = "macos"));
             assert!(!status.qualified && !status.fallback_permitted);
@@ -625,7 +633,7 @@ mod tests {
     #[test]
     fn legacy_execution_is_unchanged_but_native_requests_never_fall_back() {
         assert!(require_execution(&Config::default(), TaskRequirements::default()).is_ok());
-        for provider in Provider::ALL {
+        for provider in Provider::SUPPORTED {
             let requirements = TaskRequirements {
                 native_execution: true,
                 ..Default::default()
@@ -656,7 +664,7 @@ mod tests {
         let root = xcb_core::canonical(directory.path()).unwrap();
         let workspace = crate::private::directory(&root.join("workspace")).unwrap();
         let store = Arc::new(Store::open(&root.join("state")).unwrap());
-        for provider in Provider::ALL {
+        for provider in Provider::SUPPORTED {
             let account = store.add_account(provider, "Fixture", 1, None).unwrap();
             let model = ModelChoice {
                 provider,
@@ -731,7 +739,7 @@ mod tests {
         };
         let excluded = BTreeSet::new();
         let accounts = BTreeSet::new();
-        for provider in Provider::ALL {
+        for provider in Provider::SUPPORTED {
             let result = routing::smart_route(
                 &store,
                 &Config::default(),

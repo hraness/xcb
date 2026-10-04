@@ -968,6 +968,7 @@ pub(crate) fn prepare_codex(
 }
 
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
 pub(crate) async fn prepare_devin(
     store: &Store,
     pin: &Pin,
@@ -1085,6 +1086,7 @@ pub(crate) async fn prepare_devin(
     ))
 }
 
+#[allow(dead_code)]
 async fn probe_devin(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<Vec<ModelChoice>> {
     if account.is_none() {
         return Err(Error::Unavailable(
@@ -1225,11 +1227,7 @@ pub fn provider_admitted(root: &Path, pin: &Pin) -> bool {
                 && sandbox::available()
                 && crate::codex::runtime_admitted_with_catalog(root, pin).is_ok()
         }
-        Provider::Devin => {
-            cfg!(target_os = "macos")
-                && sandbox::available()
-                && crate::devin::runtime_admitted_with_catalog(root, pin).is_ok()
-        }
+        Provider::Devin => false,
     }
 }
 
@@ -2271,7 +2269,9 @@ pub async fn probe(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<Vec
         return probe_codex(store, pin, account).await;
     }
     if pin.provider == Provider::Devin {
-        return probe_devin(store, pin, account).await;
+        return Err(Error::Unavailable(
+            "Devin support was removed; use Claude or Codex",
+        ));
     }
     let now = now_ms();
     let model = ModelChoice {
@@ -2504,6 +2504,17 @@ fn requested_computer_capability(
     }
 }
 
+/// Native MCP is an execution dependency only for tasks that have declared a
+/// Codex-native capability.  Merely registering a Codex-native server must
+/// not make ordinary headless workers depend on the desktop connector.
+#[cfg(any(all(test, unix), target_os = "macos"))]
+fn should_start_native_proxy(
+    pane_generation: bool,
+    requirements: xcb_core::session::TaskRequirements,
+) -> bool {
+    !pane_generation && requirements.requires_codex()
+}
+
 pub async fn run(
     store: Arc<Store>,
     input: RunInput,
@@ -2556,36 +2567,37 @@ pub async fn run(
         crate::codex::runtime_admitted_with_catalog(store.root(), &pin)?;
         let run = store.prepare_run(&session.id, session.revision, now_ms())?;
         #[cfg(target_os = "macos")]
-        let mut native_proxy = if !input.pane_generation {
-            match input
-                .config
-                .capabilities
-                .servers
-                .iter()
-                .find(|server| {
-                    server.transport == crate::capabilities::CapabilityTransport::CodexNative
-                })
-                .cloned()
-            {
-                Some(server) => match crate::native_mcp::NativeMcpProxy::start(
-                    server,
-                    store.clone(),
-                    run.clone(),
-                    workspace.root().to_owned(),
-                )
-                .await
+        let mut native_proxy =
+            if should_start_native_proxy(input.pane_generation, session.requirements) {
+                match input
+                    .config
+                    .capabilities
+                    .servers
+                    .iter()
+                    .find(|server| {
+                        server.transport == crate::capabilities::CapabilityTransport::CodexNative
+                    })
+                    .cloned()
                 {
-                    Ok(proxy) => Some(proxy),
-                    Err(error) => {
-                        store.settle(&run, State::Failed, now_ms())?;
-                        return Err(error);
-                    }
-                },
-                None => None,
-            }
-        } else {
-            None
-        };
+                    Some(server) => match crate::native_mcp::NativeMcpProxy::start(
+                        server,
+                        store.clone(),
+                        run.clone(),
+                        workspace.root().to_owned(),
+                    )
+                    .await
+                    {
+                        Ok(proxy) => Some(proxy),
+                        Err(error) => {
+                            store.settle(&run, State::Failed, now_ms())?;
+                            return Err(error);
+                        }
+                    },
+                    None => None,
+                }
+            } else {
+                None
+            };
         #[cfg(target_os = "macos")]
         let prepared = prepare_codex_native(
             &store,
@@ -2635,26 +2647,9 @@ pub async fn run(
         return run_prepared(store, input, cancel, observer, launch, protocol, workspace).await;
     }
     if session.model.provider == Provider::Devin {
-        let pin = Pin::load(store.root(), Provider::Devin)?;
-        crate::devin::runtime_admitted_with_catalog(store.root(), &pin)?;
-        let run = store.prepare_run(&session.id, session.revision, now_ms())?;
-        let (launch, protocol) = match prepare_devin(
-            &store,
-            &pin,
-            &session.model,
-            !input.pane_generation,
-            false,
-            Some(&run),
-        )
-        .await
-        {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                store.settle(&run, State::Failed, now_ms())?;
-                return Err(error);
-            }
-        };
-        return run_prepared(store, input, cancel, observer, launch, protocol, workspace).await;
+        return Err(Error::Unavailable(
+            "Devin support was removed; use Claude or Codex",
+        ));
     }
     if session.model.provider != Provider::Claude {
         return Err(Error::Unavailable(
@@ -3538,6 +3533,39 @@ mod tests {
             json!({}),
         ] {
             assert!(requested_computer_capability(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn native_proxy_requires_declared_codex_capability() {
+        use xcb_core::session::TaskRequirements;
+
+        assert!(!should_start_native_proxy(
+            false,
+            TaskRequirements::default()
+        ));
+        assert!(!should_start_native_proxy(
+            true,
+            TaskRequirements {
+                codex_native: true,
+                ..Default::default()
+            }
+        ));
+        for requirements in [
+            TaskRequirements {
+                signed_in_browser: true,
+                ..Default::default()
+            },
+            TaskRequirements {
+                desktop: true,
+                ..Default::default()
+            },
+            TaskRequirements {
+                codex_native: true,
+                ..Default::default()
+            },
+        ] {
+            assert!(should_start_native_proxy(false, requirements));
         }
     }
 

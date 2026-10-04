@@ -23,7 +23,6 @@ tokio = { version = "=1.47.1", features = ["rt-multi-thread", "macros", "signal"
 unicode-width = "=0.2.2"
 xcb-core = { version = "0.17.11", path = "../xcb-core" }
 xcb-runtime = { version = "0.17.11", path = "../xcb-runtime" }
-xcb-tui = { version = "0.17.11", path = "../xcb-tui" }
 zeroize = "=1.9.0"
 
 [target.'cfg(unix)'.dependencies]

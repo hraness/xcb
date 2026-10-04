@@ -1,11 +1,11 @@
 <!-- hraness:xcb-landing:start -->
 # Excalibur (xcb)
 
-Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin
+Excalibur (xcb) routes coding tasks across the Claude and Codex
 subscriptions you already pay for. Each task runs on an account that is signed
-in, idle, and not at a known usage limit, on a model that fits the work. Type
-work into xcb's terminal thread, where tasks keep running after you close the
-terminal, or hand it one task at a time from another agent or your own code.
+in, idle, and not at a known usage limit, on a model that fits the work. Send
+work through the headless CLI, JSON contract, or SDK. The former interactive
+terminal and hosted remote commands are removed from the current source build.
 <!-- hraness:xcb-landing:end -->
 
 **Status:** [Latest release](https://github.com/hraness/xcb/releases/latest)
@@ -37,8 +37,8 @@ and installs `~/.local/bin/xcb`:
 curl -fsSL https://xcb.sh/install.sh | sh
 ```
 
-New release installs update automatically before an interactive `xcb`, `chat`,
-`resume`, `run`, or `doctor` command, at most once a day and only when no other
+New release installs update automatically before an interactive `run` or
+`doctor` command, at most once a day and only when no other
 xcb command or service is using the installation. Run `xcb update disable` to
 turn this off, or `xcb update enable --policy notify` for notices only. Existing
 saved preferences stay in force. `HRANESS_NO_UPDATE=1`, CI, JSON output, and
@@ -53,11 +53,10 @@ not self-update; rerun the release installer to create a supported install.
 ### Windows
 
 To run Claude Code on Windows, install the Linux build of xcb inside [WSL2](https://learn.microsoft.com/windows/wsl/install) with
-the command above. Claude is the supported provider on Linux; Codex and Devin
-require macOS. Releases also carry a native
-Windows x86_64 build that runs everything except the providers (the thread,
-`xcb doctor`, accounts, remote control, and `xcb route`, which refuses provider
-work with those WSL2 steps). Install it from PowerShell:
+the command above. Claude is the supported provider on Linux; Codex
+requires macOS. Releases also carry a native
+Windows x86_64 build for local task inspection, `xcb doctor`, accounts, and
+`xcb route`, which refuses provider work with those WSL2 steps. Install it from PowerShell:
 
 ```powershell
 irm https://xcb.sh/install.ps1 | iex
@@ -83,12 +82,11 @@ updates and removal.
 
 ## Use it as your coding agent
 
-Install Claude Code 2.1.268 or later, then connect an account and open your
-thread:
+Install Claude Code 2.1.268 or later, then connect an account and run a task:
 
 ```sh
 xcb setup claude
-xcb
+xcb run -p "Explain this repository"
 ```
 
 `xcb setup` lets you choose an existing account or add another, checks the
@@ -96,22 +94,21 @@ Claude Code build, opens browser sign-in, and loads the account's models. New
 Claude accounts keep a model-only token in xcb's state folder. Accounts connected
 for shared browser access use a dedicated xcb Keychain entry on macOS. Both are
 separate from your usual Claude Code login. `xcb setup codex`
-works the same way; Devin connects by importing the Devin CLI's sign-in
-([accounts and models](https://xcb.sh/docs/providers)).
+works the same way; see [accounts and models](https://xcb.sh/docs/providers)
+for sign-in and import options.
 
-Plain `xcb` opens your thread, one conversation for all your projects. Type a
-task such as “fix the failing test in ~/src/app”. xcb picks the project folder
-and says why (“Started Fix the failing test in `app` · named `app` ·
-/workspace to move”), picks an account and model, and runs the task there. If
-a turn stops at a usage limit, xcb continues the task on another account or
-model that can take it. Closing the terminal detaches without cancelling
-anything; the next `xcb` shows the results.
+`xcb run` picks an account and model and prints the result. `xcb --json route`
+runs exactly one turn and returns a JSON result; its caller owns any retry.
+For durable managed work, submit an explicitly scoped backlog item with
+`xcb backlog add /absolute/path/to/project "Fix the failing test" --ready`.
+Inspect it with `xcb tasks` and `xcb tasks show <task-id> --json`.
 
-- `/tasks` lists running and finished work; `/cancel <task-id>` stops a task.
-- `/steer <task-id> <guidance>` adds guidance for a task's next turn.
-- Start a prompt with `Use Claude`, `Use Codex`, or `Use Devin` to choose the
-  provider. `/help` lists every command, and the
-  [terminal guide](docs/terminal.md) covers keys and search.
+- `xcb tasks cancel <task-id> --revision <revision>` requests cancellation.
+- `xcb steer <task-id> <guidance>` adds guidance for the task's next turn.
+- `xcb attention` shows questions; `xcb backlog reply` answers one.
+- `xcb conversations --new --json` creates a project view without opening a UI.
+
+The [headless command guide](docs/terminal.md) covers retained local operations.
 
 ## Continue a Claude or Codex conversation
 
@@ -122,10 +119,11 @@ model selection. Discovery and import use a 24-hour activity window by default:
 xcb sessions discover
 xcb sessions import --recent
 xcb conversations                           # saved conversations, including imports
-xcb chat --resume <conversation-id>
+xcb history <conversation-id>
+xcb backlog add <conversation-id> "Continue the work" --ready
 ```
 
-Send a new message in the imported view to start work. Import copies user and
+Submit a backlog task in the imported conversation to start work. Import copies user and
 assistant text, preserves the original files, and does not take over the
 provider process. For a conversation started in your home folder, select one
 result with `xcb sessions import <candidate-id> --workspace /path/to/project`.
@@ -166,9 +164,8 @@ example.
 | --- | --- | --- |
 | Claude | Claude Code 2.1.268 or later within version 2 | Coding workflow passed on macOS ARM64 with the tested account. On Linux, Claude runs after you run xcb's sandbox checks on that machine. |
 | Codex | Codex CLI 0.159.0, 0.158.0, 0.157.1, or 0.156.1 on macOS ARM64 | Coding workflow passed on macOS ARM64 with the tested account and Codex CLI 0.158.0. |
-| Devin | Devin CLI 3000.11.3, 3000.11.1, or 3000.10.31 on macOS ARM64 | Coding workflow passed on macOS ARM64 with the tested account and Devin CLI 3000.11.3. |
 
-xcb checks each provider executable's version, and for Codex and Devin its
+xcb checks each provider executable's version, and for Codex its
 exact SHA-256, before it runs anything. `xcb doctor` shows what it found.
 
 ## Use available quota before it resets
@@ -183,7 +180,7 @@ exact SHA-256, before it runs anything. `xcb doctor` shows what it found.
 Tasks that require an existing signed-in browser or native desktop control
 stay with Codex and prefer Astra, including after a retry or handoff. Use
 `xcb run --signed-in-browser` or `xcb run --desktop` to state that requirement.
-Claude and Devin can hand these tasks to Codex after their current run ends
+Claude can hand these tasks to Codex after their current run ends
 safely. `xcb tools setup-computer` connects the installed desktop computer-use
 plugin on macOS. `xcb tools setup-browser` shares Claude's Chrome extension
 across providers and opens full Claude sign-in when needed. This sign-in uses
@@ -193,15 +190,15 @@ a dedicated xcb Keychain entry on macOS. See
 ## Everyday commands
 
 ```sh
-xcb                                    # your thread, from any directory
-xcb chat --new                         # a project view for this directory
+xcb --help                             # discover local commands
+xcb conversations --new --json          # a project view for this directory
 xcb run -p "Explain this repository"   # one task here; prints the answer
 xcb tasks                              # managed tasks across projects
 xcb attention                          # questions and approvals waiting on you
 xcb accounts                           # accounts, usage, and which need you
 xcb doctor                             # provider builds and unfinished runs
 xcb upgrade                            # install the latest verified release
-xcb help advanced                      # remote devices, project agents, extensions
+xcb help advanced                      # project agents and extensions
 ```
 
 Accounts, credentials, and task history live in `~/.local/share/xcb`, outside
@@ -214,13 +211,13 @@ command, setting, and exit code.
 - **Tools:** providers use xcb's workspace tools and registered host MCP servers. Native shells and unrelated provider plugins remain unavailable; see [browser and shared tools](docs/tools.md).
 - **Tests and builds:** the [command runner](docs/command-runner.md) is an offline Linux VM on macOS ARM64; Git is read-only there, and native macOS builds can't run.
 - **Concurrency:** each account runs one provider turn at a time by default; `max_runs_per_account` in `config.json` (1–32) raises how many tasks may share an account, while sign-in and account checks still take the account alone. Tasks in the same project folder take turns.
-- **Remote devices:** `xcb link` needs a relay deployed from this repository's `convex/` folder ([remote operations](docs/remote-operations.md)).
+- **Remote devices:** the hosted remote commands are removed. Valhalla integration is planned, not shipped ([north star](docs/vision.md)).
 - **Managed harness:** the self-tuning harness is in development; the current build does not run self-modifying routing policies ([design](docs/managed-harness.md)).
 
 ## Compared with
 
-- **Claude Code, Codex, or the Devin CLI alone:** enough when one subscription covers your work, and you keep all of the tool's built-in tools, MCP servers, and plugins. xcb supplies workspace tools, its offline command runner on macOS, and registered host tool servers across providers.
-- **Account switchers such as [claude-swap](https://github.com/realiti4/claude-swap):** change which login Claude Code uses. xcb picks an account for each task across Claude, Codex, and Devin, and sandboxes each run.
+- **Claude Code or Codex alone:** enough when one subscription covers your work, and you keep all of the tool's built-in tools, MCP servers, and plugins. xcb supplies workspace tools, its offline command runner on macOS, and registered host tool servers across providers.
+- **Account switchers such as [claude-swap](https://github.com/realiti4/claude-swap):** change which login Claude Code uses. xcb picks an account for each task across Claude and Codex, and sandboxes each run.
 - **[Claude Code Router](https://xcb.sh/compare/claude-code-router) and [OpenRouter](https://xcb.sh/compare/openrouter):** send each API request to a provider or model you choose, usually paid per token. xcb never touches API traffic; it routes whole tasks to subscriptions you already pay for.
 - **[Conductor](https://xcb.sh/compare/conductor) and Claude Squad:** give each agent a Git worktree and a merge flow. xcb has no worktree or pull request flow.
 

@@ -6,10 +6,10 @@ Posts go out from the @hraness account. The status is Latest release: v0.17.1. S
 
 ## X thread
 
-Post 1 of 9, 207 characters
+Post 1 of 9, 199 characters
 
 ```text
-Excalibur (xcb) is a free terminal agent for people who pay for more than one of Claude, Codex, and Devin. Type a task once, and xcb picks which of your accounts runs it. No more switching logins or windows.
+Excalibur (xcb) is a free terminal agent for people who pay for more than one of Claude and Codex. Type a task once, and xcb picks which of your accounts runs it. No more switching logins or windows.
 ```
 
 Post 2 of 9, 169 characters
@@ -36,10 +36,10 @@ Post 5 of 9, 208 characters
 Link your machines with xcb link. From any of them, xcb fleet shows what each one is doing, and xcb dispatch sends a task to the one at home. Task content is end-to-end encrypted, on a relay you run yourself.
 ```
 
-Post 6 of 9, 203 characters
+Post 6 of 9, 187 characters
 
 ```text
-xcb runs Claude Code, Codex, or the Devin CLI under your own sign-in, in an OS sandbox, and holds each account for one task at a time. It never falls back to an API key, and it never touches API traffic.
+xcb runs Claude Code or Codex under your own sign-in, in an OS sandbox, and holds each account for one task at a time. It never falls back to an API key, and it never touches API traffic.
 ```
 
 Post 7 of 9, 189 characters
@@ -64,10 +64,10 @@ https://xcb.sh/blog/one-agent-for-all-your-ai-plans
 
 ## Bluesky thread
 
-Post 1 of 9, 207 characters
+Post 1 of 9, 199 characters
 
 ```text
-Excalibur (xcb) is a free terminal agent for people who pay for more than one of Claude, Codex, and Devin. Type a task once, and xcb picks which of your accounts runs it. No more switching logins or windows.
+Excalibur (xcb) is a free terminal agent for people who pay for more than one of Claude and Codex. Type a task once, and xcb picks which of your accounts runs it. No more switching logins or windows.
 ```
 
 Post 2 of 9, 169 characters
@@ -94,10 +94,10 @@ Post 5 of 9, 208 characters
 Link your machines with xcb link. From any of them, xcb fleet shows what each one is doing, and xcb dispatch sends a task to the one at home. Task content is end-to-end encrypted, on a relay you run yourself.
 ```
 
-Post 6 of 9, 203 characters
+Post 6 of 9, 187 characters
 
 ```text
-xcb runs Claude Code, Codex, or the Devin CLI under your own sign-in, in an OS sandbox, and holds each account for one task at a time. It never falls back to an API key, and it never touches API traffic.
+xcb runs Claude Code or Codex under your own sign-in, in an OS sandbox, and holds each account for one task at a time. It never falls back to an API key, and it never touches API traffic.
 ```
 
 Post 7 of 9, 189 characters
@@ -122,10 +122,10 @@ https://xcb.sh/blog/one-agent-for-all-your-ai-plans
 
 ## Threads thread
 
-Post 1 of 9, 207 characters
+Post 1 of 9, 199 characters
 
 ```text
-Excalibur (xcb) is a free terminal agent for people who pay for more than one of Claude, Codex, and Devin. Type a task once, and xcb picks which of your accounts runs it. No more switching logins or windows.
+Excalibur (xcb) is a free terminal agent for people who pay for more than one of Claude and Codex. Type a task once, and xcb picks which of your accounts runs it. No more switching logins or windows.
 ```
 
 Post 2 of 9, 169 characters
@@ -152,10 +152,10 @@ Post 5 of 9, 208 characters
 Link your machines with xcb link. From any of them, xcb fleet shows what each one is doing, and xcb dispatch sends a task to the one at home. Task content is end-to-end encrypted, on a relay you run yourself.
 ```
 
-Post 6 of 9, 203 characters
+Post 6 of 9, 187 characters
 
 ```text
-xcb runs Claude Code, Codex, or the Devin CLI under your own sign-in, in an OS sandbox, and holds each account for one task at a time. It never falls back to an API key, and it never touches API traffic.
+xcb runs Claude Code or Codex under your own sign-in, in an OS sandbox, and holds each account for one task at a time. It never falls back to an API key, and it never touches API traffic.
 ```
 
 Post 7 of 9, 189 characters
@@ -181,7 +181,7 @@ https://xcb.sh/blog/one-agent-for-all-your-ai-plans
 ## LinkedIn post
 
 ```text
-Excalibur (xcb) is a free terminal agent for people who pay for more than one of Claude, Codex, and Devin. Type a task once, and xcb picks which of your accounts runs it. No more switching logins or windows.
+Excalibur (xcb) is a free terminal agent for people who pay for more than one of Claude and Codex. Type a task once, and xcb picks which of your accounts runs it. No more switching logins or windows.
 
 Quota you don't use by the reset is gone. xcb reads each Claude and Codex account's usage, no more than five minutes old, and favors unused quota that is about to reset.
 
@@ -191,7 +191,7 @@ Every task runs in the background. xcb tasks lists them across all your projects
 
 Link your machines with xcb link. From any of them, xcb fleet shows what each one is doing, and xcb dispatch sends a task to the one at home. Task content is end-to-end encrypted, on a relay you run yourself.
 
-xcb runs Claude Code, Codex, or the Devin CLI under your own sign-in, in an OS sandbox, and holds each account for one task at a time. It never falls back to an API key, and it never touches API traffic.
+xcb runs Claude Code or Codex under your own sign-in, in an OS sandbox, and holds each account for one task at a time. It never falls back to an API key, and it never touches API traffic.
 
 xcb is for developers juggling more than one coding plan. It works for agents too: another program hands xcb a task as JSON and gets back which account ran it, how it ended, and the answer.
 
@@ -217,12 +217,12 @@ Topics: Developer Tools, Artificial Intelligence, Open Source
 ## Show HN and first comment fact sheet
 
 - Use your Claude, Codex, and Devin plans from one agent.
-- Excalibur (xcb) is a free terminal agent for people who pay for more than one of Claude, Codex, and Devin. Type a task once, and xcb picks which of your accounts runs it. No more switching logins or windows.
+- Excalibur (xcb) is a free terminal agent for people who pay for more than one of Claude and Codex. Type a task once, and xcb picks which of your accounts runs it. No more switching logins or windows.
 - Quota you don't use by the reset is gone. xcb reads each Claude and Codex account's usage, no more than five minutes old, and favors unused quota that is about to reset.
 - When a provider says an account hit its usage limit partway through a task, xcb moves the task to another account or model that can take it, with its original instructions. You don't paste the prompt into a new window.
 - Every task runs in the background. xcb tasks lists them across all your projects, and xcb attention collects the questions your agents are waiting on you to answer.
 - Link your machines with xcb link. From any of them, xcb fleet shows what each one is doing, and xcb dispatch sends a task to the one at home. Task content is end-to-end encrypted, on a relay you run yourself.
-- xcb runs Claude Code, Codex, or the Devin CLI under your own sign-in, in an OS sandbox, and holds each account for one task at a time. It never falls back to an API key, and it never touches API traffic.
+- xcb runs Claude Code or Codex under your own sign-in, in an OS sandbox, and holds each account for one task at a time. It never falls back to an API key, and it never touches API traffic.
 - xcb is for developers juggling more than one coding plan. It works for agents too: another program hands xcb a task as JSON and gets back which account ran it, how it ended, and the answer.
 - xcb is free and MIT licensed. Latest release: v0.17.1. Install it on a Mac with Apple silicon or on Linux, connect a Claude account with xcb setup claude, and open your thread with xcb.
 - Latest release: v0.17.1. https://xcb.sh/blog/one-agent-for-all-your-ai-plans
@@ -242,7 +242,7 @@ Topics: Developer Tools, Artificial Intelligence, Open Source
 
 ## Facts and their records
 
-- providers: three. README.md Providers table: Claude, Codex, and Devin
+- providers: two. README.md Providers table: Claude and Codex
 - meterMaxAge: five minutes. docs/quota-routing.md: usage measurements must be at most five minutes old to count
 - claudeWindows: 5-hour and 7-day. docs/quota-routing.md: Claude uses the five_hour and seven_day windows
 - importWindow: 24 hours. README.md: import work active in the last 24 hours

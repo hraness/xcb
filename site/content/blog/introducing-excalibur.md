@@ -1,4 +1,4 @@
-Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for. Give it a task, and it chooses an available account and a model for the work. Each task runs through the provider's own coding tool under your sign-in.
+Excalibur (xcb) routes coding tasks across the Claude and Codex subscriptions you already pay for. Give it a task, and it chooses an available account and a model for the work. Each task runs through the provider's own coding tool under your sign-in.
 
 With several coding plans, choosing where to send the next task becomes a job of its own. One account is busy, another is close to its limit, and a third has unused quota that resets soon. xcb keeps that account selection together with the tasks, so you can follow the work from one terminal.
 

@@ -230,25 +230,25 @@ mod tests {
     }
 }
 
-/// What plain `xcb` prints when it can't open the chat (no terminal): at
-/// most 25 lines on stdout, exit 0.
+/// What plain `xcb` prints now that the interactive terminal surface is gone.
 pub fn start_text() -> String {
     format!(
         "\
-Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin
+Excalibur (xcb) routes coding tasks across the Claude and Codex
 subscriptions you already pay for.
 
 Start here
   xcb setup claude       Choose or add a Claude account and sign in
-  xcb                    Open your thread (needs a terminal)
-  xcb run -p \"<task>\"    Run one task here and print the result
+  xcb run -p \"<task>\"    Run one headless task here and print the result
+  xcb --json route        Accept one versioned task from another agent
   xcb doctor             Check providers, accounts and unfinished runs
 
 Everyday
   xcb accounts           See your accounts and how much each has left
-  xcb conversations      List your thread and project views
+  xcb tasks               Inspect durable tasks and their records
   xcb attention          Show questions and approvals waiting on you
 
+SDK and projections: docs/vision.md · docs/route.md · docs/sdk.md
 All commands: xcb --help · Advanced: xcb help advanced
 xcb {}
 ",
@@ -260,15 +260,14 @@ xcb {}
 /// lines. Hidden internal commands are left out, and the rest that aren't
 /// here are in [`ADVANCED`]; a test keeps both lists in step with the parser.
 pub const ROOT_HELP: &str = "\
-Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin
-subscriptions you already pay for. Plain `xcb` opens your thread from any
-directory; xcb picks each task's project directory and says which.
+Excalibur (xcb) routes coding tasks across the Claude and Codex
+subscriptions you already pay for. Use `xcb run`, `xcb --json route`, or the
+SDK; the former interactive terminal surface has been removed.
 
 Usage: xcb [command] [options]
 
 Start here
   setup          Choose or add an account, check the provider and sign in
-  chat           Open your thread; --new starts a project view for this folder
   run            Run one task here and print the result
   doctor         Check providers, accounts and unfinished runs
 
@@ -279,8 +278,8 @@ Accounts and models
   offers         Show public plan offers (not checked against your account)
 
 Conversations and tasks
-  conversations  List your thread and project views
-  workspaces     List, add and hide the project folders the thread picks from
+  conversations  List saved conversations and project views
+  workspaces     List, add and explain project directories used by tasks
   history        Read a conversation's saved messages
   rename         Rename a conversation
   tasks          Inspect tasks and their messages
@@ -291,7 +290,6 @@ Conversations and tasks
   attention      Show questions and approvals waiting on you
   schedules      Manage recurring wake-ups
   sessions       List provider sessions; discover and import recent history
-  resume         Reopen a direct provider session
 
 Setup
   service        Start xcb's background supervisor at login (macOS)
@@ -305,24 +303,16 @@ Setup
 Options
   --state <dir>  State folder (default: $XCB_STATE or ~/.local/share/xcb)
   --json         Machine-readable output where a command supports it
-  --cwd <dir>    Project hint for the thread; the exact folder for run,
-                 chat --new and models route (default: .)
+  --cwd <dir>    Project folder for run and models route (default: .)
   -h, --help     Show help; xcb <command> --help shows a command's help
   -V, --version  Show the version
 
-More commands (other machines, project agents, extensions): xcb help advanced
+More commands (project agents and extensions): xcb help advanced
 ";
 
 /// `xcb help advanced`: the commands root help leaves out.
 pub const ADVANCED: &str = "\
 Advanced xcb commands. Each one's --help says more.
-
-Other machines
-  link           Link this machine to your xcb fleet
-  fleet          List your linked devices
-  dispatch       Start a task on another device
-  send           Send text to an agent on another device
-  remote         Steer, cancel or answer work on another device
 
 Project agents
   context        Inspect saved source chunks and replay research programs

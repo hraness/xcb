@@ -27,8 +27,8 @@ const read = (path: string) => readFile(join(repo, path), "utf8");
 describe("xcb launch facts", () => {
   test("each number matches its source record", async () => {
     const [readme, quota] = await Promise.all([read("README.md"), read("docs/quota-routing.md")]);
-    expect(launchFacts.providers.value).toBe("three");
-    for (const provider of ["Claude", "Codex", "Devin"]) expect(readme).toContain(provider);
+    expect(launchFacts.providers.value).toBe("two");
+    for (const provider of ["Claude", "Codex"]) expect(readme).toContain(provider);
     expect(quota).toContain("at most five minutes old");
     expect(launchFacts.meterMaxAge.value).toBe("five minutes");
     expect(quota).toMatch(/Claude uses `five_hour` and `seven_day`/u);
@@ -96,23 +96,20 @@ describe("xcb illustration shapes", () => {
     }
   });
 
-  test("task, attention, fleet, and dispatch rows match the CLI", async () => {
-    const [main, habitat, remote] = await Promise.all([
+  test("local rows match the CLI and historical remote illustrations do not activate a command", async () => {
+    const [main, habitat] = await Promise.all([
       read("crates/xcb-cli/src/main.rs"),
       read("crates/xcb-cli/src/habitat.rs"),
-      read("crates/xcb-cli/src/remote.rs"),
     ]);
     expect(main).toContain('"{}  {} · {} · {}{}"');
     for (const row of Object.values(taskRows).flat()) expect(row).toMatch(/^t_\w+  [a-z ]+ · .+ · .+ · \w+\/[\w-]+ · a_\w+$/u);
     expect(habitat).toContain('"{} · {} · {} · {}"');
     expect(attentionRows[0]).toMatch(/^t_\w+ · \w+ · needs input · .+$/u);
-    expect(remote).toContain('"{} · {} · {} · {} · {}"');
-    expect(remote).toContain('"  projection {} · rev {} · {}s old{}"');
-    expect(remote).toContain('" · STALE"');
+    expect(main).not.toContain("mod remote;");
+    expect(await Bun.file(join(repo, "crates/xcb-cli/src/remote.rs")).exists()).toBe(false);
     for (const row of fleetRows) {
       expect(row).toMatch(/^d_\w+ · [\w-]+ · (daemon|controller) · (online|offline) · \w+$|^ {2}projection \w+ · rev \d+ · \d+s old( · STALE)?$/u);
     }
-    expect(remote).toContain('"Posted to {} as {} (idempotency {})."');
     expect(dispatchResult).toMatch(/^Posted to d_\w+ as c_\w+ \(idempotency k_\w+\)\.$/u);
   });
 
@@ -120,6 +117,10 @@ describe("xcb illustration shapes", () => {
     const route = await read("docs/route.md");
     const parsed = JSON.parse(routeResponse) as Record<string, unknown>;
     for (const key of Object.keys(parsed)) expect(route).toContain(`"${key}"`);
+  });
+
+  test("the pre-retirement launch film is not embedded as current support", () => {
+    expect(launchFilm).toBeNull();
   });
 
   test("the launch film names only files that exist", async () => {

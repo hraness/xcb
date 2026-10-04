@@ -33,7 +33,7 @@ export default function Docs() {
         <header className="xcb-docs-heading">
           <p className="xcb-docs-eyebrow">The field guide</p>
           <h1>{docsHeadline}.</h1>
-          <p className="xcb-docs-lead">Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for. Use it as your coding agent from its terminal, or send it tasks from another agent or your own app.</p>
+          <p className="xcb-docs-lead">Excalibur (xcb) routes coding tasks across the Claude and Codex subscriptions you already pay for. Use it as your coding agent from its terminal, or send it tasks from another agent or your own app.</p>
         </header>
         <div className="xcb-docs-note">
           <ReleaseSummary release={publishedRelease} />
@@ -56,8 +56,8 @@ export default function Docs() {
         <article className="xcb-docs-body">
           <section aria-labelledby="readiness">
             <h2 id="readiness">What works today</h2>
-            <p>{providerStatus.claude} {providerStatus.codex} {providerStatus.devin}</p>
-            <p>Providers use xcb’s workspace tools and registered host MCP servers. Native shells and unrelated provider plugins remain unavailable. Codex, Devin, and the <a href="/docs/workspace">command runner</a> need macOS ARM64; on Linux, xcb runs Claude. The <a href="/docs/workspace">workspace guide</a> covers browser and computer tools; see <a href="/docs/providers">accounts and models</a> for supported builds.</p>
+            <p>{providerStatus.claude} {providerStatus.codex}</p>
+            <p>Providers use xcb’s workspace tools and registered host MCP servers. Native shells and unrelated provider plugins remain unavailable. Codex and the <a href="/docs/workspace">command runner</a> need macOS ARM64; on Linux, xcb runs Claude. The <a href="/docs/workspace">workspace guide</a> covers browser and computer tools; see <a href="/docs/providers">accounts and models</a> for supported builds.</p>
           </section>
           <section aria-labelledby="standalone-package">
             <h2 id="standalone-package">Building on xcb?</h2>

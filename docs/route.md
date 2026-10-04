@@ -39,7 +39,7 @@ field except `version`, `workspace`, and `task` is optional.
 - `workspace` must be an existing folder. The provider's file tools stay inside
   it.
 - `task` is 1 byte to 256 KiB of text without NUL.
-- `provider` is `claude`, `codex`, or `devin`, and requires that provider.
+- `provider` is `claude` or `codex`, and requires that provider.
 - `account` names one account by ID or exact name. A `provider` that doesn't
   match the account's provider is an `invalid_request`.
 - `model` is a full key as printed by `xcb models`, and limits the route to
@@ -133,9 +133,10 @@ answer, and the turn produced answer text or file changes:
 
 In `outcome`, `joined: true` means the provider's processes have exited, and
 `effects` is `none`, `settled` (changes recorded), or `uncertain`. `session`
-reopens with `xcb resume <session>`; the routed turn is an ordinary saved
-direct session. `text` holds up to 256 KiB, and `textTruncated: true` marks a
-longer answer.
+identifies the durable record for later inspection through the JSON task and
+conversation projections; the removed interactive resume command is not part of
+the agent contract. `text` holds up to 256 KiB, and `textTruncated: true` marks
+a longer answer.
 
 ## Failures
 

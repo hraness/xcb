@@ -8,10 +8,10 @@ import { boundedText, identifier, safeInteger } from "../validation.ts";
 import { privateDirectory } from "./state.ts";
 import { assertPrivateStat, openPrivateRead } from "../private-file.ts";
 
-export type CliProvider = "codex" | "claude" | "devin";
+export type CliProvider = "codex" | "claude";
 export type CliSession = Readonly<{
   id: string;
-  provider: CliProvider;
+  provider: CliProvider | "devin";
   accountId: string | null;
   workspace: string;
   model: string;
@@ -34,13 +34,14 @@ const MAX_ENTRY_BYTES = 256 * 1024;
 const TABLE = "xcb_cli_sessions";
 
 const fail = (code: string): never => { throw new Error(code); };
-const provider = (value: unknown): CliProvider => (value === "codex" || value === "claude" || value === "devin" ? value : fail("SESSION_PROVIDER_INVALID"));
+const provider = (value: unknown): CliProvider => (value === "codex" || value === "claude" ? value : fail("SESSION_PROVIDER_INVALID"));
+const savedProvider = (value: unknown): CliSession["provider"] => value === "devin" ? value : provider(value);
 
 type SessionRow = Readonly<{ id: string; provider: string; account_id: string | null; workspace: string; model: string; title: string; created_at: number; last_active_at: number; turns: number }>;
 
 function sessionFrom(row: SessionRow): CliSession {
   return Object.freeze({
-    id: identifier(row.id), provider: provider(row.provider),
+    id: identifier(row.id), provider: savedProvider(row.provider),
     accountId: row.account_id === null ? null : identifier(row.account_id),
     workspace: boundedText(row.workspace, 4096), model: boundedText(row.model, 160),
     title: boundedText(row.title, MAX_TITLE_BYTES, true),
@@ -114,6 +115,7 @@ export class CliSessionStore {
 
   async record(session: CliSession, entries: readonly CliTranscriptEntry[], now: number): Promise<CliSession> {
     const current = this.get(session.id) ?? fail("SESSION_MISSING");
+    if (current.provider === "devin") fail("SESSION_PROVIDER_REMOVED");
     for (const item of entries) entry(item);
     const path = this.transcriptPath(session.id);
     const line = entries.map((item) => `${JSON.stringify(entry(item))}\n`).join("");

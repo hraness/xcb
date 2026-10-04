@@ -175,7 +175,7 @@ describe("xcb site source contract", () => {
     expect(llms).toContain("https://xcb.sh/README.md");
     expect(llms).not.toContain("http://");
     // The canonical one-line description leads, verbatim.
-    expect(llms.split("\n")[2]).toBe("> Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for.");
+    expect(llms.split("\n")[2]).toBe("> Excalibur (xcb) routes coding tasks across the Claude and Codex subscriptions you already pay for.");
     // Every current docs page is listed, and repository links follow main, not an old tag.
     for (const topic of docsTopics) expect(llms).toContain(`(https://xcb.sh/docs/${topic.slug})`);
     expect(llms).not.toMatch(/github\.com\/hraness\/xcb\/blob\/v\d/u);
@@ -188,7 +188,7 @@ describe("xcb site source contract", () => {
       expect(llms).toContain(publicationMarkdown(publishedRelease));
       expect([...versions]).toEqual([publishedRelease.version]);
     }
-    for (const fact of ["xcb --json route", "dryRun", "createSubscriptionRouter", "npm install @hraness/xcb", supportedBuilds.claudeMinimum, ...supportedBuilds.codex, ...supportedBuilds.devin, "does not run self-modifying routing policies"]) {
+    for (const fact of ["xcb --json route", "dryRun", "createSubscriptionRouter", "npm install @hraness/xcb", supportedBuilds.claudeMinimum, ...supportedBuilds.codex, "does not run self-modifying routing policies"]) {
       expect(llms).toContain(fact);
     }
     for (const status of Object.values(providerStatus)) expect(llms.split(status).length - 1).toBe(1);

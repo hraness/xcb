@@ -86,87 +86,6 @@ impl Sandbox {
         std::fs::write(path, body).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-
-    fn linked_relay(&self) -> String {
-        use xcb_runtime::cloud::{crypto, custody, wire};
-
-        let root = self.state();
-        let device = crypto::DeviceIdentity::generate().unwrap();
-        custody::store_device(
-            &root,
-            &device,
-            wire::EXECUTOR_CLASS,
-            "fixture",
-            &device.device,
-        )
-        .unwrap();
-        custody::store_account_key(&root, &crypto::AccountKey::generate(), 1).unwrap();
-        let claims = crypto::encode_base64url(
-            &serde_json::to_vec(&serde_json::json!({
-                "iss": "http://127.0.0.1:1",
-                "sub": "synthetic-owner|synthetic-session",
-                "aud": "convex",
-                "exp": 4_000_000_000_u64,
-            }))
-            .unwrap(),
-        );
-        let mut session = custody::CloudSession::issue(
-            format!("fixture.{claims}.synthetic-secret-signature"),
-            "synthetic-private-refresh-token".into(),
-            0,
-        );
-        session.deployment_url = Some("http://127.0.0.1:1".into());
-        custody::store_session(&root, &session).unwrap();
-        custody::store_link(
-            &root,
-            &custody::RelayLink {
-                deployment_url: "http://127.0.0.1:1".into(),
-                boot_generation: 3,
-            },
-        )
-        .unwrap();
-        device.device
-    }
-
-    fn cloud_bytes(&self) -> std::collections::BTreeMap<String, Vec<u8>> {
-        std::fs::read_dir(self.state().join("cloud"))
-            .unwrap()
-            .map(|entry| {
-                let entry = entry.unwrap();
-                (
-                    entry.file_name().into_string().unwrap(),
-                    std::fs::read(entry.path()).unwrap(),
-                )
-            })
-            .collect()
-    }
-
-    fn assert_relay_secrets_absent(&self, output: &Output) {
-        let rendered = format!("{}{}", text(&output.stdout), text(&output.stderr));
-        for (name, fields) in [
-            ("device.json", &["signingScalar", "agreementScalar"][..]),
-            ("account.json", &["accountKey"][..]),
-            ("session.json", &["token", "refreshToken"][..]),
-        ] {
-            let record: serde_json::Value = serde_json::from_slice(
-                &std::fs::read(self.state().join("cloud").join(name)).unwrap(),
-            )
-            .unwrap();
-            for field in fields {
-                let secret = record[*field].as_str().unwrap();
-                assert!(
-                    !rendered.contains(secret),
-                    "{name}/{field} appeared in CLI output"
-                );
-            }
-        }
-    }
-}
-
-impl Drop for Sandbox {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
 }
 
 fn text(bytes: &[u8]) -> String {
@@ -194,224 +113,13 @@ fn version_prints_name_and_version() {
 }
 
 #[test]
-fn reauth_help_and_enrollment_option_conflicts_are_explicit() {
-    let help = plain(&["link", "--help"]);
-    assert!(help.status.success());
-    let help = text(&help.stdout);
-    assert!(help.contains("--reauth"));
-    assert!(help.contains("same relay account"));
-    assert!(help.contains("--code"));
-    for incompatible in [
-        &["--controller"][..],
-        &["--invite", "synthetic-private-invite"][..],
-        &["--label", "another-device"][..],
-    ] {
-        let sandbox = Sandbox::new(&format!("reauth-conflict-{}", incompatible[0]));
-        let mut args = vec!["--json", "link", "--reauth"];
-        args.extend_from_slice(incompatible);
-        let output = sandbox.run(&args, &[]);
-        assert_eq!(output.status.code(), Some(2), "{output:?}");
-        assert!(output.stderr.is_empty());
-        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(value["error"]["code"], "usage");
-        assert!(!text(&output.stdout).contains("synthetic-private-invite"));
-        assert!(!sandbox.state().exists());
-    }
-}
-
-#[test]
-fn reauth_requires_a_linked_device_without_starting_local_stores() {
-    let sandbox = Sandbox::new("reauth-unlinked");
-    let output = sandbox.run(&["--json", "link", "--reauth"], &[]);
-    assert_eq!(output.status.code(), Some(1), "{output:?}");
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(
-        value["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("not linked")
-    );
-    assert!(!sandbox.state().join("managed").exists());
-    assert!(!sandbox.state().join("cloud/device.json").exists());
-}
-
-#[test]
-fn a_first_link_without_a_relay_refuses_instead_of_guessing_a_local_backend() {
-    let sandbox = Sandbox::new("link-no-relay");
-    for env in [&[][..], &[("XCB_RELAY_URL", "")][..]] {
-        let output = sandbox.run(&["--json", "link", "--email", "owner@example.test"], env);
-        assert_eq!(output.status.code(), Some(1), "{output:?}");
-        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        let message = value["error"]["message"].as_str().unwrap().to_lowercase();
-        assert!(message.contains("no relay configured"), "{message}");
-        assert!(message.contains("--relay"), "{message}");
-        assert!(!text(&output.stderr).contains("Requesting a sign-in code"));
-    }
-}
-
-#[test]
-fn ordinary_link_keeps_a_linked_device_and_session_byte_for_byte() {
-    let sandbox = Sandbox::new("link-existing");
-    let device = sandbox.linked_relay();
-    let before = sandbox.cloud_bytes();
-    let output = sandbox.run(
-        &[
-            "--json",
-            "link",
-            "--email",
-            "other@example.test",
-            "--code",
-            "12345678",
-        ],
-        &[("XCB_RELAY_URL", "https://override.invalid")],
-    );
-    assert!(output.status.success(), "{output:?}");
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["linked"], true);
-    assert_eq!(value["device"], device);
-    assert!(value.get("reauthenticated").is_none());
-    assert_eq!(sandbox.cloud_bytes(), before);
-    assert!(!sandbox.state().join("managed").exists());
-    sandbox.assert_relay_secrets_absent(&output);
-}
-
-#[test]
-fn reauth_rejects_relay_overrides_before_resuming_saved_work() {
-    let sandbox = Sandbox::new("reauth-endpoint");
-    sandbox.linked_relay();
-    xcb_runtime::private::create(
-        &sandbox.state().join("cloud/reauth.json"),
-        b"synthetic unreadable journal: must never be opened",
-    )
-    .unwrap();
-    let before = sandbox.cloud_bytes();
-    for (args, env) in [
-        (
-            &[
-                "--json",
-                "link",
-                "--reauth",
-                "--relay",
-                "https://override.invalid",
-            ][..],
-            &[][..],
-        ),
-        (&["--json", "link", "--reauth", "--relay", ""][..], &[][..]),
-        (
-            &["--json", "link", "--reauth"][..],
-            &[("XCB_RELAY_URL", "https://override.invalid")][..],
-        ),
-        (
-            &[
-                "--json",
-                "link",
-                "--reauth",
-                "--relay",
-                "http://127.0.0.1:1",
-            ][..],
-            &[("XCB_RELAY_URL", "https://override.invalid")][..],
-        ),
-    ] {
-        let output = sandbox.run(args, env);
-        assert_eq!(output.status.code(), Some(1), "{output:?}");
-        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert!(
-            value["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("original relay"),
-            "{value}"
-        );
-        assert!(output.stderr.is_empty());
-        assert_eq!(sandbox.cloud_bytes(), before);
-        assert!(!sandbox.state().join("managed").exists());
-        sandbox.assert_relay_secrets_absent(&output);
-    }
-}
-
-#[test]
-fn reauth_rejects_bad_supplied_email_or_code_before_resuming_saved_work() {
-    let sandbox = Sandbox::new("reauth-input");
-    sandbox.linked_relay();
-    xcb_runtime::private::create(
-        &sandbox.state().join("cloud/reauth.json"),
-        b"synthetic unreadable journal: must never be opened",
-    )
-    .unwrap();
-    let before = sandbox.cloud_bytes();
-    for (extra, expected) in [
-        (&["--email", "invalid email@example.test"][..], "email"),
-        (&["--code", "private-otp-placeholder"][..], "8 digits"),
-        (&["--code", "1234567"][..], "8 digits"),
-        (&["--code", "1234567a"][..], "8 digits"),
-    ] {
-        let mut args = vec!["--json", "link", "--reauth"];
-        args.extend_from_slice(extra);
-        let output = sandbox.run(&args, &[]);
-        assert_eq!(output.status.code(), Some(1), "{output:?}");
-        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(value["error"]["code"], "invalid-input");
-        assert!(
-            value["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains(expected),
-            "{value}"
-        );
-        assert!(!text(&output.stdout).contains(extra[1]));
-        assert!(output.stderr.is_empty());
-        assert_eq!(sandbox.cloud_bytes(), before);
-        sandbox.assert_relay_secrets_absent(&output);
-    }
-}
-
-#[test]
-fn reauth_without_email_needs_explicit_input_and_keeps_the_saved_state() {
-    let sandbox = Sandbox::new("reauth-noninteractive");
-    sandbox.linked_relay();
-    let before = sandbox.cloud_bytes();
-    for output in [
-        sandbox.run(
-            &[
-                "--json",
-                "link",
-                "--reauth",
-                "--relay",
-                "http://127.0.0.1:1/",
-            ],
-            &[("XCB_RELAY_URL", "http://127.0.0.1:1//")],
-        ),
-        sandbox.run(&["--json", "link", "--reauth", "--code", "12345678"], &[]),
-        sandbox.run_with_input(
-            &["--json", "link", "--reauth"],
-            b"owner@example.test\n12345678\n",
-        ),
-    ] {
-        assert_eq!(output.status.code(), Some(1), "{output:?}");
-        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert!(
-            value["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("--email"),
-            "{value}"
-        );
-        assert!(output.stderr.is_empty());
-        assert_eq!(sandbox.cloud_bytes(), before);
-        assert!(!sandbox.state().join("managed").exists());
-        sandbox.assert_relay_secrets_absent(&output);
-    }
-}
-
-#[test]
 fn bare_xcb_without_a_terminal_prints_where_to_start() {
     let sandbox = Sandbox::new("bare");
     let output = sandbox.run(&[], &[]);
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     let stdout = text(&output.stdout);
     assert!(
-        stdout
-            .starts_with("Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin"),
+        stdout.starts_with("Excalibur (xcb) routes coding tasks across the Claude and Codex"),
         "{stdout}"
     );
     assert!(
@@ -491,16 +199,13 @@ fn help_is_short_grouped_and_fits_100_columns() {
     assert!(root.ends_with("xcb help advanced\n"), "{root}");
     let advanced = plain(&["help", "advanced"]);
     assert!(advanced.status.success());
-    let advanced = text(&advanced.stdout);
-    assert!(advanced.contains("\nOther machines\n  link "), "{advanced}");
-    assert!(!root.contains("\n  link "), "{root}");
+    let _advanced = text(&advanced.stdout);
     for args in [
         &["accounts", "--help"][..],
         &["run", "--help"],
         &["models", "--help"],
         &["doctor", "--help"],
         &["service", "--help"],
-        &["remote", "--help"],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_xcb"))
             .env_clear()
@@ -550,7 +255,7 @@ fn every_command_help_exits_zero() {
     }
     assert!(!root.contains("<account-id>"), "{root}");
     let setup = text(&plain(&["setup", "--help"]).stdout);
-    assert!(setup.contains("claude, codex, or devin"), "{setup}");
+    assert!(setup.contains("claude or codex"), "{setup}");
 }
 
 #[test]
@@ -765,21 +470,17 @@ fn doctor_marks_each_provider_and_names_one_next_step() {
         stdout.contains("✗ claude: xcb can't find `claude` on your PATH."),
         "{stdout}"
     );
-    assert!(
-        stdout.contains("\n○ remote: not linked (xcb link connects this machine)\n"),
-        "{stdout}"
-    );
     assert!(!stdout.contains("custody"), "{stdout}");
     // The checks end with a count line. On Linux a missing sandbox is one
     // more warning: xcb starts no provider there without it.
     let summary = stdout.rsplit_once("\n\n").map(|(_, last)| last);
     if cfg!(target_os = "linux") {
         assert!(
-            matches!(summary, Some("3 problems.\n" | "3 problems, 1 warning.\n")),
+            matches!(summary, Some("2 problems.\n" | "2 problems, 1 warning.\n")),
             "{stdout}"
         );
     } else {
-        assert_eq!(summary, Some("3 problems.\n"), "{stdout}");
+        assert_eq!(summary, Some("2 problems.\n"), "{stdout}");
     }
     assert!(
         text(&output.stderr).ends_with("Next: install Claude Code, or run xcb doctor --provider claude --executable <absolute path>\n"),
@@ -812,12 +513,12 @@ fn doctor_reports_accounts_under_their_provider_and_exits_nonzero() {
         ),
         "{stdout}"
     );
-    // Claude and Devin have no accounts and another provider was found.
+    // Claude has no accounts and another provider was found.
     assert!(
         stdout.starts_with("○ claude: xcb can't find `claude` on your PATH."),
         "{stdout}"
     );
-    assert!(stdout.contains("\n○ devin: "), "{stdout}");
+    assert!(!stdout.contains("devin"), "{stdout}");
     assert!(!stdout.contains("passed"), "{stdout}");
     assert!(
         text(&output.stderr).ends_with(
@@ -846,19 +547,19 @@ fn doctor_reports_accounts_under_their_provider_and_exits_nonzero() {
     let empty = Sandbox::new("doctor-empty-json");
     let report: serde_json::Value =
         serde_json::from_slice(&empty.run(&["--json", "doctor"], &[]).stdout).unwrap();
-    assert_eq!(report["checks"]["problems"], 3, "{report}");
+    assert_eq!(report["checks"]["problems"], 2, "{report}");
 }
 
 // Exact-artifact providers run only on macOS. These catalog entries belong
-// solely to the private fixture; Devin avoids doctor starting a model probe.
+// solely to the private fixture; model probes use only the synthetic process.
 #[cfg(target_os = "macos")]
-fn admit_doctor_devin(sandbox: &Sandbox, version: &str) -> String {
-    let sha256 = xcb_runtime::digest(std::fs::read(sandbox.root.join("bin/devin")).unwrap());
+fn admit_doctor_codex(sandbox: &Sandbox, version: &str) -> String {
+    let sha256 = xcb_runtime::digest(std::fs::read(sandbox.root.join("bin/codex")).unwrap());
     let directory = xcb_runtime::private::directory(&sandbox.state().join("providers")).unwrap();
     let path = directory.join("catalog.json");
     let catalog = serde_json::json!({
         "version": 1,
-        "devin": [{"version": version, "sha256": sha256}],
+        "codex": [{"version": version, "sha256": sha256}],
     });
     if path.exists() {
         std::fs::write(path, catalog.to_string()).unwrap();
@@ -873,41 +574,41 @@ fn admit_doctor_devin(sandbox: &Sandbox, version: &str) -> String {
 fn doctor_preserves_a_supported_pin_when_discovery_or_explicit_selection_is_unsupported() {
     for explicit in [false, true] {
         let sandbox = Sandbox::new(&format!("doctor-retained-{explicit}"));
-        sandbox.fake_provider("devin", "devin 3000.11.3 (fixture)");
-        let saved_sha = admit_doctor_devin(&sandbox, "3000.11.3");
-        let initial = sandbox.run(&["--json", "doctor", "--provider", "devin"], &[]);
+        sandbox.fake_provider("codex", "codex-cli 0.159.3");
+        let saved_sha = admit_doctor_codex(&sandbox, "0.159.3");
+        let initial = sandbox.run(&["--json", "doctor", "--provider", "codex"], &[]);
         let initial: serde_json::Value = serde_json::from_slice(&initial.stdout).unwrap();
         assert_eq!(
             initial["providers"][0]["nativeCandidate"], true,
             "{initial}"
         );
-        let pin_path = sandbox.state().join("providers/devin.json");
+        let pin_path = sandbox.state().join("providers/codex.json");
         let saved_pin = std::fs::read(&pin_path).unwrap();
 
         let selected = if explicit {
-            sandbox.root.join("selected-devin")
+            sandbox.root.join("selected-codex")
         } else {
-            sandbox.root.join("bin/devin")
+            sandbox.root.join("bin/codex")
         };
-        sandbox.script(&selected, "#!/bin/sh\necho 'devin 3000.99.0 (fixture)'\n");
+        sandbox.script(&selected, "#!/bin/sh\necho 'codex-cli 0.199.0'\n");
         let skipped_sha = xcb_runtime::digest(std::fs::read(&selected).unwrap());
-        let mut args = vec!["doctor", "--provider", "devin"];
+        let mut args = vec!["doctor", "--provider", "codex"];
         if explicit {
             args.extend(["--executable", selected.to_str().unwrap()]);
         }
         let output = sandbox.run(&args, &[("HRANESS_AUDIENCE", "human")]);
         let stdout = text(&output.stdout);
         assert_eq!(output.status.code(), Some(1), "{output:?}");
-        assert!(stdout.contains("devin 3000.11.3: ready"), "{stdout}");
+        assert!(stdout.contains("codex 0.159.3: ready"), "{stdout}");
         assert!(
-            stdout.contains("Devin 3000.99.0, but xcb can't run it yet; keeping 3000.11.3"),
+            stdout.contains("Codex 0.199.0, but xcb can't run it yet; keeping 0.159.3"),
             "{stdout}"
         );
         assert!(
             stdout.contains(if explicit {
-                "selected Devin"
+                "selected Codex"
             } else {
-                "found Devin"
+                "found Codex"
             }),
             "{stdout}"
         );
@@ -917,14 +618,14 @@ fn doctor_preserves_a_supported_pin_when_discovery_or_explicit_selection_is_unsu
         let output = sandbox.run(&args, &[]);
         let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         let provider = &report["providers"][0];
-        assert_eq!(provider["version"], "3000.11.3", "{report}");
+        assert_eq!(provider["version"], "0.159.3", "{report}");
         assert_eq!(provider["sha256"], saved_sha, "{report}");
         assert_eq!(provider["nativeCandidate"], true, "{report}");
         assert_eq!(provider["storedPin"], true, "{report}");
         assert_eq!(
             provider["skippedBuild"],
             serde_json::json!({
-                "version": "3000.99.0", "sha256": skipped_sha,
+                "version": "0.199.0", "sha256": skipped_sha,
                 "nativeCandidate": false,
                 "source": if explicit { "explicit" } else { "discovered" },
             }),
@@ -943,9 +644,9 @@ fn doctor_preserves_a_supported_pin_when_discovery_or_explicit_selection_is_unsu
 fn doctor_never_retains_a_changed_or_denied_saved_pin() {
     for denied in [false, true] {
         let sandbox = Sandbox::new(&format!("doctor-invalid-saved-{denied}"));
-        sandbox.fake_provider("devin", "devin 3000.11.3 (fixture)");
-        let saved_sha = admit_doctor_devin(&sandbox, "3000.11.3");
-        let initial = sandbox.run(&["--json", "doctor", "--provider", "devin"], &[]);
+        sandbox.fake_provider("codex", "codex-cli 0.159.3");
+        let saved_sha = admit_doctor_codex(&sandbox, "0.159.3");
+        let initial = sandbox.run(&["--json", "doctor", "--provider", "codex"], &[]);
         let initial: serde_json::Value = serde_json::from_slice(&initial.stdout).unwrap();
         assert_eq!(
             initial["providers"][0]["nativeCandidate"], true,
@@ -954,8 +655,8 @@ fn doctor_never_retains_a_changed_or_denied_saved_pin() {
         if denied {
             let catalog = serde_json::json!({
                 "version": 1,
-                "devin": [{"version": "3000.11.3", "sha256": saved_sha}],
-                "deny": {"devin": [saved_sha]},
+                "codex": [{"version": "0.159.3", "sha256": saved_sha}],
+                "deny": {"codex": [saved_sha]},
             });
             std::fs::write(
                 sandbox.state().join("providers/catalog.json"),
@@ -964,7 +665,7 @@ fn doctor_never_retains_a_changed_or_denied_saved_pin() {
             .unwrap();
         } else {
             let saved: serde_json::Value = serde_json::from_slice(
-                &std::fs::read(sandbox.state().join("providers/devin.json")).unwrap(),
+                &std::fs::read(sandbox.state().join("providers/codex.json")).unwrap(),
             )
             .unwrap();
             std::fs::remove_file(saved["executable"].as_str().unwrap()).unwrap();
@@ -973,11 +674,11 @@ fn doctor_never_retains_a_changed_or_denied_saved_pin() {
                 "#!/bin/sh\nexit 9\n",
             );
         }
-        sandbox.fake_provider("devin", "devin 3000.99.0 (fixture)");
-        let output = sandbox.run(&["--json", "doctor", "--provider", "devin"], &[]);
+        sandbox.fake_provider("codex", "codex-cli 0.199.0");
+        let output = sandbox.run(&["--json", "doctor", "--provider", "codex"], &[]);
         let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         let provider = &report["providers"][0];
-        assert_eq!(provider["version"], "3000.99.0", "{report}");
+        assert_eq!(provider["version"], "0.199.0", "{report}");
         assert_eq!(provider["nativeCandidate"], false, "{report}");
         assert!(provider["skippedBuild"].is_null(), "{report}");
     }
@@ -987,17 +688,17 @@ fn doctor_never_retains_a_changed_or_denied_saved_pin() {
 #[test]
 fn doctor_adopts_a_new_supported_build() {
     let sandbox = Sandbox::new("doctor-supported-replacement");
-    for version in ["3000.11.3", "3000.99.0"] {
-        sandbox.fake_provider("devin", &format!("devin {version} (fixture)"));
-        let sha = admit_doctor_devin(&sandbox, version);
-        let output = sandbox.run(&["--json", "doctor", "--provider", "devin"], &[]);
+    for version in ["0.159.3", "0.199.0"] {
+        sandbox.fake_provider("codex", &format!("codex-cli {version}"));
+        let sha = admit_doctor_codex(&sandbox, version);
+        let output = sandbox.run(&["--json", "doctor", "--provider", "codex"], &[]);
         let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         let provider = &report["providers"][0];
         assert_eq!(provider["version"], version, "{report}");
         assert_eq!(provider["nativeCandidate"], true, "{report}");
         assert!(provider["skippedBuild"].is_null(), "{report}");
         let saved: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(sandbox.state().join("providers/devin.json")).unwrap(),
+            &std::fs::read(sandbox.state().join("providers/codex.json")).unwrap(),
         )
         .unwrap();
         assert_eq!(saved["sha256"], sha);
@@ -1009,14 +710,17 @@ fn accounts_table_lines_up_and_names_the_account_to_sign_in() {
     let sandbox = Sandbox::new("accounts-table");
     let claude = sandbox.add(&["claude", "--plan", "Max"]);
     let codex = sandbox.add(&["codex", "--plan", "ChatGPT subscription"]);
-    let devin = sandbox.add(&["devin", "--plan", "Imported subscription"]);
+    let ready = sandbox.add(&["claude", "--plan", "Pro"]);
     assert!(
         sandbox
             .run(&["accounts", "disable", &codex], &[])
             .status
             .success()
     );
-    let stored = sandbox.run_with_input(&["accounts", "token", &devin], b"synthetic-devin-token");
+    let stored = sandbox.run_with_input(
+        &["accounts", "token", &ready],
+        b"sk-ant-oat01-syntheticToken000000000000",
+    );
     assert!(stored.status.success(), "{stored:?}");
     let output = sandbox.run(&["accounts"], &[("HRANESS_AUDIENCE", "human")]);
     assert!(output.status.success(), "{output:?}");
@@ -1025,11 +729,18 @@ fn accounts_table_lines_up_and_names_the_account_to_sign_in() {
     let status_at = lines[0].find("STATUS").unwrap();
     assert!(lines[0].starts_with("  ID  "), "{stdout}");
     let short = |id: &str| format!("{}…", &id[..10]);
-    // Claude, Codex, Devin order; the first account added is the default.
+    let row = |id: &str| {
+        lines
+            .iter()
+            .copied()
+            .find(|line| line.contains(&short(id)))
+            .unwrap()
+    };
+    // Claude accounts, then Codex; the first account added is the default.
     for (line, id, provider, plan, status) in [
-        (lines[1], &claude, "claude", "Max", "needs sign-in"),
-        (lines[2], &codex, "codex", "ChatGPT", "off"),
-        (lines[3], &devin, "devin", "Imported", "ready"),
+        (row(&claude), &claude, "claude", "Max", "needs sign-in"),
+        (row(&ready), &ready, "claude", "Pro", "ready"),
+        (row(&codex), &codex, "codex", "ChatGPT", "off"),
     ] {
         assert!(line.contains(&short(id)), "{line}");
         assert!(line.contains(&format!("  {provider}  ")), "{line}");
@@ -1039,7 +750,7 @@ fn accounts_table_lines_up_and_names_the_account_to_sign_in() {
         assert_eq!(column, status_at, "{stdout}");
         assert!(line.chars().count() <= 100, "{line}");
     }
-    assert!(lines[1].starts_with("> "), "{stdout}");
+    assert!(row(&claude).starts_with("> "), "{stdout}");
     assert!(!stdout.contains("unmeasured"), "{stdout}");
     assert!(!stdout.contains("subscripti"), "{stdout}");
     assert_eq!(
@@ -1336,25 +1047,24 @@ fn protocol_helpers_refuse_an_unfinished_update_before_opening_product_state() {
         .unwrap();
     xcb_runtime::private::create(&share.join("update-use.lock"), b"").unwrap();
     xcb_runtime::private::create(&share.join("update-in-progress"), b"fixture").unwrap();
-    for command in ["broker-stdio", "native-mcp-stdio"] {
-        let output = Command::new(&binary)
-            .env_clear()
-            .env("HOME", sandbox.root.join("home"))
-            .env("PATH", sandbox.root.join("bin"))
-            .arg("--state")
-            .arg(sandbox.state())
-            .args(["--json", command])
-            .stdin(Stdio::null())
-            .output()
-            .unwrap();
-        assert!(!output.status.success(), "{command}: {output:?}");
-        assert!(output.stdout.is_empty(), "{command}: {output:?}");
-        assert!(
-            text(&output.stderr).contains("update is unfinished"),
-            "{command}: {output:?}"
-        );
-        assert!(!sandbox.state().exists(), "{command} opened product state");
-    }
+    let command = "native-mcp-stdio";
+    let output = Command::new(&binary)
+        .env_clear()
+        .env("HOME", sandbox.root.join("home"))
+        .env("PATH", sandbox.root.join("bin"))
+        .arg("--state")
+        .arg(sandbox.state())
+        .args(["--json", command])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{command}: {output:?}");
+    assert!(output.stdout.is_empty(), "{command}: {output:?}");
+    assert!(
+        text(&output.stderr).contains("update is unfinished"),
+        "{command}: {output:?}"
+    );
+    assert!(!sandbox.state().exists(), "{command} opened product state");
 }
 
 #[test]
@@ -1597,26 +1307,18 @@ fn a_shortened_id_from_the_table_resolves_and_login_checks_the_provider_first() 
 #[test]
 fn browser_sign_in_flag_rejects_other_providers_before_setup() {
     let sandbox = Sandbox::new("browser-sign-in-provider");
-    for provider in ["codex", "devin"] {
-        let account = sandbox.add(&[provider]);
-        let output = sandbox.run(&["--json", "accounts", "login", &account, "--browser"], &[]);
-        assert_eq!(output.status.code(), Some(1));
-        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert!(
-            value["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("--browser is only supported for Claude sign-in"),
-            "{value}"
-        );
-        assert!(
-            !sandbox
-                .state()
-                .join("providers")
-                .join(format!("{provider}.json"))
-                .exists()
-        );
-    }
+    let account = sandbox.add(&["codex"]);
+    let output = sandbox.run(&["--json", "accounts", "login", &account, "--browser"], &[]);
+    assert_eq!(output.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("--browser is only supported for Claude sign-in"),
+        "{value}"
+    );
+    assert!(!sandbox.state().join("providers/codex.json").exists());
     let help = text(&plain(&["accounts", "login", "--help"]).stdout);
     assert!(help.contains("--browser"), "{help}");
     assert!(help.contains("Keychain"), "{help}");
@@ -1871,9 +1573,8 @@ const INTERNAL_TERMS: [&str; 20] = [
     "promoted",
 ];
 
-/// Documented names that contain one of those words: the `xcb remote admit`
-/// command, in usage lines and in `xcb remote --help`'s command list.
-const DOCUMENTED_NAMES: [&str; 2] = ["remote admit", "\n  admit "];
+/// Documented names that contain one of those words.
+const DOCUMENTED_NAMES: [&str; 0] = [];
 
 /// Internal words in `text`. `XCB` is matched exactly, so environment
 /// variable names such as `XCB_STATE` (one token) stay allowed.
@@ -1894,8 +1595,6 @@ fn internal_word_check_matches_whole_words_only() {
     assert_eq!(internal_words("Bounded, ephemeral"), ["Bounded"]);
     assert_eq!(internal_words("No XCB messages"), ["XCB"]);
     assert!(internal_words("$XCB_STATE or ~/.local/share/xcb").is_empty());
-    assert!(internal_words("Usage: xcb remote admit [OPTIONS] <DEVICE>").is_empty());
-    assert!(internal_words("Commands:\n  admit    Post an account-key wrap").is_empty());
     assert!(internal_words("promote notes; settle labels; adjoined").is_empty());
 }
 
@@ -1962,7 +1661,6 @@ fn help_and_everyday_output_avoid_internal_words() {
     std::fs::create_dir_all(&work).unwrap();
     let work = work.to_str().unwrap().to_owned();
     sandbox.fake_provider("codex", "codex-cli 0.0.1");
-    sandbox.fake_provider("devin", "devin 0.0.1 (fixture)");
     let codex = sandbox.add(&["codex", "--plan", "ChatGPT subscription"]);
     sandbox.add(&["claude"]);
     assert!(
@@ -1980,7 +1678,7 @@ fn help_and_everyday_output_avoid_internal_words() {
         vec![],
         vec!["doctor"],
         vec!["accounts"],
-        vec!["setup", "devin"],
+        vec!["setup", "codex"],
         vec!["sessions"],
         vec!["sessions", "prune"],
         vec!["sessions", "rm", "s_missing"],
@@ -2054,30 +1752,26 @@ fn advanced_is_the_same_screen_as_help_advanced() {
     assert!(!sandbox.state().exists(), "the screen opens no state");
 }
 
-/// Setup checks the provider build before any account or sign-in: Devin
-/// gets no empty account, and an unsupported Claude build stops before the
-/// browser sign-in.
+/// Retired providers get no empty account, and an unsupported Claude build
+/// stops before browser sign-in.
+/// Existing account state stays unchanged.
 #[test]
 fn setup_checks_the_build_is_supported_before_sign_in() {
     let sandbox = Sandbox::new("setup-unsupported");
-    sandbox.fake_provider("devin", "devin 0.0.1 (fixture)");
-    let devin = sandbox.run(&["setup", "devin"], &[]);
-    assert_eq!(devin.status.code(), Some(1), "{devin:?}");
-    assert_eq!(text(&devin.stdout), "");
-    let stderr = text(&devin.stderr);
-    assert!(stderr.contains("Devin"), "{stderr}");
-    if cfg!(target_os = "linux") {
-        assert!(stderr.contains("macOS ARM64"), "{stderr}");
-        assert!(stderr.contains("use Claude on Linux"), "{stderr}");
-        assert!(
-            stderr.contains("xcb.sh/docs/providers#claude-on-linux"),
-            "{stderr}"
-        );
-    } else if cfg!(target_os = "macos") {
-        assert!(stderr.contains("0.0.1"), "{stderr}");
-        assert!(stderr.contains("xcb.sh/docs/providers"), "{stderr}");
+    sandbox.fake_provider("devin", "devin 3000.11.3 (fixture)");
+    for args in [
+        &["setup", "devin"][..],
+        &["accounts", "add", "devin"],
+        &["accounts", "import-devin"],
+        &["models", "refresh", "devin"],
+        &["doctor", "--provider", "devin"],
+        &["broker-stdio"],
+    ] {
+        let output = sandbox.run(args, &[]);
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+        assert!(output.stdout.is_empty(), "{args:?}: {output:?}");
+        assert!(!sandbox.state().exists(), "{args:?} opened product state");
     }
-    assert!(!stderr.contains("qualified"), "{stderr}");
     let accounts = sandbox.run(&["--json", "accounts"], &[]);
     let list: serde_json::Value = serde_json::from_slice(&accounts.stdout).unwrap();
     assert_eq!(

@@ -26,9 +26,9 @@ for the automatic review settings and the decisions that need the owner.
 The candidates are the routes automatic routing would pick now: accounts
 with a supported provider build that are signed in, enabled, idle, and not
 at a known usage limit, with a recently seen model. An account without a
-usage meter (Devin), or whose last reading is more than five minutes old,
-has no known limit and is a candidate; a limit is known only from the
-provider's own report. The route that hit the limit, every route this task
+usage meter, or whose last reading is more than five minutes old, has no
+known limit and is a candidate; a limit is known only from the provider's
+own report. The route that hit the limit, every route this task
 already ran, and any account that reported an account-wide limit during this
 task are left out.
 
@@ -50,7 +50,7 @@ go to the account that ran a session longest ago, so equal subscriptions
 take turns instead of the same one always winning. That tie-break never
 outranks a quality tier, a favorite, a pin, or usage pace.
 
-A prompt that opens with `Use Claude`, `Use Codex`, or `Use Devin` pins the
+A prompt that opens with `Use Claude` or `Use Codex` pins the
 provider for the whole task, including failover. Pins narrow the choice;
 xcb never widens past them. The optional judge can reorder the candidates
 that already qualify; it cannot add one.

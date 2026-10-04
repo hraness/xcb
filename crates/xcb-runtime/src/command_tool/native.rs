@@ -366,7 +366,7 @@ pub async fn qualify(state: &Path) -> Result<crate::native_backend::Qualificatio
         private::create(&hidden, b"synthetic private marker")?;
         let scope = NativeScope {
             workspace: workspace.clone(),
-            providers: xcb_core::Provider::ALL.to_vec(),
+            providers: xcb_core::Provider::SUPPORTED.to_vec(),
             github_credentials: false,
             read_only_roots: vec![],
             git_metadata: vec![],
@@ -452,7 +452,7 @@ mod tests {
         let state = crate::private::directory(&base.join("state")).unwrap();
         let scope = NativeScope {
             workspace: workspace.clone(),
-            providers: xcb_core::Provider::ALL.to_vec(),
+            providers: xcb_core::Provider::SUPPORTED.to_vec(),
             github_credentials: false,
             read_only_roots: vec![],
             git_metadata: vec![],

@@ -126,14 +126,16 @@ retried has a stable identity and a settlement receipt.
 
 ### Native provider execution
 
-Claude Code, Codex, and Devin should run with their own native file, shell,
-and network tools in the granted workspace. xcb should coordinate accounts,
+Claude Code and Codex should run with their own native file, shell, and
+network tools in the granted workspace. xcb should coordinate accounts,
 routes, durable tasks, observations, and recovery around those sessions rather
 than replace ordinary development with offline command replay. This applies to
-all three providers; native execution is not a Codex-only desktop capability.
+both supported providers; native execution is not a Codex-only desktop capability.
 After each backend passes its activation checks, native execution should be the
 normal choice for factory coding tasks. Brokered isolation remains an explicit
 caller choice, not an invisible substitute for missing native capabilities.
+Devin execution remains retired. Its historical account and session tags stay
+readable for recovery, but cannot acquire new native execution grants.
 
 Native execution is an explicit, persistent task requirement. Resume,
 continuation, quota failover, and cross-provider handoff preserve that
@@ -142,13 +144,12 @@ broker-only tools or silently fall back to the offline VM. The existing
 brokered execution mode and offline command runner remain separate options for
 callers that need their narrower isolation contract.
 
-Each native backend uses a versioned provider transport: Codex app-server,
-Claude's structured stream, or Devin ACP. It preserves supported provider
-approval controls and organization policy. Claude Auto and Codex automatic
-approval review are distinct from Devin's permission modes; xcb must verify the
-actual mode and cannot equate `auto`, `accept-edits`, Smart, Autonomous, or
-bypass across providers. Additional approval requests and denials stop automatic
-work rather than grant permission through a different provider.
+Each native backend uses a versioned provider transport: Codex app-server or
+Claude's structured stream. It preserves supported provider approval controls
+and organization policy. xcb must verify Claude Auto and Codex automatic
+approval review independently; similar mode names do not establish equivalent
+permissions. Additional approval requests and denials stop automatic work
+rather than grant permission through a different provider.
 
 The host validates the effective native tool inventory, filesystem and network
 limits, isolated account/configuration state, and exact executable before
@@ -178,6 +179,14 @@ session-bound command; they do not enable native access to real projects.
 Linux and Windows native commands remain unavailable rather than run without
 OS confinement. These checks do not claim live remote writes, provider-built-in
 approval classification, or all planned acceptance cases.
+
+On the reference macOS host, Codex passed native shell, DNS/HTTPS, local Git,
+and read-only authenticated GitHub acceptance through this command bridge.
+Claude's effective tool boundary passed startup checks, but its signed-in
+session reported that the organization had disabled Claude Code subscription
+access. Claude native execution remains unavailable until authorized sign-in
+and live acceptance succeed. Devin remains retired. Existing project grants
+and uncertain runs do not acquire wider access from these test results.
 [`native_backend.rs`](../crates/xcb-runtime/src/native_backend.rs) keeps the
 planned acceptance list separate from recorded availability.
 
@@ -197,6 +206,31 @@ must say whether replay is safe, forbidden, or requires reconciliation. This
 is the boundary between resuming useful work and accidentally repeating an
 external mutation after a provider or host failure.
 
+### State-driven progress and recovery
+
+Task completion should follow owner-declared predicates over current state,
+required child results, and effect evidence. Safety invariants must hold during
+all work; satisfying them alone does not finish a task. A provider's final
+message or an ALGAL planner's completed slice is not independent evidence
+that the product's acceptance criteria have passed.
+
+Each proposed step should name the state it observed, its permissions, and the
+version of the checks it must satisfy. The host validates those references
+before starting new work, records one limited transition, and observes again.
+A stale proposal needs reconsideration. The proposer cannot alter the running
+kernel, project grant, evaluator, or completion conditions through an ordinary
+task transition. Reviewed source changes produce separately checked artifacts.
+These requirements extend the local protocol; they do not add methods
+or fields to the [frozen P1 slice](protocol-seam.md) by implication.
+
+Recovery choices should remain durable attention items accessible through the
+same protocol and SDK as other task state. Each choice binds the failed step,
+current revision, and granted capability, so another agent can resume or stop
+without reconstructing a terminal session. A rejected pure proposal leaves
+accepted state unchanged. A possibly executed effect retains its identity and
+account ownership until independent evidence establishes how it ended; a
+snapshot or expired deadline cannot release the account or authorize a retry.
+
 ### Replaceable storage with one contract
 
 The local journal and Valhalla transport are implementations of one storage
@@ -215,11 +249,11 @@ coordinate intermittent agents without making a hosted provider authoritative.
 It also gives us a valuable dogfood loop: xcb can exercise Valhalla with real
 task events, custody transitions, and status projections.
 
-The current Convex deployment remains only as a compatibility implementation
-until the replacement is proven. It currently supplies device enrollment,
-authenticated remote operations, and the separate optional host-status
-heartbeat. It is not the long-term source of truth and receives no new
-state-sync features under this vision.
+The Convex schema and deployment sources remain as migration evidence, not an
+active native transport. The local supervisor no longer starts the relay or
+host-status heartbeat, and the hosted remote commands are removed. No hosted
+data is deleted by this baseline. Valhalla receives no production traffic until
+its identity, replay, custody, and recovery checks pass.
 
 Migration is a gated sequence:
 
@@ -381,7 +415,7 @@ regressions; they are never silently retried until they pass.
 - **M1 — agent-first local kernel:** remove the Ratatui surface, preserve
   agent/JSON parity, and pass native, compatibility, recovery, and operator
   acceptance checks.
-- **M1N — native workers:** implement Claude Code, Codex, and Devin native
+- **M1N — native workers:** implement Claude Code and Codex native
   tool backends under the same durable task contract. For each exact runtime,
   pass the declared native inventory, shell/toolchain, DNS/HTTPS, workspace
   confinement, private account/configuration, authorized Git effects, approval

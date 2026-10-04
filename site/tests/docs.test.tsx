@@ -111,7 +111,7 @@ describe("organized documentation", () => {
     expect(textOf(html)).toContain("xcb setup claude");
     expect(textOf(html)).toContain("git init -q");
     expect(textOf(html)).toContain("xcb models route --task");
-    expect(html).toContain("/tasks");
+    expect(textOf(html)).toContain("xcb tasks");
     expect(html).toContain(`Claude Code ${supportedBuilds.claudeMinimum} or later`);
     expect(html).not.toContain("--label");
     expect(html).not.toMatch(/(?:npm|bun) (?:install|add) -g @hraness\/xcb/u);
@@ -119,14 +119,13 @@ describe("organized documentation", () => {
 
   test("documents the thread, task controls, and direct sessions", async () => {
     const html = await renderTopic("projects-and-tasks");
-    expect(textOf(html)).toContain("xcb chat --resume <conversation-id>");
-    expect(textOf(html)).toContain("xcb --cwd /absolute/path/to/your/project");
-    expect(textOf(html)).toContain("xcb chat --new");
-    for (const command of ["/sessions", "/new", "/accounts", "/model", "/tasks", "/attention", "/workspace add &lt;dir&gt;", "/steer &lt;task-id&gt; &lt;guidance&gt;", "/cancel &lt;task-id&gt;"]) {
-      expect(html).toContain(`<code>${command}</code>`);
+    expect(textOf(html)).toContain("xcb --cwd /absolute/path/to/your/project conversations --new --json");
+    for (const command of ["xcb tasks --json", "xcb attention --json", "xcb inbox --task <task-id> --json", "xcb tasks cancel <task-id> --revision <revision> --json", "xcb history <session-id> --direct --json"]) {
+      expect(textOf(html)).toContain(command);
     }
+    expect(textOf(html)).not.toMatch(/xcb (?:chat|resume)\b/u);
     // A limit stated in plain words.
-    expect(html).toContain("It is not a headless continuation command");
+    expect(html).toContain("reading a saved session does not continue a provider turn");
   });
 
   test("lists supported provider builds and connection commands", async () => {
@@ -134,25 +133,22 @@ describe("organized documentation", () => {
     expect(attributeValues(provider, '.xcb-docs-table-wrap[role="region"]', "aria-labelledby"))
       .toEqual(["provider-status-caption"]);
     expect(provider).toContain(`Claude Code ${supportedBuilds.claudeMinimum} or later within version 2`);
-    for (const build of [...supportedBuilds.codex, ...supportedBuilds.devin]) expect(provider).toContain(build);
+    for (const build of supportedBuilds.codex) expect(provider).toContain(build);
     for (const status of Object.values(providerStatus)) expect(occurrences(provider, rendered(status))).toBe(1);
     expect(textOf(provider)).toContain("xcb setup codex");
     expect(textOf(provider)).toContain("xcb accounts add claude --plan Max");
     expect(textOf(provider)).toContain("xcb accounts login <account-id>");
     expect(textOf(provider)).toContain("xcb accounts refresh <account-id>");
     expect(textOf(provider)).toContain("xcb accounts import-codex --source");
-    expect(textOf(provider)).toContain("xcb accounts import-devin --source");
     expect(textOf(provider)).toContain("xcb doctor --provider claude --qualify-sandbox");
     expect(textOf(provider)).toContain("profile xcb-bwrap /usr/bin/bwrap flags=(unconfined)");
-    expect(provider).toContain('id="devin"');
   });
 
   test("lists only provider builds the runtime or the reviewed catalog supports", async () => {
-    const [catalogSource, claude, codex, devin] = await Promise.all([
+    const [catalogSource, claude, codex] = await Promise.all([
       readFile(join(repository, "qualified-builds.json"), "utf8"),
       readFile(join(repository, "crates/xcb-runtime/src/claude.rs"), "utf8"),
       readFile(join(repository, "crates/xcb-runtime/src/codex/config.rs"), "utf8"),
-      readFile(join(repository, "crates/xcb-runtime/src/devin/config.rs"), "utf8"),
     ]);
     const catalog = JSON.parse(catalogSource) as Record<string, unknown>;
     const catalogVersions = (provider: string): string[] =>
@@ -161,9 +157,6 @@ describe("organized documentation", () => {
     expect(claude).toContain("pub const MAX_MAJOR: u64 = 2;");
     for (const build of supportedBuilds.codex) {
       expect(catalogVersions("codex").includes(build) || codex.includes(`"${build}"`)).toBe(true);
-    }
-    for (const build of supportedBuilds.devin) {
-      expect(catalogVersions("devin").includes(build) || devin.includes(`"${build}"`)).toBe(true);
     }
   });
 
@@ -189,11 +182,9 @@ describe("organized documentation", () => {
 
   test("documents pane controls, extensions, and the turn deadline", async () => {
     const html = await renderTopic("customization");
-    for (const command of ["/pane", "/pane focus", "/pane edit", "/pane generate &lt;description&gt;"]) {
-      expect(html).toContain(`<code>${command}</code>`);
-    }
-    expect(html).toContain("Generation uses the selected account and model");
-    expect(html).toContain("next idle boundary");
+    expect(html).toContain("The interactive terminal is removed");
+    expect(textOf(html)).toContain("xcb panes check /absolute/path/to/pane.json");
+    expect(html).not.toContain("/pane generate");
     expect(textOf(html)).toContain("xcb plugins disable auto-continue");
     expect(html).toContain("turn_timeout_ms");
     expect(html).toContain("1,000 to 3,600,000 milliseconds");
@@ -282,8 +273,11 @@ describe("organized documentation", () => {
 
   test("lists every command, setting, environment variable, and exit code", async () => {
     const html = await renderTopic("reference");
-    for (const command of ["setup", "chat", "run", "doctor", "accounts", "models", "offers", "conversations", "workspaces", "history", "rename", "tasks", "backlog", "steer", "watch", "inbox", "attention", "schedules", "sessions", "resume", "service", "update", "upgrade", "completions", "link", "fleet", "dispatch", "send", "remote", "daemons", "projects", "memory", "reflex", "panes", "plugins", "hooks", "judge", "config", "recover", "command", "generate", "route"]) {
+    for (const command of ["setup", "run", "doctor", "accounts", "models", "offers", "conversations", "workspaces", "history", "rename", "tasks", "backlog", "steer", "watch", "inbox", "attention", "schedules", "sessions", "service", "update", "upgrade", "completions", "daemons", "projects", "memory", "reflex", "panes", "plugins", "hooks", "judge", "config", "recover", "command", "generate", "route"]) {
       expect(html).toMatch(new RegExp(`<code>xcb [^<]*\\b${command}\\b`, "u"));
+    }
+    for (const removed of ["chat", "resume", "link", "fleet", "dispatch", "send", "remote"]) {
+      expect(textOf(html)).not.toMatch(new RegExp(`xcb ${removed}\\b`, "u"));
     }
     for (const key of ["turn_timeout_ms", "default_account", "favorites", "auto_failover", "extensions.auto_continue", "extensions.gobstopper", "extensions.judge", "extensions.reflexes"]) {
       expect(html).toContain(`<code>${key}</code>`);

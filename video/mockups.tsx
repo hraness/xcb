@@ -39,7 +39,6 @@ const OPEN_CARDS = [
   { account: "codex-personal", text: "Weekly limit reached. Resets Monday." },
   { account: "side-claude", text: "Usage limit reached. Resets in 47 minutes." },
   { account: "team-codex", text: "Rate limited. Try again later." },
-  { account: "devin-work", text: "Out of session quota for today." },
   { account: "home-claude", text: "Usage limit reached. Resets at 6 pm." },
 ] as const;
 

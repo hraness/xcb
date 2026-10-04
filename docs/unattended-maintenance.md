@@ -86,7 +86,10 @@ Persistent file locks prevent overlapping samplers or reviews. Sampling has a se
 
 ## Optional external heartbeat
 
-The runner can send an HTTPS heartbeat to the xcb Convex backend every five minutes. This remains disabled unless an explicit receiver URL and credential file are configured. The public status page can detect a missing laptop from the time of its last accepted heartbeat, even when the laptop cannot send an alert.
+The legacy runner could send an HTTPS heartbeat to the xcb Convex backend every
+five minutes. That path is disabled and retained only as migration evidence;
+the future status projection belongs to the Valhalla transport described in
+the [north-star vision](vision.md).
 
 Provision a separate 32-byte random bearer credential for each machine. The private token file must contain exactly 64 lowercase hexadecimal characters, with an optional trailing newline, and have mode `0600`. The receiver stores the token's SHA-256 digest. Keep the plaintext token out of shell arguments, environment variables, model prompts, logs, and source control.
 

@@ -52,7 +52,7 @@ function promptWithContext(prompt: string, prior: readonly CliTranscriptEntry[])
  * prove the exact lease owner and its processes stopped. An argv marker is
  * only an additional live-process veto: its absence cannot establish that a
  * prepared owner stopped, so legacy leases without a witness remain held. */
-async function recoverHeldLease(leases: AccountLeaseStore, provider: "claude" | "codex" | "devin", accountId: string,
+async function recoverHeldLease(leases: AccountLeaseStore, provider: "claude" | "codex", accountId: string,
   proveStopped: CliRunInput["proveAccountStopped"]): Promise<void> {
   if (leases.inspect === undefined || leases.recover === undefined) return;
   const held = leases.inspect(provider, accountId);

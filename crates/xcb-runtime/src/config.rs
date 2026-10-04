@@ -147,6 +147,14 @@ pub struct Config {
     /// unsettled, and no new run starts while one is in flight.
     /// Range: 1 to 32.
     pub max_runs_per_account: u32,
+    /// Upper bound for concurrent managed tasks across all accounts. The
+    /// supervisor starts at one and ramps toward this bound when telemetry and
+    /// routing remain healthy; pressure or an unreadable policy backs it down.
+    /// Range: 1 to 64.
+    pub max_active_runs: u32,
+    /// Whether the supervisor should adapt its active target instead of
+    /// launching directly up to `max_active_runs`.
+    pub adaptive_parallelism: bool,
     /// The routing preference stack: ordered route patterns per task tier,
     /// routes never used, and providers that serve only as a fallback. See
     /// [`crate::routing_stack`].
@@ -174,6 +182,8 @@ impl Default for Config {
             turn_timeout_ms: 1_800_000,
             quota_limit_cooldown_ms: DEFAULT_QUOTA_LIMIT_COOLDOWN_MS,
             max_runs_per_account: 1,
+            max_active_runs: 4,
+            adaptive_parallelism: true,
             routing: RoutingConfig::default(),
             resources: crate::host_resources::ResourcePolicy::default(),
             capabilities: crate::capabilities::CapabilityConfig::default(),
@@ -196,6 +206,7 @@ impl Config {
             || !(1_000..=3_600_000).contains(&self.turn_timeout_ms)
             || !(60_000..=604_800_000).contains(&self.quota_limit_cooldown_ms)
             || !(1..=32).contains(&self.max_runs_per_account)
+            || !(1..=64).contains(&self.max_active_runs)
             || self.favorites.len() > 128
             || context.floor_tokens < 1024
             || context.floor_tokens >= context.trigger_tokens
@@ -278,11 +289,8 @@ mod routing_config_tests {
             absent.routing,
             crate::routing_stack::RoutingConfig::default()
         );
-        assert_eq!(absent.routing.never, ["devin/swe-*"]);
-        assert_eq!(
-            absent.routing.fallback_providers,
-            [xcb_core::Provider::Devin]
-        );
+        assert!(absent.routing.never.is_empty());
+        assert!(absent.routing.fallback_providers.is_empty());
         let partial =
             load(r#"{"routing": {"never": [], "tiers": {"meaty": ["claude/*fable*/max"]}}}"#)
                 .unwrap();
@@ -294,10 +302,7 @@ mod routing_config_tests {
                 .tiers
                 .buildout
         );
-        assert_eq!(
-            partial.routing.fallback_providers,
-            [xcb_core::Provider::Devin]
-        );
+        assert!(partial.routing.fallback_providers.is_empty());
     }
 
     #[test]
@@ -324,6 +329,57 @@ mod routing_config_tests {
                 .join(",")
         );
         assert!(message(&long).contains("routing patterns"));
+    }
+
+    #[test]
+    fn retired_provider_configuration_stays_readable_and_inactive() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = state(&directory);
+        let original = serde_json::json!({
+            "routing": {
+                "never": ["devin/swe-*"],
+                "fallback_providers": ["devin", "claude", "codex"],
+                "tiers": {"default": ["devin/gpt-*/max", "claude/opus*/max"]}
+            }
+        });
+        private::create(&root.join("config.json"), original.to_string().as_bytes()).unwrap();
+        let (config, revision) = Config::load(&root).unwrap();
+        assert_eq!(config.routing.never, ["devin/swe-*"]);
+        assert!(crate::routing_stack::RoutePattern::parse("devin/swe-*").is_err());
+        let model = xcb_core::models::ModelChoice {
+            provider: xcb_core::Provider::Claude,
+            id: Id::new("opus").unwrap(),
+            label: "Opus".into(),
+            mode: xcb_core::models::Mode::Fixed,
+            resolved: None,
+            effort: Some(Id::new("max").unwrap()),
+            observed_at_ms: 1,
+        };
+        assert!(!config.routing.excluded(&model));
+        assert_eq!(
+            config
+                .routing
+                .position(crate::routing_stack::Tier::Default, &model),
+            Some(1)
+        );
+        config.save(&root, revision.as_deref()).unwrap();
+        let (reopened, _) = Config::load(&root).unwrap();
+        assert_eq!(reopened.routing, config.routing);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&private::read(&root.join("config.json"), 64 * 1024).unwrap())
+                .unwrap();
+        for key in ["never", "fallback_providers"] {
+            assert_eq!(saved["routing"][key], original["routing"][key]);
+        }
+        assert_eq!(
+            saved["routing"]["tiers"]["default"],
+            original["routing"]["tiers"]["default"]
+        );
+        for pattern in ["devin/swe-*/turbo", "devin/", "devin/swe-*/max/extra"] {
+            assert!(
+                load(&serde_json::json!({"routing": {"never": [pattern]}}).to_string()).is_err()
+            );
+        }
     }
 
     #[test]

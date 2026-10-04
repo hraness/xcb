@@ -18,7 +18,7 @@ import { installCommand as installCommandLine } from "../install/commands";
 
 type SurfaceProps = Readonly<{ mode: RouterMode; theme?: MockupTheme; height?: number }>;
 
-const PROVIDER_NAMES = { claude: "Claude", codex: "Codex", devin: "Devin" } as const;
+const PROVIDER_NAMES = { claude: "Claude", codex: "Codex" } as const;
 
 /**
  * The `xcb accounts` table with a meter drawn beside each status cell. The
@@ -160,7 +160,7 @@ export function RouteSplit({ theme }: Readonly<{ theme?: MockupTheme }>) {
 /** What stands between a provider and your project on every run, from README "How xcb runs a task". */
 const RUN_LAYERS = [
   { id: "signin", icon: "key", label: "Your sign-in", detail: "Kept in a private profile outside your projects" },
-  { id: "provider", icon: "cli", label: "The provider's own tool", detail: "A private copy of Claude Code, Codex, or the Devin CLI" },
+  { id: "provider", icon: "cli", label: "The provider's own tool", detail: "A private copy of Claude Code or Codex" },
   { id: "sandbox", icon: "shield", label: "An OS sandbox", detail: "Seatbelt on macOS, bwrap on Linux, a cleared environment" },
   { id: "tools", icon: "file", label: "xcb's file tools", detail: "The only way in to your files; no provider plugins or MCP servers" },
   { id: "project", icon: "folder", label: "One project folder", detail: "Changes land here for you to review and commit" },

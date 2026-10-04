@@ -4,6 +4,10 @@ Scope: native account setup and terminal pickers, reviewed against the
 0.14.1 source. This audit follows the reported experience of having to copy
 an account ID between account creation and sign-in.
 
+This is a historical audit, not the current command reference. The current
+source build removes the interactive terminal and Devin execution; see
+[the headless command guide](terminal.md) for supported operations.
+
 | Friction | Change |
 | --- | --- |
 | Adding an account stops after printing an internal ID | Interactive Claude, Codex, and Devin account creation continues through sign-in and model loading. JSON and piped commands retain create-only behavior. |

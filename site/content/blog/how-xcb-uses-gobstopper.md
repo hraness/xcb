@@ -26,7 +26,7 @@ If the judge is unavailable or its response fails, xcb reports that and falls ba
 
 ## Choose when shortening starts
 
-Gobstopper is enabled by default for the Claude Code and Codex sessions xcb runs. Devin sessions are sent without this elision. The settings under `extensions.gobstopper` control the size trigger, target size, and minimum saving. `xcb config` shows the current values; the [customization guide](/docs/customization) covers configuration.
+Gobstopper is enabled by default for the Claude Code and Codex sessions xcb runs. All supported provider sessions use this elision. The settings under `extensions.gobstopper` control the size trigger, target size, and minimum saving. `xcb config` shows the current values; the [customization guide](/docs/customization) covers configuration.
 
 To disable or enable it:
 
