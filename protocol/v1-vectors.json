@@ -1,0 +1,64 @@
+{
+  "schema": "xcb.protocol.v1",
+  "maxFrameBytes": 65536,
+  "golden": [
+    {
+      "name": "initialize-request",
+      "frame": "{\"capabilities\":{\"features\":[\"command.submit\",\"receipt.reference\"],\"versions\":[\"xcb.protocol.v1\"]},\"expectedRevision\":null,\"idempotencyKey\":null,\"kind\":\"request\",\"method\":\"initialize\",\"params\":{\"clientName\":\"golden-client\",\"clientVersion\":\"1.0.0\"},\"requestId\":\"req_01\",\"schema\":\"xcb.protocol.v1\"}\n"
+    },
+    {
+      "name": "command-request",
+      "frame": "{\"capabilities\":null,\"expectedRevision\":\"rev_abc\",\"idempotencyKey\":\"idem_01\",\"kind\":\"request\",\"method\":\"command/submit\",\"params\":{\"arguments\":{\"dryRun\":false,\"path\":\"src/lib.rs\"},\"command\":\"workspace/inspect\"},\"requestId\":\"req_02\",\"schema\":\"xcb.protocol.v1\"}\n"
+    },
+    {
+      "name": "initialize-response",
+      "frame": "{\"error\":null,\"kind\":\"response\",\"method\":\"initialize\",\"ok\":true,\"requestId\":\"req_01\",\"result\":{\"capabilities\":{\"features\":[\"command.submit\",\"receipt.reference\"],\"versions\":[\"xcb.protocol.v1\"]},\"protocolVersion\":\"xcb.protocol.v1\"},\"schema\":\"xcb.protocol.v1\"}\n"
+    },
+    {
+      "name": "command-response",
+      "frame": "{\"error\":null,\"kind\":\"response\",\"method\":\"command/submit\",\"ok\":true,\"requestId\":\"req_02\",\"result\":{\"receiptId\":\"rcpt_01\",\"revision\":\"rev_def\",\"status\":\"accepted\"},\"schema\":\"xcb.protocol.v1\"}\n"
+    },
+    {
+      "name": "revision-conflict-response",
+      "frame": "{\"error\":{\"code\":\"revision_conflict\",\"message\":\"expected revision is stale\",\"retryable\":true},\"kind\":\"response\",\"method\":\"command/submit\",\"ok\":false,\"requestId\":\"req_02\",\"result\":null,\"schema\":\"xcb.protocol.v1\"}\n"
+    }
+  ],
+  "negative": [
+    {
+      "name": "missing-final-lf",
+      "frame": "{\"capabilities\":null,\"expectedRevision\":\"rev_abc\",\"idempotencyKey\":\"idem_01\",\"kind\":\"request\",\"method\":\"command/submit\",\"params\":{\"arguments\":{\"dryRun\":false,\"path\":\"src/lib.rs\"},\"command\":\"workspace/inspect\"},\"requestId\":\"req_02\",\"schema\":\"xcb.protocol.v1\"}"
+    },
+    {
+      "name": "noncanonical-whitespace",
+      "frame": "{ \"capabilities\":null,\"expectedRevision\":null,\"idempotencyKey\":\"idem_01\",\"kind\":\"request\",\"method\":\"command/submit\",\"params\":{\"arguments\":{},\"command\":\"task/run\"},\"requestId\":\"req_03\",\"schema\":\"xcb.protocol.v1\"}\n"
+    },
+    {
+      "name": "duplicate-envelope-key",
+      "frame": "{\"kind\":\"request\",\"kind\":\"request\"}\n"
+    },
+    {
+      "name": "command-idempotency-null",
+      "frame": "{\"capabilities\":null,\"expectedRevision\":null,\"idempotencyKey\":null,\"kind\":\"request\",\"method\":\"command/submit\",\"params\":{\"arguments\":{},\"command\":\"task/run\"},\"requestId\":\"req_03\",\"schema\":\"xcb.protocol.v1\"}\n"
+    },
+    {
+      "name": "unsupported-version",
+      "frame": "{\"capabilities\":{\"features\":[],\"versions\":[\"xcb.protocol.v2\"]},\"expectedRevision\":null,\"idempotencyKey\":null,\"kind\":\"request\",\"method\":\"initialize\",\"params\":{\"clientName\":\"client\",\"clientVersion\":\"1\"},\"requestId\":\"req_03\",\"schema\":\"xcb.protocol.v1\"}\n"
+    },
+    {
+      "name": "unsupported-capability",
+      "frame": "{\"capabilities\":{\"features\":[\"future.feature\"],\"versions\":[\"xcb.protocol.v1\"]},\"expectedRevision\":null,\"idempotencyKey\":null,\"kind\":\"request\",\"method\":\"initialize\",\"params\":{\"clientName\":\"client\",\"clientVersion\":\"1\"},\"requestId\":\"req_03\",\"schema\":\"xcb.protocol.v1\"}\n"
+    },
+    {
+      "name": "float-argument",
+      "frame": "{\"capabilities\":null,\"expectedRevision\":null,\"idempotencyKey\":\"idem_01\",\"kind\":\"request\",\"method\":\"command/submit\",\"params\":{\"arguments\":{\"ratio\":1.5},\"command\":\"task/run\"},\"requestId\":\"req_03\",\"schema\":\"xcb.protocol.v1\"}\n"
+    },
+    {
+      "name": "unknown-envelope-field",
+      "frame": "{\"capabilities\":null,\"expectedRevision\":null,\"idempotencyKey\":\"idem_01\",\"kind\":\"request\",\"method\":\"task/run\",\"params\":{\"arguments\":{},\"command\":\"task/run\"},\"requestId\":\"req_03\",\"schema\":\"xcb.protocol.v1\",\"trace\":null}\n"
+    },
+    {
+      "name": "empty-error-message",
+      "frame": "{\"error\":{\"code\":\"internal\",\"message\":\"\",\"retryable\":false},\"kind\":\"response\",\"method\":\"command/submit\",\"ok\":false,\"requestId\":\"req_02\",\"result\":null,\"schema\":\"xcb.protocol.v1\"}\n"
+    }
+  ]
+}
