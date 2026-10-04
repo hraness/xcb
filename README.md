@@ -37,6 +37,14 @@ and installs `~/.local/bin/xcb`:
 curl -fsSL https://xcb.sh/install.sh | sh
 ```
 
+On macOS with Apple silicon and Linux x86_64 it also installs
+[aicharts](https://aicharts.io/usage) beside xcb, checked against a pinned
+SHA-256 digest and, on macOS, its Developer ID signature. On a first install
+it turns on local usage history: daily token totals for your agents, kept on
+this computer and never uploaded. `aicharts history disable` turns it off.
+Set `XCB_USAGE_HISTORY=no` to leave it off, or `XCB_AICHARTS=no` to skip
+aicharts.
+
 New release installs update automatically before an interactive `run` or
 `doctor` command, at most once a day and only when no other
 xcb command or service is using the installation. Run `xcb update disable` to
