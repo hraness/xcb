@@ -28,3 +28,10 @@
 - Verify actual native tool results, process/effect facts, and workspace changes
   for managed smoke tests. A completed task or verified task journal alone does
   not establish that its requested command ran successfully.
+- When Claude inference usage is unavailable, `xcb doctor --provider claude`
+  checks the supported build and `xcb accounts refresh <existing-account>`
+  performs startup/model-catalog and usage-metadata queries without submitting
+  a coding prompt. This is preparation only: unknown quota is not available
+  quota, and metadata success does not clear an organization access refusal.
+  `xcb native verify --provider claude` does submit a model prompt; defer it
+  until authorized subscription access and inference usage are available.
