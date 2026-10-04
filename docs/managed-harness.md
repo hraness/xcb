@@ -1,5 +1,10 @@
 # Managed harness
 
+The historical examples in this document describe the removed terminal
+surface. Current integrations use the JSON/SDK task and projection contracts
+in [route.md](route.md) and [vision.md](vision.md); do not add new `xcb chat`
+or TUI dependencies.
+
 The managed harness runs the thread, its tasks, and the background supervisor.
 The self-tuning version of the harness, which would propose and keep its own
 routing rules, is in development; the current build does not run

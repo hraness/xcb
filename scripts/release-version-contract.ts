@@ -57,7 +57,6 @@ if (import.meta.main) {
   const manifestPaths = [
     "crates/xcb-cli/Cargo.toml",
     "crates/xcb-runtime/Cargo.toml",
-    "crates/xcb-tui/Cargo.toml",
   ];
   const [packageSource, cargoSource, cliSource, ...sources] = await Promise.all([
     readFile(resolve(root, "package.json"), "utf8"),

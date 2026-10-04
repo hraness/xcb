@@ -6,7 +6,6 @@ mod device_sign_in;
 mod doctor;
 mod habitat;
 mod health;
-mod remote;
 mod resources;
 mod route;
 mod stop;
@@ -21,7 +20,7 @@ use serde_json::json;
 use std::{
     io::{self, IsTerminal, Read, Write},
     path::PathBuf,
-    sync::{Arc, mpsc::sync_channel},
+    sync::Arc,
 };
 use tokio::sync::watch;
 use xcb_core::{
@@ -55,9 +54,8 @@ struct Cli {
     /// Emit machine-readable JSON where a command supports it.
     #[arg(long, global = true)]
     json: bool,
-    /// Project hint for the thread; the exact directory for run, chat --new
-    /// and models route; where every relative directory or scope argument
-    /// starts.
+    /// Project hint for run and models route; where every relative directory
+    /// or scope argument starts.
     #[arg(long, global = true, default_value = ".")]
     cwd: PathBuf,
     #[command(subcommand)]
@@ -90,15 +88,6 @@ enum Commands {
         /// Set up this existing account by name or id.
         #[arg(long)]
         account: Option<String>,
-    },
-    /// Open your thread; workers continue after detach.
-    Chat {
-        /// Reopen this conversation or project view instead of the thread.
-        #[arg(long, conflicts_with = "new")]
-        resume: Option<Id>,
-        /// Start a new project view for this directory.
-        #[arg(long)]
-        new: bool,
     },
     /// Generate text for an app from a JSON request: one turn, no tools or
     /// hooks, nothing saved as a session.
@@ -162,11 +151,6 @@ enum Commands {
     /// For programs: requires --json and a JSON request on stdin.
     #[command(hide = true)]
     Route,
-    /// Reopen a direct provider session in the terminal UI.
-    Resume {
-        /// Session to reopen; the latest session when omitted.
-        id: Option<Id>,
-    },
     /// List accounts; subcommands add, sign in, remove, and manage them.
     Accounts {
         #[command(subcommand)]
@@ -188,61 +172,6 @@ enum Commands {
         #[arg(long)]
         refresh: bool,
     },
-    /// Link this machine into the xcb relay fleet via email one-time code.
-    Link {
-        /// Sign in again to the same relay account, keeping this device's keys and tasks.
-        #[arg(long, conflicts_with_all = ["controller", "invite", "label"])]
-        reauth: bool,
-        /// Email the sign-in code goes to; prompted when omitted.
-        #[arg(long)]
-        email: Option<String>,
-        /// The 8-digit code emailed by `xcb link` or `xcb link --reauth`;
-        /// prompted when omitted on a terminal.
-        #[arg(long)]
-        code: Option<String>,
-        /// Bootstrap or invite token when the deployment gates enrollment.
-        #[arg(long)]
-        invite: Option<String>,
-        /// Relay deployment URL; defaults to $XCB_RELAY_URL, and is saved at
-        /// enrollment. A first link needs one of them. With --reauth, it must
-        /// match this machine's saved relay.
-        #[arg(long)]
-        relay: Option<String>,
-        /// Enroll as a dispatch-only controller instead of a workspace
-        /// daemon. Workspace machines use the default.
-        #[arg(long)]
-        controller: bool,
-        /// Device label shown in `xcb fleet`; defaults to the hostname.
-        #[arg(long)]
-        label: Option<String>,
-    },
-    /// List the enrolled device fleet and its published projections.
-    Fleet,
-    /// Enqueue a managed task on a remote workspace device.
-    Dispatch {
-        /// Target daemon device id from `xcb fleet`.
-        device: String,
-        /// Workspace: absolute path on the target, a known project name, or @infer.
-        workspace: String,
-        /// Task text; piped stdin is used when omitted.
-        #[arg(short = 'p', long)]
-        prompt: Option<String>,
-    },
-    /// Post text to a remote ALGAL daemon's inbox.
-    Send {
-        /// Target daemon device id from `xcb fleet`.
-        device: String,
-        /// Daemon name on the target.
-        daemon: String,
-        /// Message text.
-        text: String,
-    },
-    /// Steer, cancel, or answer work on other devices, follow remote commands,
-    /// and approve or remove linked devices.
-    Remote {
-        #[command(subcommand)]
-        command: remote::RemoteCommand,
-    },
     /// List provider sessions; discover and import recent Codex or Claude history.
     Sessions {
         #[command(subcommand)]
@@ -253,9 +182,12 @@ enum Commands {
         #[command(subcommand)]
         command: Option<TaskCommand>,
     },
-    /// List the thread and project views.
-    Conversations,
-    /// List, add, hide and explain the project directories the thread picks from.
+    /// List saved conversations and project views.
+    Conversations {
+        #[arg(long, help = "Create a new project view in the current directory")]
+        new: bool,
+    },
+    /// List, add, hide and explain project directories used by tasks.
     Workspaces {
         #[command(subcommand)]
         command: Option<workspaces::WorkspaceCommand>,
@@ -347,11 +279,7 @@ enum Commands {
         command: Option<habitat::DaemonCommand>,
     },
     /// Show questions, approvals and actions requiring attention across conversations.
-    Attention {
-        /// Read the encrypted fleet projections instead of local tasks.
-        #[arg(long)]
-        remote: bool,
-    },
+    Attention,
     /// Set how much a project may do on its own, and see what each grant has
     /// left.
     Projects {
@@ -1049,7 +977,7 @@ fn no_reply_error(provider: Provider, session: &Id) -> Error {
             "{} ended the turn without a reply or file changes; reopen the session to continue, or run again with --model to use another model",
             provider_name(provider)
         ),
-        format!("xcb resume {session}"),
+        format!("xcb history {session} --direct"),
     )
 }
 
@@ -1166,9 +1094,6 @@ fn service_text(status: &xcb_runtime::habitat_service::Status, style: ux::Style)
         } else {
             out.push_str("Watchdog: enabled · diagnostic logs limited to 6 MiB\n");
         }
-    }
-    if let Some(fault) = &status.relay_fault {
-        out.push_str(&format!("Remote relay: {fault}\n"));
     }
     if let Some(service) = &status.service {
         out.push_str(&format!("File: {}\n", service.manifest.display()));
@@ -1626,12 +1551,7 @@ async fn dispatch_inner(
         .unwrap_or_else(private::default_root)?;
     let interactive_command = matches!(
         &cli.command,
-        None | Some(
-            Commands::Chat { .. }
-                | Commands::Resume { .. }
-                | Commands::Run { .. }
-                | Commands::Doctor { .. }
-        )
+        Some(Commands::Run { .. } | Commands::Doctor { .. })
     );
     let update_executable = std::env::current_exe()?;
     if interactive_command
@@ -1716,81 +1636,18 @@ async fn dispatch_inner(
     {
         return doctor::qualify_sandbox(&root, *provider, cli.json).await;
     }
-    // Remote-fleet commands live entirely in cloud custody and the relay;
-    // they never open the managed store.
-    match &cli.command {
-        Some(Commands::Link {
-            reauth,
-            email,
-            code,
-            invite,
-            relay,
-            controller,
-            label,
-        }) => {
-            return remote::link(
-                &root,
-                remote::LinkOptions {
-                    reauth: *reauth,
-                    code: code.as_deref(),
-                    controller: *controller,
-                    email: email.as_deref(),
-                    invite: invite.as_deref(),
-                    json_out: cli.json,
-                    label: label.as_deref(),
-                    relay: relay.as_deref(),
-                },
-            )
-            .await;
-        }
-        Some(Commands::Fleet) => return remote::fleet(&root, cli.json).await,
-        Some(Commands::Dispatch {
-            device,
-            workspace,
-            prompt,
-        }) => {
-            let prompt = match prompt {
-                Some(prompt) => prompt.clone(),
-                None if !io::stdin().is_terminal() => {
-                    String::from_utf8(stdin(xcb_core::MAX_TEXT_BYTES)?)
-                        .map_err(|_| xcb_core::Error::Invalid("UTF-8 prompt"))?
-                }
-                None => {
-                    return Err(Error::Unavailable(
-                        "use xcb dispatch <device> <workspace> -p <task> or pipe a task on stdin",
-                    ));
-                }
-            };
-            xcb_core::bounded_text(&prompt, xcb_core::MAX_TEXT_BYTES)?;
-            return remote::dispatch(&root, device, workspace, &prompt, cli.json).await;
-        }
-        Some(Commands::Send {
-            device,
-            daemon,
-            text,
-        }) => return remote::send(&root, device, daemon, text, cli.json).await,
-        Some(Commands::Remote { command }) => {
-            return remote::remote(&root, command, cli.json).await;
-        }
-        _ => {}
-    }
     let store = Arc::new(Store::open(&root)?);
-    // Interactive commands keep the pinned provider build current: adopt a
-    // newly discovered binary only when it is an admitted build, so an
-    // auto-update can never strand a task or make doctor report stale state.
+    // Refresh provider build pins before agent-run commands. The local
+    // protocol remains useful offline when refresh cannot complete.
     if matches!(
         &cli.command,
-        None | Some(Commands::Chat { .. })
-            | Some(Commands::Resume { .. })
-            | Some(Commands::Run { .. })
+        Some(Commands::Run { .. })
             | Some(Commands::Doctor {
                 executable: None,
                 ..
             })
     ) {
         let home = root.join("metadata-home");
-        // One catalog fetch per sweep, at most hourly; failures keep the
-        // stored copy so offline launches degrade to the baked constants.
         let catalog_root = root.clone();
         let _ =
             tokio::task::spawn_blocking(move || xcb_runtime::catalog::refresh(&catalog_root)).await;
@@ -1812,6 +1669,9 @@ async fn dispatch_inner(
     }
     let (mut config, _) = Config::load(store.root())?;
     match cli.command {
+        None => Err(Error::Unavailable(
+            "interactive terminal removed; use xcb run --json or the SDK",
+        )),
         Some(
             Commands::Generate { .. }
             | Commands::ApplicationDiagnostic { .. }
@@ -1819,36 +1679,8 @@ async fn dispatch_inner(
             | Commands::ManagedDaemon
             | Commands::ServiceRun
             | Commands::Resources { .. }
-            | Commands::Link { .. }
-            | Commands::Fleet
-            | Commands::Dispatch { .. }
-            | Commands::Send { .. }
-            | Commands::Remote { .. }
             | Commands::Route,
-        ) => {
-            unreachable!("early dispatch returns above")
-        }
-        None => managed_chat(store, xcb_core::canonical(&cli.cwd)?, None, false, cli.json).await,
-        Some(Commands::Chat { resume, new }) => {
-            managed_chat(store, xcb_core::canonical(&cli.cwd)?, resume, new, cli.json).await
-        }
-        Some(Commands::Resume { id }) => {
-            let id = id
-                .or_else(|| {
-                    store
-                        .sessions(1)
-                        .ok()?
-                        .first()
-                        .map(|session| session.id.clone())
-                })
-                .ok_or(Error::Unavailable("no saved sessions"))?;
-            let session = store
-                .session(&id)?
-                .ok_or(Error::Unavailable("session not found"))?;
-            direct_chat(store, PathBuf::from(session.workspace), Some(id), cli.json).await
-        }
-        // Keep routing and execution temporaries out of unrelated commands'
-        // poll frames, which must fit the default thread stack.
+        ) => unreachable!("early dispatch returns above"),
         Some(Commands::Run {
             signed_in_browser,
             desktop,
@@ -2866,7 +2698,7 @@ async fn dispatch_inner(
                         );
                         println!("Original files are unchanged. No tasks were started.");
                         for result in &results {
-                            println!("xcb chat --resume {}", result.conversation);
+                            println!("xcb history {}", result.conversation);
                         }
                         for failure in &failed {
                             println!(
@@ -3045,13 +2877,7 @@ async fn dispatch_inner(
         Some(Commands::Daemons { command }) => {
             habitat::daemons(store.root(), &cli.cwd, command, cli.json).await
         }
-        Some(Commands::Attention { remote }) => {
-            if remote {
-                remote::attention_remote(store.root(), cli.json).await
-            } else {
-                habitat::attention(store.root(), cli.json)
-            }
-        }
+        Some(Commands::Attention) => habitat::attention(store.root(), cli.json),
         Some(Commands::Projects { command }) => {
             habitat::projects(store.root(), &cli.cwd, command, cli.json)
         }
@@ -3177,9 +3003,13 @@ async fn dispatch_inner(
             }
             Ok(0)
         }
-        Some(Commands::Conversations) => {
+        Some(Commands::Conversations { new }) => {
             let managed = xcb_runtime::managed::ManagedStore::open(store.root())?;
-            let conversations = listed_conversations(&managed)?;
+            let conversations = if new {
+                vec![managed.create_conversation(&cli.cwd).await?]
+            } else {
+                listed_conversations(&managed)?
+            };
             if cli.json {
                 print_json(conversation_rows(&conversations)?)?;
             } else if conversations.is_empty() {
@@ -3899,10 +3729,8 @@ fn preview_provider_preferences(
     Ok((preferred, required))
 }
 
-/// The conversation `xcb` / `xcb chat` opens, and the thread's launch hint.
-/// Plain launches open the thread from any directory; `--resume` reopens a
-/// view or the thread; `--new` always starts a new project view for `cwd`,
-/// even when one exists, and never opens the thread.
+/// Resolve a conversation for local managed state (legacy test helper).
+#[allow(dead_code)]
 async fn chat_conversation(
     managed: &xcb_runtime::managed::ManagedStore,
     cwd: &std::path::Path,
@@ -4155,82 +3983,6 @@ async fn finish_account_setup(
     Ok(0)
 }
 
-async fn managed_chat(
-    store: Arc<Store>,
-    cwd: PathBuf,
-    resume: Option<Id>,
-    new: bool,
-    json: bool,
-) -> Result<i32> {
-    if json {
-        return Err(Error::Unavailable(
-            "interactive chat is not a JSON transport; use xcb tasks --json or xcb run --json",
-        ));
-    }
-    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        return Err(Error::Unavailable(
-            "chat requires a terminal; use xcb run for headless tasks",
-        ));
-    }
-    let managed = xcb_runtime::managed::ManagedStore::open(store.root())?;
-    let (conversation, launch_hint) = chat_conversation(&managed, &cwd, resume, new).await?;
-    let executable = std::env::current_exe()?;
-    let (updates, display) = sync_channel(256);
-    let (commands, input) = sync_channel(32);
-    let options = xcb_tui::RunOptions {
-        recovery_directory: Some(store.root().join("input-recovery")),
-    };
-    let ui =
-        tokio::task::spawn_blocking(move || xcb_tui::run_with_options(display, commands, options));
-    let result = xcb_runtime::managed::serve_ui(
-        store,
-        conversation.id,
-        launch_hint,
-        input,
-        updates,
-        executable,
-    )
-    .await;
-    let ui = ui
-        .await
-        .map_err(|_| Error::Unavailable("terminal task failed"))?;
-    ui?;
-    result?;
-    Ok(0)
-}
-
-async fn direct_chat(
-    store: Arc<Store>,
-    cwd: PathBuf,
-    session: Option<Id>,
-    json: bool,
-) -> Result<i32> {
-    if json {
-        return Err(Error::Unavailable(
-            "interactive chat is not a JSON transport; use xcb run --json",
-        ));
-    }
-    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        return Err(Error::Unavailable(
-            "chat requires a terminal; use xcb run for headless tasks",
-        ));
-    }
-    let (updates, display) = sync_channel(256);
-    let (commands, input) = sync_channel(32);
-    let options = xcb_tui::RunOptions {
-        recovery_directory: Some(store.root().join("input-recovery")),
-    };
-    let ui =
-        tokio::task::spawn_blocking(move || xcb_tui::run_with_options(display, commands, options));
-    let result = kernel::serve(store, cwd, session, input, updates).await;
-    let ui = ui
-        .await
-        .map_err(|_| Error::Unavailable("terminal task failed"))?;
-    ui?;
-    result?;
-    Ok(0)
-}
-
 #[tokio::main]
 async fn main() {
     ux::restore_sigpipe();
@@ -4252,8 +4004,8 @@ async fn main() {
         Err(error) => std::process::exit(ux::clap_failure(error, &root, &args)),
     };
     let json = cli.json;
-    // Plain `xcb` opens the chat on a terminal. Anywhere else (a pipe, a
-    // script, an agent's shell) it says where to start instead of failing.
+    // Plain `xcb` is a discovery hint now that the interactive terminal
+    // surface is removed. Pipes and agents get the same guidance as people.
     if cli.command.is_none() && !json && !(io::stdin().is_terminal() && io::stdout().is_terminal())
     {
         hraness_cli_kit::style::write_stdout(&ux::start_text());
@@ -4340,42 +4092,6 @@ fn automatic_route_notice(reason: &str) -> &'static str {
         "Usage limits rule out a higher-ranked model; using the best one available now."
     } else {
         "Picked an account and model automatically."
-    }
-}
-
-#[cfg(test)]
-mod async_stack_tests {
-    use super::*;
-
-    #[test]
-    fn relay_renewal_rejection_fits_a_normal_thread_stack() {
-        std::thread::Builder::new()
-            .stack_size(2 * 1024 * 1024)
-            .spawn(|| {
-                let directory = xcb_core::canonical(std::env::temp_dir())
-                    .unwrap()
-                    .join(xcb_runtime::new_id("xcb_renewal_stack").as_str());
-                private::directory(&directory).unwrap();
-                let root = directory.join("state");
-                let cli = Cli::try_parse_from([
-                    "xcb",
-                    "--state",
-                    root.to_str().unwrap(),
-                    "link",
-                    "--reauth",
-                ])
-                .unwrap();
-                let result = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap()
-                    .block_on(dispatch(cli));
-                std::fs::remove_dir_all(&directory).unwrap();
-                assert!(result.unwrap_err().to_string().contains("not linked"));
-            })
-            .unwrap()
-            .join()
-            .unwrap();
     }
 }
 
@@ -5055,7 +4771,6 @@ mod tests {
                 supervisor_watched: false,
                 service: Some(service),
                 log: Some(log.clone()),
-                relay_fault: None,
             },
             style,
         );
@@ -5084,7 +4799,6 @@ mod tests {
                 supervisor_watched: false,
                 service: None,
                 log: None,
-                relay_fault: None,
             },
             style,
         );
@@ -5113,32 +4827,10 @@ mod tests {
                 supervisor_watched: false,
                 service: None,
                 log: None,
-                relay_fault: None,
             },
             style,
         );
         assert_eq!(absent, "○ Doesn't start at login · ○ supervisor idle\n");
-        let relay_failure = Status {
-            installed: true,
-            registered: true,
-            supervisor_running: true,
-            supervisor_health: xcb_runtime::habitat_service::SupervisorHealth {
-                state: xcb_runtime::habitat_service::HealthState::Fresh,
-                heartbeat_age_seconds: Some(1),
-            },
-            watchdog_enabled: false,
-            supervisor_watched: false,
-            service: None,
-            log: None,
-            relay_fault: Some("relay projection failed: relay invalid-argument: scope".into()),
-        };
-        let text = super::service_text(&relay_failure, style);
-        assert!(text.contains("supervisor running"));
-        assert!(
-            text.contains("Remote relay: relay projection failed: relay invalid-argument: scope")
-        );
-        let json = serde_json::to_value(&relay_failure).unwrap();
-        assert_eq!(json["relay_fault"], relay_failure.relay_fault.unwrap());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5532,7 +5224,7 @@ mod tests {
         let error = no_reply_error(Provider::Claude, &session);
         assert_eq!(
             ux::next_step(&error).as_deref(),
-            Some("xcb resume s_silent")
+            Some("xcb history s_silent --direct")
         );
         let sentence = ux::sentence(&error);
         assert!(sentence.starts_with("Claude Code ended the turn without a reply or file changes"));
@@ -5799,29 +5491,17 @@ mod tests {
 
     #[test]
     fn managed_task_cli_lists_and_inspects_without_exposing_daemon_controls() {
-        let cli = Cli::try_parse_from(["xcb", "chat"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Commands::Chat {
-                resume: None,
-                new: false
-            })
-        ));
-        let cli = Cli::try_parse_from(["xcb", "chat", "--resume", "c_example"]).unwrap();
-        assert!(
-            matches!(cli.command, Some(Commands::Chat { resume: Some(id), .. }) if id.as_str() == "c_example")
-        );
-        let cli = Cli::try_parse_from(["xcb", "chat", "--new"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Commands::Chat {
-                resume: None,
-                new: true
-            })
-        ));
-        assert!(Cli::try_parse_from(["xcb", "chat", "--resume", "c_example", "--new"]).is_err());
         let cli = Cli::try_parse_from(["xcb", "conversations"]).unwrap();
-        assert!(matches!(cli.command, Some(Commands::Conversations)));
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Conversations { new: false })
+        ));
+        let cli = Cli::try_parse_from(["xcb", "conversations", "--new", "--json"]).unwrap();
+        assert!(cli.json);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Conversations { new: true })
+        ));
         let cli = Cli::try_parse_from(["xcb", "tasks"]).unwrap();
         assert!(matches!(
             cli.command,
@@ -6255,11 +5935,6 @@ mod tests {
                 ..
             })
         ));
-        let cli = Cli::try_parse_from(["xcb", "dispatch", "d_1", "@infer", "-p", "x"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Commands::Dispatch { workspace, .. }) if workspace == "@infer"
-        ));
     }
 
     /// `--help` is part of the product surface: every subcommand must carry
@@ -6287,10 +5962,7 @@ mod tests {
             }
         }
         let cli = Cli::command();
-        assert!(
-            ux::ROOT_HELP.contains("Plain `xcb`"),
-            "xcb --help must explain what plain `xcb` does"
-        );
+        assert!(ux::ROOT_HELP.contains("interactive terminal surface"));
         for arg in cli.get_arguments() {
             assert!(
                 arg.get_help()

@@ -96,23 +96,20 @@ describe("xcb illustration shapes", () => {
     }
   });
 
-  test("task, attention, fleet, and dispatch rows match the CLI", async () => {
-    const [main, habitat, remote] = await Promise.all([
+  test("local rows match the CLI and historical remote illustrations do not activate a command", async () => {
+    const [main, habitat] = await Promise.all([
       read("crates/xcb-cli/src/main.rs"),
       read("crates/xcb-cli/src/habitat.rs"),
-      read("crates/xcb-cli/src/remote.rs"),
     ]);
     expect(main).toContain('"{}  {} · {} · {}{}"');
     for (const row of Object.values(taskRows).flat()) expect(row).toMatch(/^t_\w+  [a-z ]+ · .+ · .+ · \w+\/[\w-]+ · a_\w+$/u);
     expect(habitat).toContain('"{} · {} · {} · {}"');
     expect(attentionRows[0]).toMatch(/^t_\w+ · \w+ · needs input · .+$/u);
-    expect(remote).toContain('"{} · {} · {} · {} · {}"');
-    expect(remote).toContain('"  projection {} · rev {} · {}s old{}"');
-    expect(remote).toContain('" · STALE"');
+    expect(main).not.toContain("mod remote;");
+    expect(await Bun.file(join(repo, "crates/xcb-cli/src/remote.rs")).exists()).toBe(false);
     for (const row of fleetRows) {
       expect(row).toMatch(/^d_\w+ · [\w-]+ · (daemon|controller) · (online|offline) · \w+$|^ {2}projection \w+ · rev \d+ · \d+s old( · STALE)?$/u);
     }
-    expect(remote).toContain('"Posted to {} as {} (idempotency {})."');
     expect(dispatchResult).toMatch(/^Posted to d_\w+ as c_\w+ \(idempotency k_\w+\)\.$/u);
   });
 

@@ -271,9 +271,12 @@ def main():
 
     try:
         start_daemon()
-        terminal("create-conversation", ["chat", "--new"], [(b"\x04", .3)])
+        created = value("conversations", "--new")
+        check("headless conversation creation returns one project view", len(created) == 1 and not created[0]["isThread"])
+        for removed in ("chat", "resume", "remote"):
+            check("removed entry point rejected " + removed, command(removed, ok=False)[0] != 0)
         # The thread row (`isThread`) is listed first when something created
-        # it; this check is about the one project view `chat --new` made.
+        # it; this check is about the one project view `conversations --new` made.
         conversations = [row for row in value("conversations") if not row.get("isThread")]
         check("one isolated conversation", len(conversations) == 1)
         conversation = conversations[0]["id"]
@@ -313,8 +316,9 @@ def main():
         check("inbox did not release or attempt deferred task", saved["deferred"] and saved["attempts"] == target["attempts"] and saved.get("session") is None)
         # The other project lives in its own directory, so it holds its own
         # grants and watches no matter how projects are keyed.
-        terminal("second-conversation", ["chat", "--new"], [(b"\x04", .3)], cwd=paths["workspace2"])
-        other_conversation = next(row["id"] for row in value("conversations") if row["id"] != conversation)
+        second = value("conversations", "--new", cwd=paths["workspace2"])
+        check("second project view uses its exact workspace", len(second) == 1 and second[0]["workspace"] == str(paths["workspace2"]))
+        other_conversation = second[0]["id"]
         other = value("backlog", "add", other_conversation, "Other project")
         value("steer", other["id"], "OTHER_PROJECT_GUIDANCE", "--id", "other_project_event")
         check("conversation filter excludes other project", all(row["conversation"] == conversation for row in value("inbox", "--conversation", conversation)))
@@ -352,34 +356,25 @@ def main():
                                         and row["kind"] == "steering"
                                         and row["status"] == "held" for row in rows) == 1
 
-        actions = [
-            ((f"/watch {ui_target['id']} {ui_source['id']}\r").encode(), .7),
-            (paste_submit(f"/steer {ui_target['id']} {long_text}"), .3),
-            ((f"/inbox {ui_target['id']}\r").encode(), .5),
-            (b"\r", .5), (b"\x1b[F", .5), (b"\x1b", .2),
-            (b"/inbox all\r", .5), (b"\x1b", .2),
-            (b"/inbox\r", .5), (b"\x1b", .2), (b"\x04", .3),
-        ]
-        _, segments = terminal("inbox-tui", ["chat", "--resume", conversation], actions,
-                               redraw_at=(2, 3, 4, 6, 8),
-                               durable_at={0: ui_watch_saved, 1: ui_guidance_saved})
-        task_picker = re.sub(r"\s+", "", segments[2])
-        all_picker = re.sub(r"\s+", "", segments[6])
-        conversation_picker = re.sub(r"\s+", "", segments[8])
-        inspector = re.sub(r"\s+", "", "".join(segments[3:5]))
-        check("TUI exact task inbox rendered", "Taskinbox·recentdeliveryhistory" in task_picker)
-        check("TUI all and conversation inbox rendered", "Allagents·inbox·recentdeliveryhistory" in all_picker and "Thisagent·inbox·recentdeliveryhistory" in conversation_picker)
+        value("watch", ui_target["id"], ui_source["id"], "--id", "headless_watch")
+        check("headless watch targets exact task", ui_watch_saved())
+        guidance = value("steer", ui_target["id"], long_text, "--id", "headless_guidance")
+        check("headless long guidance retained without clipping", ui_guidance_saved())
+        check("headless guidance replay is exact", value("steer", ui_target["id"], long_text, "--id", guidance["id"]) == guidance)
         ui_rows = events(ui_target["id"])
         ui_guidance = [row for row in ui_rows if row["text"] == long_text]
-        check("TUI steer targets exact task once", len(ui_guidance) == 1 and ui_guidance[0]["task"] == ui_target["id"])
-        check("TUI watch reserves a waiting report", len(ui_rows) == 2 and sum(status(row) == "waiting" for row in ui_rows) == 1)
-        check("TUI full event inspector identities", all(identifier in inspector for identifier in (ui_guidance[0]["id"], ui_target["id"], conversation)))
-        check("TUI full inspector scrolls to content tail and delivery record", "UI_GUIDANCE_TAIL" in inspector and "Deliveryrecord" in inspector and "Notinaworkerturnyet." in inspector)
-        check("slash actions do not create ordinary tasks", len(value("backlog", "--conversation", conversation)) == len(before_tasks))
-        complete(ui_source, "TUI_WATCH_REPORT_COMPLETE")
+        check("headless steer targets exact task once", len(ui_guidance) == 1 and ui_guidance[0]["task"] == ui_target["id"])
+        check("headless watch reserves a waiting report", len(ui_rows) == 2 and sum(status(row) == "waiting" for row in ui_rows) == 1)
+        check("headless inspector retains identities and full content", ui_guidance[0]["conversation"] == conversation
+              and ui_guidance[0]["id"] == guidance["id"] and ui_guidance[0]["text"].endswith("UI_GUIDANCE_TAIL")
+              and ui_guidance[0].get("receipt") is None)
+        check("headless all and conversation inspectors include exact events", all(row in value("inbox")
+              and row in value("inbox", "--conversation", conversation) for row in ui_rows))
+        check("headless actions do not create ordinary tasks", len(value("backlog", "--conversation", conversation)) == len(before_tasks))
+        complete(ui_source, "HEADLESS_WATCH_REPORT_COMPLETE")
         ui_rows = events(ui_target["id"])
-        check("TUI watch routes exact completion", len(ui_rows) == 2 and sum("TUI_WATCH_REPORT_COMPLETE" in row["text"] for row in ui_rows) == 1)
-        check("TUI guidance keeps work deferred", task(ui_target["id"])["deferred"] and all(status(row) == "held" for row in ui_rows))
+        check("headless watch routes exact completion", len(ui_rows) == 2 and sum("HEADLESS_WATCH_REPORT_COMPLETE" in row["text"] for row in ui_rows) == 1)
+        check("headless guidance keeps work deferred", task(ui_target["id"])["deferred"] and all(status(row) == "held" for row in ui_rows))
         check("no provider accounts activated", value("accounts")["accounts"] == [])
         check("no provider sessions created", value("sessions") == [])
         check("no fabricated attention", value("attention") == [])
@@ -435,16 +430,15 @@ def main():
         command("tasks", "verify", program["id"])
         command("tasks", "verify", child_id)
         before_program_ui = len(value("backlog", "--conversation", conversation))
-        _, program_segments = terminal("program-tui", ["chat", "--resume", conversation], [
-            ((f"/program {program['id']}\r").encode(), .5), (b"\x1b", .2),
-            (b"/program\r", .5), (b"\x1b", .2),
-            ((f"/cancel {program['id']}\r").encode(), .5), (b"\x04", .3),
-        ], redraw_at=(0, 2), durable_at={4: lambda: task(program["id"])["state"] == "cancelled"})
-        inspector = re.sub(r"\s+", "", program_segments[0])
-        check("TUI program inspector shows linked call and attention", all(text in inspector
-              for text in (program["id"], child_id, "1/2", "/attention", suspended["receipt"])))
-        check("TUI program picker rendered", "Recentmanagedprograms" in re.sub(r"\s+", "", program_segments[2]))
-        check("program UI creates no ordinary task", len(value("backlog", "--conversation", conversation)) == before_program_ui)
+        inspected = program_status()
+        check("headless program inspector retains linked call and receipt", inspected["parent"] == program["id"]
+              and inspected["child"] == child_id and inspected["calls"] == 1 and inspected["maxCalls"] == 2
+              and inspected["receipt"] == suspended["receipt"])
+        current = task(program["id"])
+        check("stale parent cancellation rejected", command("tasks", "cancel", program["id"], "--revision", str(current["revision"] + 1), ok=False)[0] != 0)
+        value("tasks", "cancel", program["id"], "--revision", str(current["revision"]))
+        eventually("headless parent cancellation settles", lambda: task(program["id"])["state"] == "cancelled")
+        check("program controls create no ordinary task", len(value("backlog", "--conversation", conversation)) == before_program_ui)
         check("parent cancellation settles linked child", task(child_id)["state"] == "cancelled")
         check("cancelled controller launches no second call", program_status()["calls"] == 1)
         command("tasks", "verify", program["id"])

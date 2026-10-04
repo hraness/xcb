@@ -70,14 +70,14 @@ printf 'export function add(a, b) {\\n  return a - b;\\n}\\n' > add.js`}</Code>
       <h2 id="preview">4. Preview the route</h2>
       <Code>{`xcb models route --task "Fix add() in add.js so it adds"`}</Code>
       <p>The first line names the model key and the account ID xcb would use right now, then the reasons. Nothing runs and no account is held.</p>
-      <h2 id="first-task">5. Send the task from your thread</h2>
-      <Code>{`xcb`}</Code>
-      <p>This opens your thread. Type <code>Fix add() in ~/xcb-tutorial/add.js so it adds instead of subtracting.</code> and press Enter. xcb replies with the folder it chose and why, such as “Started <strong>Fix add()</strong> in <code>xcb-tutorial</code> · path in <code>xcb-tutorial</code> · /workspace to move”. The session card above the chat shows the routed model while the task runs, and the answer appears in the thread when it finishes.</p>
+      <h2 id="first-task">5. Run the task</h2>
+      <Code>{`xcb run -p "Fix add() in add.js so it adds instead of subtracting"`}</Code>
+      <p>Run this in the practice project. xcb chooses an account and model, runs the task, and prints the answer. Use <code>xcb --json route</code> when another agent or script needs a JSON result.</p>
       <p>Check the result from another terminal:</p>
       <Code>{`cat ~/xcb-tutorial/add.js`}</Code>
       <p>Check that the function returns <code>a + b</code>. xcb records which account ran the task and how it ended; review the result before relying on it.</p>
       <h2 id="come-back">6. Close the terminal and come back</h2>
-      <p>Send a second task, such as <code>Add a test for add()</code>, and close the terminal window while it runs. The task keeps going. Run <code>xcb</code> again and type <code>/tasks</code> to check its progress and read the result.</p>
+      <p>For work that should outlive your caller, submit <code>xcb backlog add ~/xcb-tutorial &quot;Add a test for add()&quot; --ready</code>. Inspect its progress with <code>xcb tasks</code> and read the result with <code>xcb tasks show &lt;task-id&gt; --json</code>. The background supervisor owns managed work; closing a caller is not proof that a direct run settled.</p>
       <p>To run one task without the thread, use <code>xcb run -p &quot;Explain this repository&quot;</code> in a project folder. It prints the answer when the task finishes.</p>
       <h2 id="build-from-source">Build from source</h2>
       <p>On an Intel Mac or any host without a release archive, build with Git, Rust 1.97.1, and the platform’s build tools:</p>
@@ -102,7 +102,7 @@ function HowRoutingWorks() {
   return (
     <>
       <p>Use xcb to send suitable work to unused subscription quota as resets approach. Fresh Claude and Codex usage reports adjust its account preference within the task’s quality requirements and your choice of provider, account, or model.</p>
-      <p>Every task goes through the same four steps, whether you type it in the thread, run <code>xcb run</code>, or send it with <code>xcb --json route</code>: xcb filters your accounts, ranks the models they offer, holds the chosen account while the provider works, and records how the run ended.</p>
+      <p>Every task goes through the same four steps, whether you submit managed work, run <code>xcb run</code>, or send it with <code>xcb --json route</code>: xcb filters your accounts, ranks the models they offer, holds the chosen account while the provider works, and records how the run ended.</p>
       <h2 id="filter">1. Find the accounts that can take the task</h2>
       <p>An account can take a task when all of these are true:</p>
       <ul>
@@ -123,7 +123,7 @@ function HowRoutingWorks() {
       <p>The provider runs in an operating-system sandbox: Seatbelt on macOS, <code>bwrap</code> on Linux. It gets xcb’s file tools for the task’s folder, no shell of its own, and network access to port 443 only. Registered host tool servers can provide additional access, including browser tools. Tasks that need an existing signed-in browser stay with Codex and prefer Astra. See <a href="/docs/security">security and privacy</a> for what that covers.</p>
       <h2 id="record">4. Record how the run ended</h2>
       <p>When the provider process exits, xcb records the result: completed, needs your input, failed, or cancelled. If it can’t confirm that the provider stopped or what it changed, it records the run as uncertain, keeps the account held, and does not retry. <code>xcb recover</code> shows those runs; see <a href="/docs/troubleshooting#unfinished-run">troubleshooting</a>.</p>
-      <p>In the thread, a turn that stops at a usage limit continues on another route the task hasn’t tried yet, and a turn cut off by a turn or token limit can continue on its own (up to eight times in a row within an hour by default). An uncertain run never moves to another account. <code>xcb --json route</code> runs exactly one turn and leaves retries to the caller.</p>
+      <p>For managed work, a turn that stops at a usage limit continues on another route the task hasn’t tried yet, and a turn cut off by a turn or token limit can continue on its own (up to eight times in a row within an hour by default). An uncertain run never moves to another account. <code>xcb --json route</code> runs exactly one turn and leaves retries to the caller.</p>
       <h2 id="preview">Preview a decision</h2>
       <Code>{`xcb models route --task "fix a race in the scheduler"   # the route xcb would pick here, now
 xcb models tiers --task "fix a race in the scheduler"   # every model's tier and scores`}</Code>
@@ -159,7 +159,7 @@ function Security() {
       <ul>
         <li><strong>Supported builds:</strong> about once an hour, xcb reads the list of reviewed provider builds from this repository’s <code>qualified-builds.json</code> on GitHub.</li>
         <li><strong>Updates:</strong> <code>xcb update check</code>, <code>xcb upgrade</code>, and the optional daily check read release data from GitHub.</li>
-        <li><strong>Remote devices:</strong> only after <code>xcb link</code>. Task content crosses the relay end-to-end encrypted.</li>
+        <li><strong>Remote devices:</strong> hosted remote commands are removed from the current source build. Valhalla transport is planned and does not synchronize tasks yet.</li>
       </ul>
       <h2 id="extensions">Extensions that run code</h2>
       <p>Hooks run programs you choose at session and turn events. They are off by default and need their own <code>xcb plugins enable hooks</code>. Panes change only what the terminal shows; they cannot run code or grant a provider new tools.</p>
@@ -173,67 +173,45 @@ function Security() {
 function ProjectsAndTasks() {
   return (
     <>
-      <p>Plain <code>xcb</code> opens your thread from any directory: one conversation for all your projects. Each prompt becomes a task in one project folder, and tasks keep running after you close the terminal.</p>
-      <p>You can also <a href="#import-sessions">continue recent Claude or Codex conversations</a> in xcb, using their saved messages as context for tasks routed across your subscriptions.</p>
-      <h2 id="choose-folder">How xcb picks a task’s folder</h2>
-      <p>A project is a folder. For each prompt in the thread, xcb uses the first of these that applies:</p>
-      <ol>
-        <li>a path in the prompt, such as <code>in ~/src/app</code>;</li>
-        <li>a registered project name in the prompt;</li>
-        <li>the project you focused with <code>/workspace</code>;</li>
-        <li>the project of your last task, when the prompt reads as a continuation;</li>
-        <li>the folder you started xcb from (<code>--cwd</code> sets it), then recent work.</li>
-      </ol>
-      <p>The reply names the folder and the reason, such as “Started <strong>Fix the parser</strong> in <code>app</code> · named <code>app</code> · /workspace to move”. When a prompt names a folder xcb hasn’t seen, or matches several projects, xcb asks, keeps your draft, and saves nothing. A less certain choice waits 8 seconds before it starts so you can move it.</p>
-      <Code>{`xcb --cwd /absolute/path/to/your/project   # the thread, hinting this project
-xcb chat --new                              # a project view: every task runs in this directory`}</Code>
-      <p>xcb picks only folders you have used or registered, and never your home folder, its hidden folders, <code>~/Library</code>, or system folders. Register one with <code>/workspace add &lt;dir&gt;</code> or <code>xcb workspaces add &lt;dir&gt;</code>. The <Ext href={`${repositoryDocs}/managed-harness.md#choosing-a-tasks-directory`}>managed harness guide</Ext> lists every rule.</p>
+      <p>Use local commands or another agent to submit and inspect managed tasks. The background supervisor owns this work, so it can outlive the caller. The interactive terminal is removed from the current source build.</p>
+      <h2 id="choose-folder">Choose the task’s folder explicitly</h2>
+      <Code>{`xcb backlog add /absolute/path/to/your/project "Fix the failing parser test" --ready --json
+xcb --cwd /absolute/path/to/your/project conversations --new --json`}</Code>
+      <p>A project is a folder. A backlog target can name its directory, registered name, or a saved project conversation. The global thread needs an explicit <code>--workspace</code>. Register a folder with <code>xcb workspaces add &lt;dir&gt;</code>; xcb does not grant access to a folder merely because a prompt names it.</p>
       <h2 id="follow">Follow your tasks</h2>
-      <ul>
-        <li><code>/tasks</code> lists running and finished work; <code>xcb tasks</code> does the same from a script.</li>
-        <li><code>/attention</code> collects questions and approvals from every task. Answer a question with <code>/reply &lt;task-id&gt; &lt;answer&gt;</code>.</li>
-        <li>The session cards above the chat show each task’s model and latest response. Press F6 to browse them.</li>
-        <li>Open another terminal for a second view of the same tasks.</li>
-      </ul>
+      <Code>{`xcb tasks --json
+xcb tasks show <task-id> --json
+xcb tasks messages <task-id> --json
+xcb attention --json`}</Code>
+      <p>These commands read saved state without creating a new task. Answer a pending question with <code>xcb backlog reply &lt;task-id&gt; &lt;answer&gt; --revision &lt;revision&gt;</code>. An answer does not grant host or provider permissions.</p>
       <h2 id="guide">Guide or stop a task</h2>
-      <ul>
-        <li><code>/steer &lt;task-id&gt; &lt;guidance&gt;</code> adds guidance for the task’s next turn without interrupting it. In <code>/agents</code>, select a task and press <code>s</code> to write guidance or <code>a</code> to answer its question; <code>/task</code> returns to new work.</li>
-        <li><code>/cancel &lt;task-id&gt;</code> asks a task to stop. With several running tasks and none selected, a bare <code>/cancel</code> asks which one.</li>
-        <li><code>/workspace move &lt;task&gt; &lt;name|path&gt;</code> moves a task that hasn’t started. A started task can’t move; cancel it and send the prompt again.</li>
-      </ul>
-      <p>Cancellation finishes when the provider has stopped and xcb has recorded the result.</p>
+      <Code>{`xcb steer <task-id> "Keep the existing boundary" --id guidance_1 --json
+xcb inbox --task <task-id> --json
+xcb tasks cancel <task-id> --revision <revision> --json`}</Code>
+      <p>Guidance waits for the task’s next safe turn. Inspect the task’s current revision before cancellation; a stale revision is rejected. Cancellation finishes only when the provider has stopped and xcb has recorded the result. Use <code>xcb workspaces move</code> for work that has not started.</p>
       <h2 id="resume">Come back to your work</h2>
-      <Code>{`xcb                                   # your thread, from any directory
-xcb conversations                     # the thread and project views
-xcb chat --resume <conversation-id>   # reopen one of them
-xcb workspaces                        # project folders the thread picks from
-xcb attention                         # questions and approvals waiting on you`}</Code>
-      <p>Inside xcb, <code>/sessions</code> switches between the thread and project views. In the thread, <code>/new</code> clears the project focus; in a project view it starts another view.</p>
+      <Code>{`xcb conversations --json
+xcb history <conversation-id> --json
+xcb backlog --workspace /absolute/path/to/your/project --json
+xcb tasks verify <task-id>`}</Code>
+      <p>Saved conversations, tasks, and receipts remain local. Build any view you need from their JSON results; no terminal picker or slash command is required.</p>
       <h2 id="import-sessions">Continue a Claude or Codex conversation</h2>
-      <p>Import saved messages, then continue with xcb choosing an account and model for your next task. Discovery and import look for conversations active in the last 24 hours by default.</p>
-      <Code>{`xcb sessions discover                 # conversations active in the last 24 hours
-xcb sessions import --recent           # copy their user and assistant messages
-xcb conversations                     # saved conversations, including imports
-xcb chat --resume <conversation-id>     # continue an imported conversation`}</Code>
-      <p>Add <code>--hours 48</code> to use a longer activity window, or <code>--provider codex</code> or <code>--provider claude</code> to select one provider. To copy just one result, use <code>xcb sessions import &lt;candidate-id&gt;</code>. Repeated imports add new messages without duplicating the history already copied.</p>
-      <p>For a conversation started in your home folder, choose an existing project when importing it:</p>
+      <Code>{`xcb sessions discover
+xcb sessions import --recent
+xcb conversations --json
+xcb backlog add <conversation-id> "Continue the work" --ready --json`}</Code>
+      <p>Discovery and import use the last 24 hours by default. Add <code>--hours 48</code> for a longer window, or <code>--provider codex</code> or <code>--provider claude</code> to select one provider. Repeated imports add new messages without duplicating existing history.</p>
       <Code>{`xcb sessions import <candidate-id> --workspace /path/to/project`}</Code>
-      <p><code>--workspace</code> applies to one conversation and cannot be combined with <code>--recent</code>. xcb records the original folder in the imported history and keeps your chosen project on repeat imports.</p>
-      <p>Import preserves the original files and starts no work; send a new message to start a task. Recent activity does not prove that the original provider process is still running, and xcb does not take control of it. xcb skips tool results and subagent logs, and does not read credential files or provider settings. See the <Ext href={`${repositoryDocs}/session-import.md`}>session import reference</Ext> for source locations and limits.</p>
+      <p><code>--workspace</code> applies to one conversation and cannot be combined with <code>--recent</code>. Import preserves the original files and starts no work or provider process. It does not take control of a running provider. See the <Ext href={`${repositoryDocs}/session-import.md`}>session import reference</Ext> for source locations and limits.</p>
       <h2 id="direct-sessions">Direct provider sessions</h2>
-      <p><code>xcb run</code> and <code>xcb --json route</code> save direct sessions, each on one account and model.</p>
-      <Code>{`xcb sessions                 # direct provider sessions
-xcb resume                   # reopen the latest one in the terminal
-xcb resume <session-id>`}</Code>
-      <p><code>xcb resume</code> reopens a session and its folder in the terminal. It is not a headless continuation command. In a direct session, <code>/accounts</code> and <code>/model</code> open the account and model pickers, <code>/new</code> starts another session, and <code>/sessions</code> switches between them. Finish the current turn before changing its account or model.</p>
+      <Code>{`xcb sessions --json
+xcb history <session-id> --direct --json`}</Code>
+      <p><code>xcb run</code> and <code>xcb --json route</code> save direct sessions. The interactive chat and resume commands are removed; reading a saved session does not continue a provider turn.</p>
       <h2 id="project-work">Backlog, schedules, and project agents</h2>
-      <p>Each project keeps a backlog and work history shared by the thread and every project view over its folder.</p>
-      <ul>
-        <li><code>/backlog add &lt;work&gt;</code> saves work for later; <code>/backlog</code> shows this project’s queue and <code>/backlog all</code> every project’s.</li>
-        <li><code>/schedule every &lt;seconds&gt; &lt;prompt&gt;</code> repeats a prompt. Schedules run while the background supervisor runs; on macOS and Linux, <code>xcb service install</code> starts it at login.</li>
-        <li><code>/project grant &lt;tasks&gt; &lt;hours&gt; &lt;goal&gt;</code> lets a project start a limited number of follow-up tasks on its own; <code>/project pause</code> stops that. A grant covers only its own folder.</li>
-      </ul>
-      <p>These commands never guess a project: without one you named, the focus, or a selected task, they ask and save nothing. The <Ext href={`${repositoryDocs}/project-agents.md`}>project agents reference</Ext> covers programs, daemons, and Wordcell memory, and the <Ext href={`${repositoryDocs}/terminal.md`}>terminal guide</Ext> covers keys, search, Vim editing, and draft recovery.</p>
+      <Code>{`xcb backlog add /path/to/project "Work to retain" --json
+xcb schedules --json
+xcb projects --json`}</Code>
+      <p>Without <code>--ready</code>, backlog work stays deferred. Schedules require the background supervisor; <code>xcb service install</code> starts it at login on macOS and Linux. Project grants bound follow-up tasks to a named folder and budget. The <Ext href={`${repositoryDocs}/project-agents.md`}>project agents reference</Ext> covers grants and programs, and the <Ext href={`${repositoryDocs}/terminal.md`}>headless command guide</Ext> covers local operations.</p>
     </>
   );
 }
@@ -352,8 +330,8 @@ function Customization() {
       <Code>{`xcb config
 xcb panes
 xcb plugins`}</Code>
-      <h2 id="panes">Arrange your terminal</h2>
-      <p>In a direct provider session, <code>/pane</code> opens the pane picker, <code>/pane focus</code> switches to the built-in focused view, and <code>/pane edit</code> edits the current one. To describe a new view, use <code>/pane generate &lt;description&gt;</code>. Generation uses the selected account and model; if that session is busy, it waits for the account’s next idle boundary.</p>
+      <h2 id="panes">Build your own view</h2>
+      <p>The interactive terminal is removed from the current source build. Another agent or your app can build a view from local JSON results. Pane declarations remain bounded presentation data for clients that choose to use them; they do not install a terminal UI.</p>
       <Code>{`xcb panes show focus
 xcb panes check /absolute/path/to/pane.json
 xcb panes install /absolute/path/to/pane.json`}</Code>
@@ -437,7 +415,7 @@ xcb upgrade             # install the latest verified release
 xcb upgrade <version>   # install a specific release`}</Code>
       <p><code>xcb upgrade</code> reruns the recorded release installer. It checks the installed binary and helper against their saved paths, version, and SHA-256 before replacing anything. Older installs without those records need one reinstall from <a href="/install">the release installer</a>. If you built from source, update the checkout and run <code>./scripts/install-native.sh</code> again. The binary being replaced is kept as <code>~/.local/bin/xcb.previous.&lt;sha256&gt;</code>.</p>
       <h2 id="automatic-checks">Automatic updates</h2>
-      <p>New, unpinned release installs check and update automatically before an interactive <code>xcb</code>, <code>chat</code>, <code>resume</code>, <code>run</code>, or <code>doctor</code> command, at most once a day. The update runs before your command starts and then starts the new binary with the same arguments. Another running xcb command, supervisor, or service postpones the update. Nothing is stopped or restarted for it.</p>
+      <p>New, unpinned release installs check and update automatically before an interactive <code>run</code> or <code>doctor</code> command, at most once a day. The update runs before your command starts and then starts the new binary with the same arguments. Another running xcb command, supervisor, or service postpones the update. Nothing is stopped or restarted for it.</p>
       <p>Saved <code>notify</code> and <code>disable</code> preferences remain in force. Set <code>HRANESS_NO_UPDATE=1</code> to skip incidental updates for one invocation. CI, JSON output, and noninteractive commands also skip them; agents and scripts can use <code>xcb update check</code> and <code>xcb upgrade</code> explicitly. Source builds, package-manager installs, and exact-version pins never update automatically.</p>
       <p>You can also add a daily login item on macOS or a systemd user timer on Linux:</p>
       <Code>{`xcb update enable                   # automatic updates for a supported release install
@@ -556,7 +534,7 @@ EOF`}</Code>
   "outcome": { "terminal": "completed", "joined": true, "effects": "settled", "pending_attention": false, "failure": null },
   "text": "…"
 }`}</Code>
-      <p><code>text</code> holds up to 256 KiB of the provider’s answer; <code>textTruncated: true</code> marks a longer one. <code>session</code> is a saved direct session a person can reopen with <code>xcb resume &lt;session&gt;</code>. <code>reason</code> is a short description of why xcb chose the route, not a price or quality guarantee. Top-level fields are camelCase; the fields inside <code>outcome</code> are snake_case.</p>
+      <p><code>text</code> holds up to 256 KiB of the provider’s answer; <code>textTruncated: true</code> marks a longer one. <code>session</code> identifies the saved direct session. Read it with <code>xcb history &lt;session&gt; --direct</code>; the removed terminal resume command is not available. <code>reason</code> is a short description of why xcb chose the route, not a price or quality guarantee. Top-level fields are camelCase; the fields inside <code>outcome</code> are snake_case.</p>
       <h2 id="failures">Handle failures</h2>
       <p>A failure exits 1 with <code>status: &quot;failed&quot;</code> and one <code>code</code>:</p>
       <Table label="Route failure codes" head={["Code", "Meaning", "What to do"]} rows={[
@@ -655,7 +633,6 @@ function ApplicationApi() {
 const commandGroups: readonly Readonly<{ id: string; title: string; commands: readonly (readonly [string, string])[] }>[] = [
   { id: "commands-start", title: "Start here", commands: [
     ["setup <provider>", "Add an account, check the provider, sign in, and load its models"],
-    ["chat", "Open your thread; --new starts a project view, --resume <id> reopens one"],
     ["run -p <task>", "Run one task in --cwd and print the answer; --account, --model, --image"],
     ["doctor", "Check provider builds and unfinished runs; --provider, --executable"],
   ] },
@@ -666,7 +643,7 @@ const commandGroups: readonly Readonly<{ id: string; title: string; commands: re
     ["offers", "Show public plan offers (not checked against your account)"],
   ] },
   { id: "commands-tasks", title: "Conversations and tasks", commands: [
-    ["conversations", "List your thread and project views"],
+    ["conversations", "List saved conversations and project views; --new creates a view in --cwd"],
     ["workspaces", "List, add, hide, and show project folders; why explains a task's folder"],
     ["history <id>", "Read a conversation's saved messages"],
     ["rename <id> <title>", "Rename a conversation"],
@@ -678,7 +655,6 @@ const commandGroups: readonly Readonly<{ id: string; title: string; commands: re
     ["attention", "Show questions and approvals waiting on you"],
     ["schedules", "Manage recurring prompts"],
     ["sessions", "List direct sessions; discover and import recent Claude or Codex history; rm, prune, export"],
-    ["resume [id]", "Reopen a direct provider session"],
   ] },
   { id: "commands-setup", title: "Setup", commands: [
     ["service", "Start the background supervisor at login (macOS or Linux); install, status, uninstall, plan"],
@@ -687,7 +663,6 @@ const commandGroups: readonly Readonly<{ id: string; title: string; commands: re
     ["completions <shell>", "Print shell completions"],
   ] },
   { id: "commands-advanced", title: "Advanced (xcb help advanced)", commands: [
-    ["link, fleet, dispatch, send, remote", "Link machines through a relay and run work on them"],
     ["daemons, projects, memory, reflex", "Project agents, project grants, Wordcell notes, learned routing"],
     ["panes, plugins, hooks, judge", "Terminal panes, extensions, lifecycle hooks, the routing judge"],
     ["tools", "Connect browser, computer, and shared MCP tool servers"],
@@ -724,12 +699,12 @@ function Reference() {
       <Table label="Global options" head={["Option", "Effect"]} rows={[
         [<code key="o">--state &lt;dir&gt;</code>, <>State folder; the default is <code>$XCB_STATE</code> or <code>~/.local/share/xcb</code></>],
         [<code key="o">--json</code>, "Machine-readable output where a command supports it"],
-        [<code key="o">--cwd &lt;dir&gt;</code>, <>Project hint for the thread; the exact folder for <code>run</code>, <code>chat --new</code>, and <code>models route</code> (default <code>.</code>)</>],
+        [<code key="o">--cwd &lt;dir&gt;</code>, <>The project folder for <code>run</code>, <code>conversations --new</code>, and <code>models route</code> (default <code>.</code>)</>],
         [<code key="o">-h, --help</code>, <>Help; <code>xcb help advanced</code> lists the rest of the commands</>],
         [<code key="o">-V, --version</code>, "The installed version"],
       ]} />
       <h2 id="commands">Commands</h2>
-      <p>Grouped as in <code>xcb --help</code>. Plain <code>xcb</code> opens your thread in a terminal and prints a short start screen anywhere else.</p>
+      <p>Grouped as in <code>xcb --help</code>. Plain <code>xcb</code> prints a short start screen. Use <code>xcb run</code>, the JSON route, or managed task commands; the interactive terminal and hosted remote commands are removed.</p>
       {commandGroups.map((group) => (
         <section aria-labelledby={group.id} key={group.id}>
           <h3 id={group.id}>{group.title}</h3>
@@ -747,7 +722,7 @@ function Reference() {
         [<code key="e">XCB_JEV_API_KEY</code>, <>Judge key, instead of the stored one. <code>TYPESAFE_API_KEY</code> also works.</>],
         [<code key="e">XCB_JEV_URL</code>, "Custom judge endpoint; requires a key from the environment"],
         [<code key="e">XCB_JEV_MODEL</code>, "Judge model"],
-        [<code key="e">XCB_RELAY_URL</code>, <>Default relay for <code>xcb link</code></>],
+        [<code key="e">XCB_RELAY_URL</code>, <>Legacy relay configuration; not an active transport in the current source build</>],
         [<code key="e">NO_COLOR</code>, "Any non-empty value turns off color"],
         [<code key="e">VISUAL</code>, <>Editor opened by Ctrl-G, then <code>EDITOR</code></>],
         [<code key="e">XCB_VERSION</code>, <>Installer only: install and pin this exact release instead of the latest</>],
@@ -766,7 +741,7 @@ function Reference() {
       <Table label="Exit codes" head={["Code", "Meaning"]} rows={[
         ["0", "Success"],
         ["1", <>Failure. <code>xcb run</code> and <code>xcb --json route</code> also exit 1 unless the turn completed, the provider exited, and nothing waits for an answer. <code>xcb doctor</code> exits 1 when it finds no provider.</>],
-        ["2", <>Usage error: an unknown command or flag. <code>xcb remote status --wait</code> also exits 2 for an unknown command ID or an exhausted wait.</>],
+        ["2", <>Usage error: an unknown command or flag, including a removed interactive or remote command.</>],
       ]} />
       <h2 id="json">JSON output</h2>
       <p>With <code>--json</code>, or when xcb detects that an agent is running it, a failed command prints one line on stdout:</p>

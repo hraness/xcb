@@ -1,0 +1,41 @@
+{
+  "schema": "xcb.evidence.receipt.v1",
+  "task": "P1 protocol seam",
+  "claim": "Rust and TypeScript implement the same bounded xcb.protocol.v1 canonical frame slice.",
+  "scope": {
+    "schema": "xcb.protocol.v1",
+    "transport": "none",
+    "implementations": [
+      "crates/xcb-core/src/protocol.rs",
+      "src/protocol.ts"
+    ],
+    "vectors": "protocol/v1-vectors.json",
+    "inventory": "docs/protocol-seam.md"
+  },
+  "checks": [
+    {
+      "command": "cargo test -p xcb-core protocol --locked",
+      "status": "passed",
+      "result": "6 passed; 0 failed"
+    },
+    {
+      "command": "bun test test/protocol.test.ts",
+      "status": "passed",
+      "result": "18 passed; 0 failed"
+    }
+  ],
+  "assertions": [
+    "canonical UTF-8 JSON plus exactly one LF",
+    "request IDs use req_ namespace",
+    "command/submit requires expectedRevision slot and an idem_ idempotency key",
+    "errors are closed, host-selected, and bounded to 512 bytes",
+    "initialize negotiates the current version and known capabilities",
+    "negative and golden vectors are shared by both implementations"
+  ],
+  "unverified": [
+    "full workspace checks",
+    "live provider qualification",
+    "Valhalla transport or remote delivery",
+    "journal, projection, and full receipt semantics"
+  ]
+}

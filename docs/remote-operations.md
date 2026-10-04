@@ -1,4 +1,9 @@
-# Remote operations
+# Remote operations (legacy Convex migration reference)
+
+The shipped xcb CLI no longer exposes the Convex remote/fleet commands. This
+document is retained only to inventory data and recovery obligations for the
+Valhalla migration described in [the north-star vision](vision.md). Do not use
+it as a current setup guide or add new Convex state-sync features.
 
 `xcb link` joins machines into a fleet, so you, or an agent acting for you, can
 see their work and start tasks on them from any linked machine with the same

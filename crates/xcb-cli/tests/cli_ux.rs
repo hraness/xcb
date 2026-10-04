@@ -86,87 +86,6 @@ impl Sandbox {
         std::fs::write(path, body).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-
-    fn linked_relay(&self) -> String {
-        use xcb_runtime::cloud::{crypto, custody, wire};
-
-        let root = self.state();
-        let device = crypto::DeviceIdentity::generate().unwrap();
-        custody::store_device(
-            &root,
-            &device,
-            wire::EXECUTOR_CLASS,
-            "fixture",
-            &device.device,
-        )
-        .unwrap();
-        custody::store_account_key(&root, &crypto::AccountKey::generate(), 1).unwrap();
-        let claims = crypto::encode_base64url(
-            &serde_json::to_vec(&serde_json::json!({
-                "iss": "http://127.0.0.1:1",
-                "sub": "synthetic-owner|synthetic-session",
-                "aud": "convex",
-                "exp": 4_000_000_000_u64,
-            }))
-            .unwrap(),
-        );
-        let mut session = custody::CloudSession::issue(
-            format!("fixture.{claims}.synthetic-secret-signature"),
-            "synthetic-private-refresh-token".into(),
-            0,
-        );
-        session.deployment_url = Some("http://127.0.0.1:1".into());
-        custody::store_session(&root, &session).unwrap();
-        custody::store_link(
-            &root,
-            &custody::RelayLink {
-                deployment_url: "http://127.0.0.1:1".into(),
-                boot_generation: 3,
-            },
-        )
-        .unwrap();
-        device.device
-    }
-
-    fn cloud_bytes(&self) -> std::collections::BTreeMap<String, Vec<u8>> {
-        std::fs::read_dir(self.state().join("cloud"))
-            .unwrap()
-            .map(|entry| {
-                let entry = entry.unwrap();
-                (
-                    entry.file_name().into_string().unwrap(),
-                    std::fs::read(entry.path()).unwrap(),
-                )
-            })
-            .collect()
-    }
-
-    fn assert_relay_secrets_absent(&self, output: &Output) {
-        let rendered = format!("{}{}", text(&output.stdout), text(&output.stderr));
-        for (name, fields) in [
-            ("device.json", &["signingScalar", "agreementScalar"][..]),
-            ("account.json", &["accountKey"][..]),
-            ("session.json", &["token", "refreshToken"][..]),
-        ] {
-            let record: serde_json::Value = serde_json::from_slice(
-                &std::fs::read(self.state().join("cloud").join(name)).unwrap(),
-            )
-            .unwrap();
-            for field in fields {
-                let secret = record[*field].as_str().unwrap();
-                assert!(
-                    !rendered.contains(secret),
-                    "{name}/{field} appeared in CLI output"
-                );
-            }
-        }
-    }
-}
-
-impl Drop for Sandbox {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
 }
 
 fn text(bytes: &[u8]) -> String {
@@ -191,216 +110,6 @@ fn version_prints_name_and_version() {
         text(&output.stdout),
         format!("xcb {}\n", env!("CARGO_PKG_VERSION"))
     );
-}
-
-#[test]
-fn reauth_help_and_enrollment_option_conflicts_are_explicit() {
-    let help = plain(&["link", "--help"]);
-    assert!(help.status.success());
-    let help = text(&help.stdout);
-    assert!(help.contains("--reauth"));
-    assert!(help.contains("same relay account"));
-    assert!(help.contains("--code"));
-    for incompatible in [
-        &["--controller"][..],
-        &["--invite", "synthetic-private-invite"][..],
-        &["--label", "another-device"][..],
-    ] {
-        let sandbox = Sandbox::new(&format!("reauth-conflict-{}", incompatible[0]));
-        let mut args = vec!["--json", "link", "--reauth"];
-        args.extend_from_slice(incompatible);
-        let output = sandbox.run(&args, &[]);
-        assert_eq!(output.status.code(), Some(2), "{output:?}");
-        assert!(output.stderr.is_empty());
-        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(value["error"]["code"], "usage");
-        assert!(!text(&output.stdout).contains("synthetic-private-invite"));
-        assert!(!sandbox.state().exists());
-    }
-}
-
-#[test]
-fn reauth_requires_a_linked_device_without_starting_local_stores() {
-    let sandbox = Sandbox::new("reauth-unlinked");
-    let output = sandbox.run(&["--json", "link", "--reauth"], &[]);
-    assert_eq!(output.status.code(), Some(1), "{output:?}");
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(
-        value["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("not linked")
-    );
-    assert!(!sandbox.state().join("managed").exists());
-    assert!(!sandbox.state().join("cloud/device.json").exists());
-}
-
-#[test]
-fn a_first_link_without_a_relay_refuses_instead_of_guessing_a_local_backend() {
-    let sandbox = Sandbox::new("link-no-relay");
-    for env in [&[][..], &[("XCB_RELAY_URL", "")][..]] {
-        let output = sandbox.run(&["--json", "link", "--email", "owner@example.test"], env);
-        assert_eq!(output.status.code(), Some(1), "{output:?}");
-        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        let message = value["error"]["message"].as_str().unwrap().to_lowercase();
-        assert!(message.contains("no relay configured"), "{message}");
-        assert!(message.contains("--relay"), "{message}");
-        assert!(!text(&output.stderr).contains("Requesting a sign-in code"));
-    }
-}
-
-#[test]
-fn ordinary_link_keeps_a_linked_device_and_session_byte_for_byte() {
-    let sandbox = Sandbox::new("link-existing");
-    let device = sandbox.linked_relay();
-    let before = sandbox.cloud_bytes();
-    let output = sandbox.run(
-        &[
-            "--json",
-            "link",
-            "--email",
-            "other@example.test",
-            "--code",
-            "12345678",
-        ],
-        &[("XCB_RELAY_URL", "https://override.invalid")],
-    );
-    assert!(output.status.success(), "{output:?}");
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["linked"], true);
-    assert_eq!(value["device"], device);
-    assert!(value.get("reauthenticated").is_none());
-    assert_eq!(sandbox.cloud_bytes(), before);
-    assert!(!sandbox.state().join("managed").exists());
-    sandbox.assert_relay_secrets_absent(&output);
-}
-
-#[test]
-fn reauth_rejects_relay_overrides_before_resuming_saved_work() {
-    let sandbox = Sandbox::new("reauth-endpoint");
-    sandbox.linked_relay();
-    xcb_runtime::private::create(
-        &sandbox.state().join("cloud/reauth.json"),
-        b"synthetic unreadable journal: must never be opened",
-    )
-    .unwrap();
-    let before = sandbox.cloud_bytes();
-    for (args, env) in [
-        (
-            &[
-                "--json",
-                "link",
-                "--reauth",
-                "--relay",
-                "https://override.invalid",
-            ][..],
-            &[][..],
-        ),
-        (&["--json", "link", "--reauth", "--relay", ""][..], &[][..]),
-        (
-            &["--json", "link", "--reauth"][..],
-            &[("XCB_RELAY_URL", "https://override.invalid")][..],
-        ),
-        (
-            &[
-                "--json",
-                "link",
-                "--reauth",
-                "--relay",
-                "http://127.0.0.1:1",
-            ][..],
-            &[("XCB_RELAY_URL", "https://override.invalid")][..],
-        ),
-    ] {
-        let output = sandbox.run(args, env);
-        assert_eq!(output.status.code(), Some(1), "{output:?}");
-        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert!(
-            value["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("original relay"),
-            "{value}"
-        );
-        assert!(output.stderr.is_empty());
-        assert_eq!(sandbox.cloud_bytes(), before);
-        assert!(!sandbox.state().join("managed").exists());
-        sandbox.assert_relay_secrets_absent(&output);
-    }
-}
-
-#[test]
-fn reauth_rejects_bad_supplied_email_or_code_before_resuming_saved_work() {
-    let sandbox = Sandbox::new("reauth-input");
-    sandbox.linked_relay();
-    xcb_runtime::private::create(
-        &sandbox.state().join("cloud/reauth.json"),
-        b"synthetic unreadable journal: must never be opened",
-    )
-    .unwrap();
-    let before = sandbox.cloud_bytes();
-    for (extra, expected) in [
-        (&["--email", "invalid email@example.test"][..], "email"),
-        (&["--code", "private-otp-placeholder"][..], "8 digits"),
-        (&["--code", "1234567"][..], "8 digits"),
-        (&["--code", "1234567a"][..], "8 digits"),
-    ] {
-        let mut args = vec!["--json", "link", "--reauth"];
-        args.extend_from_slice(extra);
-        let output = sandbox.run(&args, &[]);
-        assert_eq!(output.status.code(), Some(1), "{output:?}");
-        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(value["error"]["code"], "invalid-input");
-        assert!(
-            value["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains(expected),
-            "{value}"
-        );
-        assert!(!text(&output.stdout).contains(extra[1]));
-        assert!(output.stderr.is_empty());
-        assert_eq!(sandbox.cloud_bytes(), before);
-        sandbox.assert_relay_secrets_absent(&output);
-    }
-}
-
-#[test]
-fn reauth_without_email_needs_explicit_input_and_keeps_the_saved_state() {
-    let sandbox = Sandbox::new("reauth-noninteractive");
-    sandbox.linked_relay();
-    let before = sandbox.cloud_bytes();
-    for output in [
-        sandbox.run(
-            &[
-                "--json",
-                "link",
-                "--reauth",
-                "--relay",
-                "http://127.0.0.1:1/",
-            ],
-            &[("XCB_RELAY_URL", "http://127.0.0.1:1//")],
-        ),
-        sandbox.run(&["--json", "link", "--reauth", "--code", "12345678"], &[]),
-        sandbox.run_with_input(
-            &["--json", "link", "--reauth"],
-            b"owner@example.test\n12345678\n",
-        ),
-    ] {
-        assert_eq!(output.status.code(), Some(1), "{output:?}");
-        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert!(
-            value["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("--email"),
-            "{value}"
-        );
-        assert!(output.stderr.is_empty());
-        assert_eq!(sandbox.cloud_bytes(), before);
-        assert!(!sandbox.state().join("managed").exists());
-        sandbox.assert_relay_secrets_absent(&output);
-    }
 }
 
 #[test]
@@ -490,16 +199,13 @@ fn help_is_short_grouped_and_fits_100_columns() {
     assert!(root.ends_with("xcb help advanced\n"), "{root}");
     let advanced = plain(&["help", "advanced"]);
     assert!(advanced.status.success());
-    let advanced = text(&advanced.stdout);
-    assert!(advanced.contains("\nOther machines\n  link "), "{advanced}");
-    assert!(!root.contains("\n  link "), "{root}");
+    let _advanced = text(&advanced.stdout);
     for args in [
         &["accounts", "--help"][..],
         &["run", "--help"],
         &["models", "--help"],
         &["doctor", "--help"],
         &["service", "--help"],
-        &["remote", "--help"],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_xcb"))
             .env_clear()
@@ -762,10 +468,6 @@ fn doctor_marks_each_provider_and_names_one_next_step() {
     let stdout = text(&output.stdout);
     assert!(
         stdout.contains("✗ claude: xcb can't find `claude` on your PATH."),
-        "{stdout}"
-    );
-    assert!(
-        stdout.contains("\n○ remote: not linked (xcb link connects this machine)\n"),
         "{stdout}"
     );
     assert!(!stdout.contains("custody"), "{stdout}");
@@ -1871,9 +1573,8 @@ const INTERNAL_TERMS: [&str; 20] = [
     "promoted",
 ];
 
-/// Documented names that contain one of those words: the `xcb remote admit`
-/// command, in usage lines and in `xcb remote --help`'s command list.
-const DOCUMENTED_NAMES: [&str; 2] = ["remote admit", "\n  admit "];
+/// Documented names that contain one of those words.
+const DOCUMENTED_NAMES: [&str; 0] = [];
 
 /// Internal words in `text`. `XCB` is matched exactly, so environment
 /// variable names such as `XCB_STATE` (one token) stay allowed.
@@ -1894,8 +1595,6 @@ fn internal_word_check_matches_whole_words_only() {
     assert_eq!(internal_words("Bounded, ephemeral"), ["Bounded"]);
     assert_eq!(internal_words("No XCB messages"), ["XCB"]);
     assert!(internal_words("$XCB_STATE or ~/.local/share/xcb").is_empty());
-    assert!(internal_words("Usage: xcb remote admit [OPTIONS] <DEVICE>").is_empty());
-    assert!(internal_words("Commands:\n  admit    Post an account-key wrap").is_empty());
     assert!(internal_words("promote notes; settle labels; adjoined").is_empty());
 }
 

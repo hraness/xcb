@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 /** The docs overview's headline and meta description, shared with its share card. */
 export const docsHeadline = "Set up xcb and route your first task";
-export const docsDescription = "Guides to installing xcb, connecting Claude or Codex accounts, and sending it work from its terminal, another agent, or your own app.";
+export const docsDescription = "Install xcb, connect Claude or Codex accounts, and send work through the headless CLI, JSON contract, or SDK.";
 
 /** Sidebar and overview groups, in order: both readers, then each reader. */
 export const docsGroups = [
@@ -14,7 +14,7 @@ export const docsTopics = [
   { slug: "getting-started", title: "Getting started", description: "Install xcb, connect a Claude account, and send your first task, ending with a fix xcb routed to one of your accounts and made in a practice project.", group: "Start here" },
   { slug: "how-routing-works", title: "How routing works", description: "How xcb picks an account and model for each task: which accounts can take it, how models are ranked, and why the account stays held until the provider exits.", group: "Start here" },
   { slug: "security", title: "Security and privacy", description: "What stays on your machine, what xcb sends to Claude and Codex, what the optional judge sees, and where credentials live outside your projects.", group: "Start here" },
-  { slug: "projects-and-tasks", title: "Projects and tasks", description: "Work from one thread across your projects: how xcb picks each task's folder, and how to follow, guide, cancel, and resume tasks that outlive the terminal.", group: "Daily use" },
+  { slug: "projects-and-tasks", title: "Projects and tasks", description: "Submit tasks to named project folders, inspect JSON state, add guidance, cancel with a revision, and import saved conversations without a terminal UI.", group: "Daily use" },
   { slug: "providers", title: "Accounts and models", description: "Connect Claude or Codex accounts, check which provider builds xcb supports, and choose an account or model when you want a specific one.", group: "Daily use" },
   { slug: "workspace", title: "Tests and builds", description: "Set up the offline Linux VM that runs your project's tests and builds on macOS ARM64, prepare public dependencies, and see what the runner can't do.", group: "Daily use" },
   { slug: "customization", title: "Customize xcb", description: "Change panes, continuation, context management, the per-turn deadline, hooks, and the optional routing judge, and see where each setting is stored.", group: "Daily use" },

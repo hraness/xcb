@@ -32,12 +32,12 @@ const questions = [
   { question: "Can I use the subscriptions I already have?", answer: "Yes. You sign in to your own Claude and Codex accounts through each provider’s own tool, and xcb routes work among them. It has no model access of its own and does not lift provider usage limits; each provider’s pricing and terms still apply." },
   { question: "What happens when an account hits its limit?", answer: "When a provider reports an exhausted usage window for an account, xcb skips that account and sends the next task to another account that can take it. A task from your thread that stops on a reported limit can move to another account with its original instructions. If no account can take it, the task waits for the reset. xcb never falls back to an API key." },
   { question: "How is xcb different from claude-swap, Claude Code Router, or herdr?", answer: "claude-swap changes which login Claude Code uses and keeps every Claude Code feature; xcb picks an account for each task across Claude and Codex and sandboxes each run. Claude Code Router sends each API request to a provider you configure; xcb never touches API traffic and runs whole tasks on your subscriptions. herdr keeps many agent terminals alive and visible, and xcb can run inside a herdr pane. The comparison pages cover these and more." },
-  { question: "What stays on my computer?", answer: "xcb stores accounts, credentials, sessions, and settings on your computer, outside your projects. Model requests go to the provider that runs the task. The optional judge sends limited task context to TypeSafe’s System One service; linked remote devices exchange encrypted task content through your relay." },
+  { question: "What stays on my computer?", answer: "xcb stores accounts, credentials, sessions, and settings on your computer, outside your projects. Model requests go to the provider that runs the task. The optional judge sends limited task context to TypeSafe’s System One service; the current source build has no hosted remote commands. Valhalla transport is planned, not shipped." },
   { question: "Can xcb run my tests and builds?", answer: "On macOS with Apple silicon, commands run offline in a Linux VM with public dependencies you prepare in advance. Git is read-only there, so you review and commit the changes yourself. Native macOS builds cannot run. Registered host MCP tools can provide additional capabilities; native provider shells remain unavailable." },
   { question: "What does it cost?", answer: "xcb is free and MIT licensed. You pay only for your provider subscriptions and any services you choose to use." },
 ] as const;
 
-const agentExample = "xcb";
+const agentExample = 'xcb run -p "Fix the failing parser test"';
 
 const routeExample = `$ xcb --json route < task.json`;
 
@@ -118,8 +118,8 @@ export default function Home() {
             interfaces={[
               {
                 label: productMessaging.headings["home-interface-agent"],
-                summary: "Type work into one thread that spans your projects. xcb picks the project and an account that can take the task, and the task keeps running after you close the terminal.",
-                example: <><CodeBlock code={agentExample} copyLabel="Copy command" /><p>Then type a task, such as “Fix the failing parser test in ~/src/app”.</p><a className="xcb-text-link" href="/docs/getting-started">Getting started →</a></>,
+                summary: "Send work through the headless CLI. xcb picks an account and model and prints the result; managed backlog tasks can outlive their caller.",
+                example: <><CodeBlock code={agentExample} copyLabel="Copy command" /><p>The current source build removes the interactive terminal. Run this command in your project folder.</p><a className="xcb-text-link" href="/docs/getting-started">Getting started →</a></>,
               },
               {
                 label: productMessaging.headings["home-interface-integration"],
@@ -131,18 +131,18 @@ export default function Home() {
 
           <MarketingSection id="import-sessions" heading={productMessaging.headings["home-import-sessions"]} headingId="import-sessions-title" summary="Import conversations used in the last 24 hours by default, then continue with an account that can take the task.">
             <CodeBlock code={importExample} copyLabel="Copy commands" />
-            <p>xcb copies user and assistant messages as context. Choose an imported conversation with <code>/sessions</code> and send a new message to continue. Source files stay in place, and import does not take control of a running provider session.</p>
+            <p>xcb copies user and assistant messages as context. List imports with <code>xcb conversations --json</code> and submit a managed task with <code>xcb backlog add</code> to continue. Source files stay in place, and import does not take control of a running provider session.</p>
             <a className="xcb-text-link" href="/docs/projects-and-tasks#import-sessions">Import conversations →</a>
           </MarketingSection>
 
-          <MarketingSection id="install" heading={productMessaging.headings["home-install"]} headingId="install-title" summary={publishedRelease === null ? "No release is published yet; build from source with Git and Rust 1.97.1." : "Install the latest release, connect your Claude account, and open your thread."}>
+          <MarketingSection id="install" heading={productMessaging.headings["home-install"]} headingId="install-title" summary={publishedRelease === null ? "No release is published yet; build from source with Git and Rust 1.97.1." : "Install the latest release, connect your Claude account, and run a task."}>
             {publishedRelease === null
               ? <p>Build xcb with the command above, then follow the <a href="/install">installation guide</a> to connect your first provider.</p>
               : (
                 <>
                   <PlatformBadges platforms={runsOnPlatforms(publishedRelease)} />
-                  <p>Then connect your Claude account and open your thread. On Linux, Claude needs the <a href="/docs/providers#claude-on-linux">sandbox setup</a> before your first task. On Windows, Claude runs in WSL2.</p>
-                  <CodeBlock code={"xcb setup claude\nxcb"} copyLabel="Copy commands" />
+                  <p>Then connect your Claude account and run a task. On Linux, Claude needs the <a href="/docs/providers#claude-on-linux">sandbox setup</a> before your first task. On Windows, Claude runs in WSL2.</p>
+                  <CodeBlock code={'xcb setup claude\nxcb run -p "Explain this repository"'} copyLabel="Copy commands" />
                 </>
               )}
             <p className="xcb-install-links"><a className="xcb-text-link" href="/install">Install guide →</a></p>

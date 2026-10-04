@@ -6,8 +6,8 @@
 
 # Contents
 
-- `crates/` owns the native xcb (Excalibur) Rust kernel, local runtime, Ratatui
-  frontend, and CLI. Panes are bounded userspace data; executable hooks require
+- `crates/` owns the native xcb (Excalibur) Rust kernel, local runtime, protocol,
+  SDK, and CLI. Project views are bounded userspace data; executable hooks require
   separate trust. Keep local metering separate from opt-in aicharts publishing.
 - `src/` owns provider-neutral routing, account leases, model selection,
   scoped tool contracts, the `router.ts` subscription-router entry point
