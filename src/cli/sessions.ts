@@ -8,7 +8,7 @@ import { boundedText, identifier, safeInteger } from "../validation.ts";
 import { privateDirectory } from "./state.ts";
 import { assertPrivateStat, openPrivateRead } from "../private-file.ts";
 
-export type CliProvider = "codex" | "claude" | "devin";
+export type CliProvider = "codex" | "claude";
 export type CliSession = Readonly<{
   id: string;
   provider: CliProvider;
@@ -34,7 +34,7 @@ const MAX_ENTRY_BYTES = 256 * 1024;
 const TABLE = "xcb_cli_sessions";
 
 const fail = (code: string): never => { throw new Error(code); };
-const provider = (value: unknown): CliProvider => (value === "codex" || value === "claude" || value === "devin" ? value : fail("SESSION_PROVIDER_INVALID"));
+const provider = (value: unknown): CliProvider => (value === "codex" || value === "claude" ? value : fail("SESSION_PROVIDER_INVALID"));
 
 type SessionRow = Readonly<{ id: string; provider: string; account_id: string | null; workspace: string; model: string; title: string; created_at: number; last_active_at: number; turns: number }>;
 

@@ -25,7 +25,7 @@ export type ManagedAccountBinding = Readonly<{
 }>;
 
 /** How a login is driven. `provider-native` selects a provider-owned variant
- * (Codex `chatgpt`/`chatgptDeviceCode`, Devin web login); `browser-session`
+ * (Codex `chatgpt`/`chatgptDeviceCode`); `browser-session`
  * drives sign-in inside the caller's per-account browser custody session —
  * the session binding must equal the account's provider, accountId and owner
  * so one account's cookie jar can never authenticate another. */

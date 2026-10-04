@@ -2,6 +2,6 @@
 export const supportProfile = {
   id: "xcb",
   name: "Excalibur (xcb)",
-  valueProposition: "Support ongoing development of Excalibur (xcb), which routes coding tasks across your Claude, Codex, and Devin subscriptions.",
+  valueProposition: "Support ongoing development of Excalibur (xcb), which routes coding tasks across your Claude and Codex subscriptions.",
   updates: false,
 } as const;
