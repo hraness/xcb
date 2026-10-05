@@ -623,7 +623,7 @@ async fn project_policy_bounds_and_corruption_are_isolated() {
     let f = fixture().await;
     for (tasks, expires) in [
         (0, now_ms() + 7_200_000),
-        (101, now_ms() + 7_200_000),
+        (10_001, now_ms() + 7_200_000),
         (1, now_ms() + 10_000),
         (1, now_ms() + 31 * 24 * 60 * 60 * 1000),
     ] {
@@ -816,6 +816,8 @@ async fn live_legacy_supervisor_blocks_schema_upgrade_without_mutation() {
             2,
             now_ms() + 7_200_000,
             None,
+            0,
+            0,
         )
         .unwrap();
     assert_eq!(
@@ -953,6 +955,8 @@ fn grant_in(f: &Fixture, workspace: &Path, max: u32) -> ProjectPolicy {
             max,
             now_ms() + 7_200_000,
             None,
+            0,
+            0,
         )
         .unwrap()
 }
@@ -1278,4 +1282,285 @@ async fn projects_row_status_paused_by_upgrade() {
         .unwrap();
     assert_eq!(row(&f).status, "active");
     assert!(f.managed.migration_conflicts(true).unwrap().is_empty());
+}
+
+/// Fabricate `other` as a linked worktree of the fixture workspace's
+/// repository: a plain `.git` dir on the workspace, a worktree gitdir under
+/// it, and the `gitdir:` pointer file in `other`. No git binary needed.
+fn repo_family(f: &Fixture, other: &Path) -> String {
+    let gitdir = f.workspace.join(".git");
+    let link = gitdir.join("worktrees").join("other");
+    std::fs::create_dir_all(&link).unwrap();
+    std::fs::write(link.join("commondir"), "../..\n").unwrap();
+    std::fs::write(other.join(".git"), format!("gitdir: {}\n", link.display())).unwrap();
+    crate::managed::workspace::repo_common_dir(&f.workspace).unwrap()
+}
+
+#[tokio::test]
+async fn herd_dials_scale_under_revision_and_preserve_the_grant() {
+    let f = fixture().await;
+    let policy = f
+        .managed
+        .configure_project_policy_dialed(
+            &f.conversation,
+            None,
+            "Maintain the project".into(),
+            4,
+            now_ms() + 7_200_000,
+            Some(Provider::Codex),
+            2,
+            6,
+        )
+        .unwrap();
+    assert_eq!((policy.max_active, policy.max_per_hour), (2, 6));
+    let scaled = f
+        .managed
+        .update_project_throughput_in(&policy.workspace, policy.revision, 8, 0)
+        .unwrap();
+    assert_eq!((scaled.max_active, scaled.max_per_hour), (8, 0));
+    assert_eq!(scaled.goal, policy.goal);
+    assert_eq!(scaled.max_tasks, policy.max_tasks);
+    assert_eq!(scaled.generation, policy.generation);
+    assert!(matches!(
+        f.managed
+            .update_project_throughput_in(&policy.workspace, policy.revision, 1, 1),
+        Err(Error::Conflict(_))
+    ));
+    // Bounds are enforced on write, not just at the CLI flag parser.
+    assert!(
+        f.managed
+            .update_project_throughput_in(&policy.workspace, scaled.revision, 65, 0)
+            .is_err()
+    );
+    assert!(
+        f.managed
+            .update_project_throughput_in(&policy.workspace, scaled.revision, 0, 513)
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn hourly_dial_holds_schedule_and_proposal_work_until_the_window_clears() {
+    let f = fixture().await;
+    f.managed
+        .configure_project_policy_dialed(
+            &f.conversation,
+            None,
+            "Maintain the project".into(),
+            8,
+            now_ms() + 7_200_000,
+            Some(Provider::Codex),
+            0,
+            1,
+        )
+        .unwrap();
+    // One automatic admission this window: a proposal the grant releases.
+    let parent = state(
+        &f,
+        &enqueue(&f, "Initial work", false).await,
+        TaskState::Running,
+    )
+    .await;
+    let proposal = propose(&f, &parent, "one", "Follow-up").await;
+    state(&f, &parent, TaskState::Completed).await;
+    f.managed.tick_projects(now_ms()).await.unwrap();
+    let admitted = f.managed.task(&proposal.id).unwrap().unwrap();
+    assert!(!admitted.deferred);
+    assert!(
+        admitted
+            .project_proposal
+            .as_ref()
+            .unwrap()
+            .admitted_at_ms
+            .is_some()
+    );
+    // Settle it so the outstanding-work gate is not the schedule's blocker.
+    state(&f, &admitted, TaskState::Completed).await;
+    let due = now_ms();
+    let schedule = f
+        .managed
+        .create_schedule(&f.conversation, "Sweep".into(), 60_000, due)
+        .await
+        .unwrap();
+    f.managed.tick_schedules(due).await.unwrap();
+    // The spent hourly window defers the occurrence; nothing was dropped.
+    let held = f
+        .managed
+        .schedules(None)
+        .unwrap()
+        .into_iter()
+        .find(|s| s.id == schedule.id)
+        .unwrap();
+    assert!(held.last_task.is_none());
+    assert_eq!(held.next_due_ms, schedule.next_due_ms);
+    // The operator-facing view explains the hold.
+    assert_eq!(
+        f.managed.schedule_view(&held).unwrap().blocker.as_deref(),
+        Some("project hourly start limit reached")
+    );
+    let later = due + super::ADMISSION_WINDOW_MS + 1;
+    f.managed.tick_schedules(later).await.unwrap();
+    let fired = f
+        .managed
+        .schedules(None)
+        .unwrap()
+        .into_iter()
+        .find(|s| s.id == schedule.id)
+        .unwrap();
+    assert!(fired.last_task.is_some());
+    assert!(fired.next_due_ms > schedule.next_due_ms);
+}
+
+#[tokio::test]
+async fn herd_family_covers_linked_worktrees_and_operator_work_never_defers() {
+    let f = fixture().await;
+    let other = second(&f);
+    let common = repo_family(&f, &other);
+    let policy = f
+        .managed
+        .configure_project_policy_dialed(
+            &f.conversation,
+            None,
+            "Maintain the project".into(),
+            8,
+            now_ms() + 7_200_000,
+            Some(Provider::Codex),
+            1,
+            0,
+        )
+        .unwrap();
+    assert_eq!(policy.repo.as_deref(), Some(common.as_str()));
+    // The herd covers the linked worktree; an unrelated directory is outside.
+    assert!(herd_covers(&policy, &f.workspace.display().to_string()));
+    assert!(herd_covers(&policy, &other.display().to_string()));
+    let strangers = private::directory(&f.workspace.parent().unwrap().join("strangers")).unwrap();
+    assert!(!herd_covers(&policy, &strangers.display().to_string()));
+    assert!(
+        f.managed
+            .herd_policy_in(&other.display().to_string())
+            .unwrap()
+            .is_some()
+    );
+    // An operator-started task in the linked worktree holds a family lane.
+    let holder = state(
+        &f,
+        &in_thread(&f, &other, "Operator work").await,
+        TaskState::Running,
+    )
+    .await;
+    assert_eq!(f.managed.herd_lanes_in(&policy).unwrap().len(), 1);
+    // It counts even though it is not automatic.
+    assert!(!herd_automatic(&holder));
+    // An automatic task in the herd's own checkout defers on the cap.
+    let due = now_ms();
+    let schedule = f
+        .managed
+        .create_schedule(&f.conversation, "Sweep".into(), 60_000, due)
+        .await
+        .unwrap();
+    f.managed.tick_schedules(due).await.unwrap();
+    let task = f
+        .managed
+        .task(
+            f.managed
+                .schedules(None)
+                .unwrap()
+                .into_iter()
+                .find(|s| s.id == schedule.id)
+                .unwrap()
+                .last_task
+                .as_ref()
+                .unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+    assert!(herd_automatic(&task));
+    let operator = in_thread(&f, &f.workspace, "Operator lane").await;
+    let managed = Arc::new(f.managed);
+    let store = Arc::new(f.store);
+    let supervisor = Supervisor::new(managed.clone(), store.clone());
+    let reason = supervisor.herd_capacity_block(&task).unwrap().unwrap();
+    assert!(reason.contains("1 of 1"), "{reason}");
+    // Operator work is never held back by the herd's dial.
+    assert!(supervisor.herd_capacity_block(&operator).unwrap().is_none());
+    // Raising the dial releases the automatic lane.
+    let scaled = managed
+        .update_project_throughput_in(&policy.workspace, policy.revision, 2, 0)
+        .unwrap();
+    assert_eq!(scaled.max_active, 2);
+    assert!(supervisor.herd_capacity_block(&task).unwrap().is_none());
+    // Uncertain work keeps custody but does not hold a live lane.
+    let mut uncertain = holder.clone();
+    uncertain.state = TaskState::Uncertain;
+    uncertain.revision += 1;
+    uncertain.updated_at_ms = now_ms().max(holder.updated_at_ms);
+    managed.transition(&holder, uncertain, None).await.unwrap();
+    assert_eq!(managed.herd_lanes_in(&scaled).unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn legacy_policy_and_proposal_payloads_decode_with_empty_dials() {
+    let f = fixture().await;
+    grant(&f, 2);
+    let db = f.managed.db().unwrap();
+    // A pre-dials policy payload must still decode with the new defaults.
+    let row: String = db
+        .query_row(
+            "SELECT payload FROM project_policies WHERE workspace=?1",
+            [f.workspace.display().to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut value: Value = serde_json::from_str(&row).unwrap();
+    let object = value.as_object_mut().unwrap();
+    object.remove("repo");
+    object.remove("max_active");
+    object.remove("max_per_hour");
+    let legacy: ProjectPolicy = serde_json::from_value(value).unwrap();
+    assert_eq!(
+        (legacy.max_active, legacy.max_per_hour, legacy.repo),
+        (0, 0, None)
+    );
+    // Same for a proposal recorded before admission timestamps existed.
+    let proposal: ProjectProposal = serde_json::from_value(json!({
+        "parent": "m_one",
+        "generation": "g_one",
+        "required_provider": null,
+        "admitted": false
+    }))
+    .unwrap();
+    assert_eq!(proposal.admitted_at_ms, None);
+}
+
+#[tokio::test]
+async fn month_long_grant_accepts_explicit_child_budget_and_preserves_spend() {
+    let f = fixture().await;
+    let policy = f
+        .managed
+        .configure_project_policy(
+            &f.conversation,
+            None,
+            "Run a measured monthly project".into(),
+            3_600,
+            now_ms() + 30 * 24 * 60 * 60 * 1000,
+            None,
+        )
+        .unwrap();
+    assert_eq!(policy.max_tasks, 3_600);
+    assert_eq!(policy.admitted_tasks, 0);
+    assert_eq!(
+        f.managed
+            .project_policy(&f.conversation)
+            .unwrap()
+            .unwrap()
+            .max_tasks,
+        3_600
+    );
+    assert!(policy.enabled);
+    assert!(
+        f.managed
+            .active_tasks(MAX_NONTERMINAL_TASKS as usize)
+            .unwrap()
+            .is_empty()
+    );
 }

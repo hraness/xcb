@@ -458,6 +458,9 @@ pub(super) fn plan_project_rekey(input: &RekeyInput) -> RekeyPlan {
             let paused = actives >= 2;
             let moved = ProjectPolicy {
                 workspace: workspace.clone(),
+                repo: repo_common_dir(Path::new(&workspace)),
+                max_active: 0,
+                max_per_hour: 0,
                 generation: policy.generation,
                 goal: policy.goal,
                 enabled: policy.enabled && !paused,
@@ -901,18 +904,7 @@ fn git_dir(path: &Path) -> Option<PathBuf> {
 /// or a linked worktree's common directory. Bounded; no subprocess. Only
 /// used to group and rank candidates.
 pub(super) fn repo_identity(path: &Path) -> Option<String> {
-    let gitdir = git_dir(path)?;
-    let common = match bounded_read(&gitdir.join("commondir"), 4096) {
-        Some(common) => {
-            let common = PathBuf::from(common.trim());
-            if common.is_absolute() {
-                common
-            } else {
-                gitdir.join(common)
-            }
-        }
-        None => gitdir,
-    };
+    let common = repo_common(path)?;
     let config = bounded_read(&common.join("config"), MAX_GIT_FILE_BYTES)?;
     let mut in_origin = false;
     for line in config.lines() {
@@ -929,6 +921,51 @@ pub(super) fn repo_identity(path: &Path) -> Option<String> {
         }
     }
     None
+}
+
+/// Exact GitHub origin for read-only remote status. Unlike the display-only
+/// repository identity, this rejects other hosts, URL credentials and paths.
+pub(super) fn github_origin(path: &Path) -> Option<String> {
+    let common = repo_common(path)?;
+    let config = bounded_read(&common.join("config"), MAX_GIT_FILE_BYTES)?;
+    let mut in_origin = false;
+    let mut origin = None;
+    for line in config.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_origin = line == "[remote \"origin\"]";
+            continue;
+        }
+        if in_origin
+            && let Some((key, value)) = line.split_once('=')
+            && key.trim() == "url"
+        {
+            if origin.is_some() {
+                return None;
+            }
+            let value = value.trim();
+            let repo = value
+                .strip_prefix("https://github.com/")
+                .or_else(|| value.strip_prefix("git@github.com:"))?
+                .trim_end_matches(".git");
+            let parts: Vec<_> = repo.split('/').collect();
+            if parts.len() != 2
+                || parts.iter().any(|part| {
+                    part.is_empty()
+                        || *part == "."
+                        || *part == ".."
+                        || part.len() > 100
+                        || !part
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+                })
+            {
+                return None;
+            }
+            origin = Some(repo.to_owned());
+        }
+    }
+    origin
 }
 
 /// Bounds for one `git status` probe: a hung filesystem or lock-holding
@@ -951,6 +988,32 @@ fn git_operation(gitdir: &Path) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// The canonical git directory shared by every linked worktree of one
+/// repository — `.git` itself for an ordinary checkout, the common dir a
+/// linked worktree points back to. `None` when the directory is not a git
+/// worktree or its metadata is unreadable. Bounded; no subprocess.
+fn repo_common(path: &Path) -> Option<PathBuf> {
+    let gitdir = git_dir(path)?;
+    let common = match bounded_read(&gitdir.join("commondir"), 4096) {
+        Some(common) => {
+            let common = PathBuf::from(common.trim());
+            if common.is_absolute() {
+                common
+            } else {
+                gitdir.join(common)
+            }
+        }
+        None => gitdir,
+    };
+    Some(xcb_core::canonical(&common).unwrap_or(common))
+}
+
+/// Canonical path of `path`'s repository common dir — a stable identity all
+/// linked worktrees of one repository share.
+pub(super) fn repo_common_dir(path: &Path) -> Option<String> {
+    repo_common(path)?.to_str().map(str::to_owned)
 }
 
 /// `git status --porcelain=v2 --branch` for one worktree, bounded: the

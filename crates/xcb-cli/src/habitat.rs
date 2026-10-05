@@ -1,3 +1,6 @@
+#[path = "project_preflight.rs"]
+mod project_preflight;
+
 use clap::Subcommand;
 use std::{
     io::Read,
@@ -6,7 +9,7 @@ use std::{
 use xcb_core::{Id, Provider, session::State};
 use xcb_runtime::{
     Error, Result,
-    managed::{self, GLOBAL_THREAD_ID, ManagedStore, ManagedTask},
+    managed::{self, GLOBAL_THREAD_ID, HerdStatus, ManagedStore, ManagedTask, ScheduleView},
     new_id, now_ms,
     workspace_infer::BindingOrigin,
 };
@@ -210,6 +213,28 @@ pub enum DaemonCommand {
 
 #[derive(Subcommand)]
 pub enum ProjectCommand {
+    /// Check a program and its exact workspace without starting any work.
+    Preflight {
+        /// Exact workspace directory, resolved relative to --cwd.
+        workspace: PathBuf,
+        /// Program manifest, resolved relative to --cwd.
+        manifest: PathBuf,
+        /// JSON input file, resolved relative to --cwd; defaults to an empty object.
+        #[arg(long)]
+        inputs: Option<PathBuf>,
+        /// Maximum managed calls per run, not a concurrency setting.
+        #[arg(long, value_parser = clap::value_parser!(u8).range(1..=8))]
+        managed_calls: Option<u8>,
+        /// Required file inside the workspace; repeat for multiple files.
+        #[arg(long = "require-file")]
+        required_files: Vec<PathBuf>,
+        /// Require HEAD to match this full Git commit hash.
+        #[arg(long)]
+        expect_revision: Option<String>,
+        /// Remaining child-task budget to use for cycle estimates.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(0..=100))]
+        task_budget: Option<u32>,
+    },
     /// Let a project start follow-up work on its own for a goal, within a
     /// task count and a time limit.
     Configure {
@@ -218,8 +243,8 @@ pub enum ProjectCommand {
         /// The project goal that follow-up work serves.
         goal: String,
         /// Most tasks the project may start on its own under this grant
-        /// (1 to 100).
-        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=100))]
+        /// (1 to 10,000).
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=10_000))]
         tasks: u32,
         /// Grant lifetime, 1 hour to 30 days. A new grant replaces the old grant.
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..=720))]
@@ -230,6 +255,37 @@ pub enum ProjectCommand {
         /// Optional hard provider constraint inherited by automatic work.
         #[arg(long)]
         provider: Option<Provider>,
+        /// Most automatic tasks running at once across the project's linked
+        /// worktrees, 0 to 64; 0 leaves it to the machine's own limits.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(0..=64), default_value_t = 0)]
+        parallel: u32,
+        /// Most automatic tasks the project may start per hour, 0 to 512;
+        /// 0 means no hourly limit.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(0..=512), default_value_t = 0)]
+        per_hour: u32,
+    },
+    /// Raise or lower how much automatic work a project runs at once and
+    /// starts per hour; the goal, budget and expiry are unchanged.
+    Scale {
+        /// Project directory or name from `xcb projects`.
+        scope: String,
+        /// Current policy revision; stale updates are rejected.
+        #[arg(long)]
+        revision: u64,
+        /// Most automatic tasks running at once across the project's linked
+        /// worktrees, 0 to 64; 0 leaves it to the machine's own limits.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(0..=64))]
+        parallel: Option<u32>,
+        /// Most automatic tasks the project may start per hour, 0 to 512;
+        /// 0 means no hourly limit.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(0..=512))]
+        per_hour: Option<u32>,
+    },
+    /// Show a project's grant, its running and queued work, and the
+    /// schedules that feed it.
+    Status {
+        /// Project directory or name from `xcb projects`.
+        scope: String,
     },
     /// Pause automatic follow-up work; work already running finishes.
     Pause {
@@ -308,13 +364,116 @@ async fn entry_target(
     Ok((conversation, Some(workspace)))
 }
 
-pub fn projects(
+/// The herd posture report behind `xcb projects status`.
+fn project_status_report(store: &ManagedStore, status: &HerdStatus, json: bool) -> Result<i32> {
+    if json {
+        return crate::print_json(status).map(|()| 0);
+    }
+    let policy = &status.policy;
+    let label = store.project_status(policy)?;
+    println!(
+        "{} · {} · rev {}",
+        xcb_core::display_text(&policy.workspace, 4096),
+        label,
+        policy.revision
+    );
+    println!("Goal: {}", xcb_core::display_text(&policy.goal, 4096));
+    println!(
+        "Budget: {}/{} tasks used · expires {} · provider {}",
+        policy.admitted_tasks,
+        policy.max_tasks,
+        policy.expires_at_ms,
+        policy
+            .required_provider
+            .map(|provider| provider.as_str())
+            .unwrap_or("any")
+    );
+    let cap = |limit: u32| {
+        if limit == 0 {
+            "no limit".to_owned()
+        } else {
+            limit.to_string()
+        }
+    };
+    println!(
+        "Throughput: {} running ({} allowed) · {} started this hour ({} allowed)",
+        status.lanes.len(),
+        cap(policy.max_active),
+        status.admissions_last_hour,
+        cap(policy.max_per_hour)
+    );
+    if let Some(repo) = &policy.repo {
+        println!("Repository family: {}", xcb_core::display_text(repo, 4096));
+    }
+    println!(
+        "Open work: {} tasks · {} uncertain · {} schedules",
+        status.open,
+        status.uncertain,
+        status.schedules.len()
+    );
+    for task in &status.lanes {
+        println!(
+            "  running {} · {}",
+            task.id,
+            xcb_core::display_text(&task.detail, 160)
+        );
+    }
+    for schedule in &status.schedules {
+        println!(
+            "  schedule {} · {} · every {}s · due {}",
+            schedule.id,
+            if schedule.enabled {
+                "enabled"
+            } else {
+                "paused"
+            },
+            schedule.interval_ms / 1000,
+            schedule.next_due_ms
+        );
+    }
+    Ok(0)
+}
+
+pub async fn projects(
     root: &Path,
     cwd: &Path,
     command: Option<ProjectCommand>,
     json: bool,
 ) -> Result<i32> {
+    if let Some(ProjectCommand::Preflight {
+        workspace,
+        manifest,
+        inputs,
+        managed_calls,
+        required_files,
+        expect_revision,
+        task_budget,
+    }) = &command
+    {
+        let program = load_program(
+            &cwd.join(manifest),
+            inputs.as_ref().map(|p| cwd.join(p)).as_deref(),
+            *managed_calls,
+        )?;
+        let report = project_preflight::inspect(
+            &cwd.join(workspace),
+            &program,
+            required_files,
+            expect_revision.as_deref(),
+            *task_budget,
+        )
+        .await?;
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(if report["ready"] == true { 0 } else { 1 });
+    }
     let store = ManagedStore::open(root)?;
+    if let Some(ProjectCommand::Status { scope: value }) = command {
+        let workspace = scope(&store, cwd, &value)?;
+        let status = store
+            .herd_status_in(&workspace)?
+            .ok_or(Error::Unavailable("no project grant for this directory"))?;
+        return project_status_report(&store, &status, json);
+    }
     let rows = match command {
         None => store.project_policies()?,
         Some(ProjectCommand::Configure {
@@ -324,6 +483,8 @@ pub fn projects(
             hours,
             revision,
             provider,
+            parallel,
+            per_hour,
         }) => {
             let expiry = now_ms()
                 .checked_add(hours * 3_600_000)
@@ -336,9 +497,33 @@ pub fn projects(
                 tasks,
                 expiry,
                 provider,
+                parallel,
+                per_hour,
             )?;
             wake(root)?;
             vec![row]
+        }
+        Some(ProjectCommand::Scale {
+            scope: value,
+            revision,
+            parallel,
+            per_hour,
+        }) => {
+            let workspace = scope(&store, cwd, &value)?;
+            let current = store
+                .project_policy_in(&workspace)?
+                .ok_or(Error::Unavailable("no project grant for this directory"))?;
+            let row = store.update_project_throughput_in(
+                &workspace,
+                revision,
+                parallel.unwrap_or(current.max_active),
+                per_hour.unwrap_or(current.max_per_hour),
+            )?;
+            wake(root)?;
+            vec![row]
+        }
+        Some(ProjectCommand::Status { .. } | ProjectCommand::Preflight { .. }) => {
+            unreachable!("handled above")
         }
         Some(ProjectCommand::Pause {
             scope: value,
@@ -462,6 +647,50 @@ pub enum ScheduleCommand {
         #[arg(long)]
         revision: u64,
     },
+    /// Show one schedule's detail, why it is or isn't running, and how its
+    /// last wake-up ended.
+    Show {
+        /// Schedule id from `xcb schedules`.
+        id: Id,
+    },
+    /// Change a schedule's prompt, interval or next wake-up; conversation
+    /// and directory stay fixed.
+    Edit {
+        /// Schedule id from `xcb schedules`.
+        id: Id,
+        /// Current schedule revision; stale updates are rejected.
+        #[arg(long)]
+        revision: u64,
+        /// New prompt for each wake-up.
+        #[arg(long)]
+        prompt: Option<String>,
+        /// New seconds between wake-ups, from 60 seconds to 365 days.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(60..=31_536_000))]
+        every: Option<u64>,
+        /// Move the next wake-up to this many seconds from now.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(0..=31_536_000))]
+        next_in: Option<u64>,
+    },
+    /// Delete a schedule. Tasks it already created keep their history and
+    /// finish on their own terms.
+    Delete {
+        /// Schedule id from `xcb schedules`.
+        id: Id,
+        /// Current schedule revision; stale deletes are rejected.
+        #[arg(long)]
+        revision: u64,
+    },
+}
+
+/// List filters for `xcb schedules`; exact and deterministic.
+#[derive(Default)]
+pub struct ScheduleFilters {
+    /// Only schedules whose directory is this canonical path.
+    pub workspace: Option<String>,
+    /// Some(true) shows enabled only, Some(false) paused only.
+    pub enabled: Option<bool>,
+    /// Only schedules whose wake-up is now or overdue.
+    pub due: bool,
 }
 
 #[derive(Subcommand)]
@@ -1086,9 +1315,21 @@ pub async fn schedules(
     cwd: &Path,
     command: Option<ScheduleCommand>,
     conversation: Option<&Id>,
+    filters: ScheduleFilters,
     json: bool,
 ) -> Result<i32> {
     let store = ManagedStore::open(root)?;
+    if let Some(ScheduleCommand::Delete { id, revision }) = &command {
+        let id = store.resolve_schedule(id)?;
+        store.delete_schedule(&id, *revision)?;
+        wake(root)?;
+        if json {
+            crate::print_json(serde_json::json!({"deleted": id}))?;
+        } else {
+            println!("Deleted schedule {id}; tasks it created are unaffected.");
+        }
+        return Ok(0);
+    }
     let rows = match command {
         Some(ScheduleCommand::Program {
             target,
@@ -1119,12 +1360,28 @@ pub async fn schedules(
             wake(root)?;
             vec![schedule]
         }
-        None => store.schedules(
-            conversation
+        None => {
+            let conversation = conversation
                 .map(|id| store.resolve_conversation(id))
-                .transpose()?
-                .as_ref(),
-        )?,
+                .transpose()?;
+            let now = now_ms();
+            store
+                .schedule_views(conversation.as_ref())?
+                .into_iter()
+                .filter(|view| {
+                    filters
+                        .workspace
+                        .as_deref()
+                        .is_none_or(|workspace| view.workspace.as_deref() == Some(workspace))
+                        && filters
+                            .enabled
+                            .is_none_or(|enabled| view.schedule.enabled == enabled)
+                        && (!filters.due
+                            || (view.schedule.enabled && view.schedule.next_due_ms <= now))
+                })
+                .map(|view| view.schedule)
+                .collect()
+        }
         Some(ScheduleCommand::Add {
             target,
             prompt,
@@ -1154,23 +1411,84 @@ pub async fn schedules(
             wake(root)?;
             vec![schedule]
         }
+        Some(ScheduleCommand::Show { id }) => {
+            vec![
+                store
+                    .schedule(&store.resolve_schedule(&id)?)?
+                    .ok_or(Error::Unavailable("schedule not found"))?,
+            ]
+        }
+        Some(ScheduleCommand::Edit {
+            id,
+            revision,
+            prompt,
+            every,
+            next_in,
+        }) => {
+            let next_due_ms = next_in
+                .map(|seconds| {
+                    seconds
+                        .checked_mul(1000)
+                        .and_then(|delay| now_ms().checked_add(delay))
+                        .ok_or(Error::Unavailable("schedule time overflow"))
+                })
+                .transpose()?;
+            let schedule = store.update_schedule(
+                &store.resolve_schedule(&id)?,
+                revision,
+                prompt,
+                every
+                    .map(|seconds| {
+                        seconds
+                            .checked_mul(1000)
+                            .ok_or(Error::Unavailable("schedule interval overflow"))
+                    })
+                    .transpose()?,
+                next_due_ms,
+            )?;
+            wake(root)?;
+            vec![schedule]
+        }
+        Some(ScheduleCommand::Delete { .. }) => unreachable!("handled above"),
     };
+    let views = rows
+        .iter()
+        .map(|row| store.schedule_view(row))
+        .collect::<Result<Vec<ScheduleView>>>()?;
     if json {
-        crate::print_json(rows)?;
-    } else if rows.is_empty() {
+        crate::print_json(&views)?;
+    } else if views.is_empty() {
         println!("No schedules. Use xcb schedules add <dir> <prompt> --every <seconds>.");
     } else {
-        for row in rows {
+        for view in views {
+            let row = &view.schedule;
             println!(
-                "{} · {} · {} · every {}s · due {} · rev {}\n  {}",
+                "{} · {} · {} · every {}s · due {} · rev {}",
                 row.id,
                 row.conversation,
                 if row.enabled { "enabled" } else { "paused" },
                 row.interval_ms / 1000,
                 row.next_due_ms,
                 row.revision,
-                xcb_core::display_text(&row.prompt, 4096)
             );
+            if let Some(workspace) = &view.workspace {
+                println!("  {}", xcb_core::display_text(workspace, 4096));
+            }
+            if let Some(blocker) = &view.blocker {
+                println!("  blocked: {}", xcb_core::display_text(blocker, 256));
+            }
+            if let (Some(task), Some(state)) = (&row.last_task, view.last_task_state) {
+                println!(
+                    "  last: {} {}{}",
+                    task,
+                    state.as_str(),
+                    view.last_task_detail
+                        .as_deref()
+                        .map(|detail| format!(" · {}", xcb_core::display_text(detail, 160)))
+                        .unwrap_or_default()
+                );
+            }
+            println!("  {}", xcb_core::display_text(&row.prompt, 4096));
         }
     }
     Ok(0)

@@ -175,10 +175,12 @@ pub struct TaskRequirements {
     /// whether the operation needed a signed-in page or a desktop application.
     #[serde(default)]
     pub codex_native: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub native_execution: bool,
 }
 impl TaskRequirements {
     pub fn is_empty(&self) -> bool {
-        !self.requires_codex()
+        !self.requires_codex() && !self.native_execution
     }
     pub fn requires_codex(self) -> bool {
         self.signed_in_browser || self.desktop || self.codex_native
@@ -188,6 +190,7 @@ impl TaskRequirements {
             signed_in_browser: self.signed_in_browser || other.signed_in_browser,
             desktop: self.desktop || other.desktop,
             codex_native: self.codex_native || other.codex_native,
+            native_execution: self.native_execution || other.native_execution,
         }
     }
     pub fn allows(self, provider: crate::Provider) -> bool {
@@ -198,6 +201,79 @@ impl TaskRequirements {
 #[cfg(test)]
 mod task_requirement_tests {
     use super::*;
+
+    #[test]
+    fn native_execution_survives_merge_and_round_trip_without_pinning_codex() {
+        let native: TaskRequirements =
+            serde_json::from_str(r#"{"native_execution":true}"#).unwrap();
+        assert!(!native.is_empty());
+        assert!(!native.requires_codex());
+        for provider in crate::Provider::ALL {
+            assert!(native.allows(provider));
+        }
+        let merged = native.merge(Default::default());
+        let saved = serde_json::to_value(merged).unwrap();
+        assert_eq!(saved["native_execution"], true);
+        let restored: TaskRequirements = serde_json::from_value(saved).unwrap();
+        assert_eq!(restored, native);
+    }
+
+    #[test]
+    fn legacy_execution_records_do_not_gain_a_native_execution_field() {
+        let legacy: TaskRequirements = serde_json::from_str(
+            r#"{"signed_in_browser":true,"desktop":false,"codex_native":false}"#,
+        )
+        .unwrap();
+        assert!(!legacy.native_execution);
+        assert!(
+            serde_json::to_value(legacy)
+                .unwrap()
+                .get("native_execution")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn requirement_merge_is_monotonic_for_every_execution_and_provider_combination() {
+        let requirements = |bits: u8| TaskRequirements {
+            signed_in_browser: bits & 1 != 0,
+            desktop: bits & 2 != 0,
+            codex_native: bits & 4 != 0,
+            native_execution: bits & 8 != 0,
+        };
+        for left in 0..16 {
+            for right in 0..16 {
+                let merged = requirements(left).merge(requirements(right));
+                assert_eq!(merged, requirements(left | right));
+                let restored: TaskRequirements =
+                    serde_json::from_value(serde_json::to_value(merged).unwrap()).unwrap();
+                assert_eq!(merged, restored);
+                for provider in crate::Provider::ALL {
+                    if !requirements(left).allows(provider) {
+                        assert!(!merged.allows(provider));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn native_execution_preserves_independent_desktop_constraints() {
+        let native: TaskRequirements =
+            serde_json::from_str(r#"{"native_execution":true}"#).unwrap();
+        let desktop = TaskRequirements {
+            desktop: true,
+            ..Default::default()
+        };
+        let merged = native.merge(desktop);
+        assert_eq!(
+            serde_json::to_value(merged).unwrap()["native_execution"],
+            true
+        );
+        assert!(merged.allows(crate::Provider::Codex));
+        assert!(!merged.allows(crate::Provider::Claude));
+        assert!(!merged.allows(crate::Provider::Devin));
+    }
 
     #[test]
     fn legacy_browser_requirements_merge_without_inventing_desktop_intent() {

@@ -1224,7 +1224,7 @@ impl ManagedStore {
             delivered_preferences: String::new(), input_at_ms: None, attachments: vec![], session: None, worker_sessions: vec![],
             route: policy.required_provider.or(preference).map(|p| p.to_string()), route_reason: None,
             provider_preference: policy.required_provider.or(preference), provider_required: policy.required_provider.is_some() || required, required_model: None,
-            tried_routes: vec![], failed_accounts: vec![], state: if routing_question { TaskState::NeedsInput } else { TaskState::Queued },
+            tried_routes: vec![], failed_accounts: vec![], retry: None, completion_review: None, state: if routing_question { TaskState::NeedsInput } else { TaskState::Queued },
             deferred: false, priority: 0, attention: routing_question.then_some(State::NeedsAnswer), backlog_prompt: None,
             project_proposal: None, routing_question, program: None, program_generation: None, program_receipt: None, program_waiting: false,
             program_child: None, daemon_child: Some(DaemonChild { process: meta.process.clone(), request_digest: call.request_digest.clone(), generation: policy.generation.clone(), required_provider: policy.required_provider }),
@@ -1281,6 +1281,7 @@ impl ManagedStore {
             tx.commit()?;
             return Ok(());
         }
+        project::check_admission_window(&tx, &current, now_ms())?;
         let count: i64 = tx.query_row("SELECT count(*) FROM tasks", [], |row| row.get(0))?;
         let active: i64 = tx.query_row(
             "SELECT count(*) FROM tasks WHERE state IN ('queued','running','needs_input')",
@@ -1552,6 +1553,109 @@ mod tests {
         assert!(daemon.verify().is_err());
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hourly_limit_preserves_daemon_intent_and_retries_without_budget_charge() {
+        let fixture = fixture().await;
+        grant(&fixture).await;
+        let policy = fixture
+            .managed
+            .project_policy(&fixture.conversation)
+            .unwrap()
+            .unwrap();
+        fixture
+            .managed
+            .update_project_throughput_in(&policy.workspace, policy.revision, 0, 1)
+            .unwrap();
+        for name in ["first", "second"] {
+            let mut manifest = agent_manifest();
+            manifest["cells"][0]["prompt"] = json!(format!("Do bounded project task {name}"));
+            let daemon = admitted(manifest, 1);
+            fixture
+                .managed
+                .enqueue_daemon(&fixture.conversation, name, &daemon)
+                .unwrap();
+        }
+        fixture
+            .managed
+            .tick_daemons(&fixture.store, true)
+            .await
+            .unwrap();
+        fixture
+            .managed
+            .tick_daemons(&fixture.store, true)
+            .await
+            .unwrap();
+        let statuses: Vec<_> = ["first", "second"]
+            .into_iter()
+            .map(|name| fixture.managed.daemon_status_for(name).unwrap().unwrap())
+            .collect();
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|s| s.pending_child.is_some())
+                .count(),
+            1
+        );
+        assert!(statuses.iter().all(|s| s.pending_call.is_some()));
+        let pending = statuses
+            .iter()
+            .find(|s| s.pending_child.is_none())
+            .unwrap()
+            .pending_call
+            .clone()
+            .unwrap();
+        let policy = fixture
+            .managed
+            .project_policy(&fixture.conversation)
+            .unwrap()
+            .unwrap();
+        assert_eq!(policy.admitted_tasks, 1);
+        // The blocked request survives reopening the store and repeated pumps.
+        let reopened = Arc::new(ManagedStore::open(&fixture.state).unwrap());
+        reopened.tick_daemons(&fixture.store, true).await.unwrap();
+        assert!(
+            read_call(&reopened.db().unwrap(), &pending)
+                .unwrap()
+                .unwrap()
+                .child
+                .is_none()
+        );
+        assert_eq!(
+            reopened
+                .project_policy(&fixture.conversation)
+                .unwrap()
+                .unwrap()
+                .admitted_tasks,
+            1
+        );
+        reopened
+            .update_project_throughput_in(&policy.workspace, policy.revision, 0, 2)
+            .unwrap();
+        reopened.tick_daemons(&fixture.store, true).await.unwrap();
+        let child = read_call(&reopened.db().unwrap(), &pending)
+            .unwrap()
+            .unwrap()
+            .child
+            .unwrap();
+        reopened.tick_daemons(&fixture.store, true).await.unwrap();
+        assert_eq!(
+            read_call(&reopened.db().unwrap(), &pending)
+                .unwrap()
+                .unwrap()
+                .child,
+            Some(child)
+        );
+        assert_eq!(
+            reopened
+                .project_policy(&fixture.conversation)
+                .unwrap()
+                .unwrap()
+                .admitted_tasks,
+            2
+        );
+    }
+
     // Daemons run provider agents, which Windows refuses.
 
     #[cfg(unix)]
@@ -1681,7 +1785,7 @@ mod tests {
         // Only B holds a grant; a daemon in A never borrows it.
         fixture
             .managed
-            .configure_project_policy_in(&b, None, "B".into(), 8, now_ms() + 3_600_000, None)
+            .configure_project_policy_in(&b, None, "B".into(), 8, now_ms() + 3_600_000, None, 0, 0)
             .unwrap();
         let status = fixture
             .managed
@@ -1705,7 +1809,7 @@ mod tests {
         // A's own grant publishes the child in A.
         fixture
             .managed
-            .configure_project_policy_in(&a, None, "A".into(), 8, now_ms() + 3_600_000, None)
+            .configure_project_policy_in(&a, None, "A".into(), 8, now_ms() + 3_600_000, None, 0, 0)
             .unwrap();
         fixture
             .managed

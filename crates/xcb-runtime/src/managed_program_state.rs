@@ -345,6 +345,10 @@ pub(super) fn check_dispatch(db: &Connection, task: &ManagedTask, now: u64) -> R
         if task.detail == "project authority task budget is exhausted" {
             require_grant(db, &task.workspace, Some(generation), now, true)?;
         }
+        if task.detail == "project hourly start limit reached" {
+            let policy = require_grant(db, &task.workspace, Some(generation), now, false)?;
+            project::check_admission_window(db, &policy, now)?;
+        }
         if task.detail == "program waits for other project work to settle" {
             no_other_work(db, task)?;
         }
@@ -440,6 +444,7 @@ pub(super) fn transition(
                     "project authority changed before program publication",
                 ));
             }
+            project::check_admission_window(tx, &policy, now_ms())?;
             no_other_work(tx, expected)?;
             if task_from(tx, &child.task.id)?.is_some() {
                 return Err(Error::Conflict("program child identity already exists"));
@@ -1195,7 +1200,7 @@ impl ManagedStore {
             delivered_preferences: String::new(), input_at_ms: None, attachments: vec![], session: None, worker_sessions: vec![],
             route: policy.required_provider.or(preference).map(|p| p.to_string()), route_reason: None,
             provider_preference: policy.required_provider.or(preference), provider_required: policy.required_provider.is_some() || required, required_model: None,
-            tried_routes: vec![], failed_accounts: vec![], state: if routing_question { TaskState::NeedsInput } else { TaskState::Queued },
+            tried_routes: vec![], failed_accounts: vec![], retry: None, completion_review: None, state: if routing_question { TaskState::NeedsInput } else { TaskState::Queued },
             deferred: false, priority: parent.priority, attention: routing_question.then_some(State::NeedsAnswer), backlog_prompt: None,
             project_proposal: None, routing_question, program: None, program_generation: None, program_receipt: None, program_waiting: false,
             program_child: Some(ProgramChild { parent: parent.id.clone(), call: index, request_digest: call.digest.clone(), generation: policy.generation.clone(), required_provider: policy.required_provider, context: Some(context.reference.clone()) }), daemon_child: None,
@@ -1403,7 +1408,8 @@ impl ManagedStore {
                 {
                     Err(Error::Conflict(reason))
                         if reason.starts_with("project authority")
-                            || reason == "program waits for other project work to settle" =>
+                            || reason == "program waits for other project work to settle"
+                            || reason == "project hourly start limit reached" =>
                     {
                         self.hold_program(&task, reason).await
                     }

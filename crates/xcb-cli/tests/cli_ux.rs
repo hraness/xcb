@@ -2044,3 +2044,37 @@ fn account_setup_new_preserves_existing_account_and_can_retry_exact_row() {
     assert!(!text(&retry.stdout).contains("Added"));
     assert!(store.unsettled_runs().unwrap().is_empty());
 }
+
+#[test]
+fn project_preflight_reports_blockers_without_creating_state() {
+    let sandbox = Sandbox::new("preflight");
+    let manifest = sandbox.root.join("controller.json");
+    std::fs::write(
+        &manifest,
+        include_bytes!("../../../examples/xcb-north-star-controller.algal.json"),
+    )
+    .unwrap();
+    let output = sandbox.run(
+        &[
+            "--json",
+            "projects",
+            "preflight",
+            sandbox.root.to_str().unwrap(),
+            manifest.to_str().unwrap(),
+            "--managed-calls",
+            "8",
+            "--require-file",
+            "missing.md",
+            "--task-budget",
+            "0",
+        ],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["ready"], false);
+    assert_eq!(report["estimatedFullCycles"], 0);
+    assert!(!report["blockers"].as_array().unwrap().is_empty());
+    assert_eq!(report["requiredFiles"][0]["ready"], false);
+    assert!(!sandbox.state().exists());
+}

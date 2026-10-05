@@ -31,6 +31,16 @@ use xcb_core::{
     usage::{Counters, QuotaPoint},
 };
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Metadata {
+    pub observed_at_ms: u64,
+    pub models: Vec<ModelChoice>,
+    pub email: Option<String>,
+    pub plan: Option<String>,
+    pub quotas: Vec<QuotaPoint>,
+}
+
 const MAX_CALLS: usize = 1024;
 const MAX_ITEMS: usize = 4096;
 // Backstop only: the host ends a turn gracefully at MAX_TURN_FRAMES, and this
@@ -96,6 +106,7 @@ pub(crate) struct CodexProtocol {
     initialized: bool,
     ready: bool,
     completed: bool,
+    interrupted: bool,
     remote_disabled: bool,
     /// One bounded notice per turn for tolerated unknown item kinds.
     unrecognized_item: bool,
@@ -464,6 +475,7 @@ impl CodexProtocol {
         &mut self,
         process: &mut StreamProcess,
         pool: &Id,
+        allow_reset: bool,
     ) -> Result<Vec<QuotaPoint>> {
         require(
             self.initialized && self.options.metadata_only && self.thread_id.is_none(),
@@ -474,6 +486,9 @@ impl CodexProtocol {
             .await?;
         let observed = now_ms();
         let points = parse_quotas(&value, pool, observed)?;
+        if !allow_reset {
+            return Ok(points);
+        }
         // The account is at a limit and still holds a consumable reset
         // credit: spend exactly one, bound to this account and window so a
         // retried probe cannot double-spend, then re-read. A failed consume
@@ -549,6 +564,7 @@ impl CodexProtocol {
             initialized: false,
             ready: false,
             completed: false,
+            interrupted: false,
             remote_disabled: false,
             unrecognized_item: false,
             descriptors,
@@ -1023,6 +1039,10 @@ impl CodexProtocol {
         method: &'static str,
         params: Value,
     ) -> Result<Value> {
+        require(
+            crate::provider_methods::codex_rpc_supported(method),
+            "Codex method is not integrated",
+        )?;
         self.next_id += 1;
         require(self.next_id <= 256, "Codex RPC bound")?;
         let id = self.next_id;
@@ -1659,7 +1679,9 @@ impl CodexProtocol {
                             | "tooManyDenials" => Some(Failure::Policy),
                             // Capacity shortages are transient and provider-wide:
                             // they neither exhaust this account nor fail over.
-                            "flexUnavailable" | "serverOverloaded" => Some(Failure::Transport),
+                            "flexUnavailable" | "serverOverloaded" => {
+                                Some(Failure::ProviderUnavailable)
+                            }
                             "contextWindowExceeded" => None,
                             _ => Some(Failure::Unknown),
                         };
@@ -1825,12 +1847,13 @@ impl Protocol for CodexProtocol {
     /// provider has nothing to interrupt and the runner falls back to the
     /// bounded stdin-close grace and kill.
     fn interruption(&mut self) -> Option<Value> {
-        if self.completed {
+        if self.completed || self.interrupted {
             return None;
         }
         let thread = self.thread_id.as_ref()?;
         let turn = self.turn_id.as_ref()?;
-        self.next_id += 1;
+        self.next_id = self.next_id.checked_add(1)?;
+        self.interrupted = true;
         Some(
             json!({"id":self.next_id,"method":"turn/interrupt","params":{"threadId":thread,"turnId":turn}}),
         )

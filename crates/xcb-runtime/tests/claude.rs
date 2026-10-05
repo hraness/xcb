@@ -202,12 +202,24 @@ fn catalog_keeps_selection_token_and_resolved_model_separate() {
         opus.resolved.as_ref().unwrap().as_str(),
         "claude-opus-5[1m]"
     );
-    let haiku = choices.iter().find(|c| c.id.as_str() == "haiku").unwrap();
-    assert_eq!(
-        haiku.resolved.as_ref().unwrap().as_str(),
-        "claude-haiku-4-5-20251001"
-    );
-    assert!(haiku.effort.is_none());
+    assert!(choices.iter().all(|choice| choice.id.as_str() != "haiku"));
+}
+
+#[test]
+fn catalog_excludes_models_without_auto_mode() {
+    let catalog = serde_json::json!({"models":[
+        {"value":"sonnet","displayName":"Sonnet","supportsAutoMode":true},
+        {"value":"old-model","displayName":"Old","supportsAutoMode":false},
+        {"value":"haiku","displayName":"Haiku"},
+        {"value":"alias","resolvedModel":"claude-haiku-4-5-20251001","displayName":"Alias"}
+    ]});
+    let choices = xcb_runtime::runner::parse_models(&catalog, 10).unwrap();
+    assert_eq!(choices.len(), 1);
+    assert_eq!(choices[0].id.as_str(), "sonnet");
+    let malformed = serde_json::json!({"models":[
+        {"value":"sonnet","displayName":"Sonnet","supportsAutoMode":"true"}
+    ]});
+    assert!(xcb_runtime::runner::parse_models(&malformed, 10).is_err());
 }
 
 #[test]

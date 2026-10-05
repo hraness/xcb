@@ -610,7 +610,21 @@ pub async fn smart_route(
     config: &Config,
     request: RouteRequest<'_>,
 ) -> Result<RouteDecision> {
-    let admitted = admitted_providers(store);
+    crate::native_backend::require_execution(config, request.requirements)?;
+    let mut admitted = admitted_providers(store);
+    if request.requirements.native_execution {
+        admitted.retain(|provider| {
+            config.native_execution.scopes.iter().any(|scope| {
+                scope.providers.contains(provider)
+                    && crate::native_backend::require_provider_qualification(
+                        store.root(),
+                        *provider,
+                        scope.github_credentials,
+                    )
+                    .is_ok()
+            })
+        });
+    }
     route_with_admitted(store, config, request, &admitted).await
 }
 
@@ -633,7 +647,21 @@ pub async fn failover_routes(
     config: &Config,
     request: FailoverRequest<'_>,
 ) -> Result<FailoverRoutes> {
-    let admitted = admitted_providers(store);
+    crate::native_backend::require_execution(config, request.requirements)?;
+    let mut admitted = admitted_providers(store);
+    if request.requirements.native_execution {
+        admitted.retain(|provider| {
+            config.native_execution.scopes.iter().any(|scope| {
+                scope.providers.contains(provider)
+                    && crate::native_backend::require_provider_qualification(
+                        store.root(),
+                        *provider,
+                        scope.github_credentials,
+                    )
+                    .is_ok()
+            })
+        });
+    }
     failover_routes_with_admitted(store, config, request, &admitted).await
 }
 
@@ -942,10 +970,22 @@ async fn rank_with_judge(
         let entry = last_used.entry(session.account.clone()).or_default();
         *entry = (*entry).max(session.last_active_at_ms);
     }
+    let recovering: BTreeSet<Id> = connected
+        .iter()
+        .map(|account| {
+            store
+                .account_recovery_available(&account.id, now, account.active_runs)
+                .map(|available| (!available).then(|| account.id.clone()))
+        })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect();
     let accounts: Vec<_> = connected
         .iter()
         .filter(|account| {
-            account.active_runs < config.max_runs_per_account
+            !recovering.contains(&account.id)
+                && account.active_runs < config.max_runs_per_account
                 && account.quota_blocked_until_ms.is_none()
                 && account
                     .remaining_percent

@@ -575,6 +575,7 @@ fn provider_args(model: &ModelChoice, tools: bool) -> Vec<String> {
         "--setting-sources".into(),
         "".into(),
         "--strict-mcp-config".into(),
+        "--disable-slash-commands".into(),
         "--no-session-persistence".into(),
         "--max-turns".into(),
         "32".into(),
@@ -586,7 +587,7 @@ fn provider_args(model: &ModelChoice, tools: bool) -> Vec<String> {
         args.push(effort.as_str().into());
     }
     args.push("--settings".into());
-    args.push(json!({"disableAllHooks":true,"disableClaudeAiConnectors":true,"autoMemoryEnabled":false,"disableBundledSkills":true,"disableSkillShellExecution":true,"enableWorkflows":false,"workflowKeywordTriggerEnabled":false,"skillOverrides":{"doctor":"off","checkup":"off"},"enabledPlugins":{"agents-md@builtin":false}}).to_string());
+    args.push(json!({"disableAllHooks":true,"disableClaudeAiConnectors":true,"autoMemoryEnabled":false,"disableBundledSkills":true,"disableSkillShellExecution":true,"enableWorkflows":false,"workflowKeywordTriggerEnabled":false,"skillOverrides":{"doctor":"off","checkup":"off"},"enabledPlugins":{"agents-md@builtin":false,"cc-plugin-plugin-authoring@builtin":false}}).to_string());
     if tools {
         args.push("--allowedTools".into());
         args.push(
@@ -1231,6 +1232,35 @@ pub fn provider_admitted(root: &Path, pin: &Pin) -> bool {
 }
 
 async fn probe_codex(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<Vec<ModelChoice>> {
+    probe_codex_metadata_inner(store, pin, account, true)
+        .await
+        .map(|metadata| metadata.models)
+}
+
+pub async fn probe_codex_metadata(
+    store: &Store,
+    pin: &Pin,
+    account: &Id,
+) -> Result<crate::codex::Metadata> {
+    probe_codex_metadata_inner(store, pin, Some(account), false).await
+}
+
+async fn probe_codex_metadata_inner(
+    store: &Store,
+    pin: &Pin,
+    account: Option<&Id>,
+    allow_reset: bool,
+) -> Result<crate::codex::Metadata> {
+    if pin.provider != Provider::Codex
+        || account
+            .map(|id| store.account(id))
+            .transpose()?
+            .is_some_and(|account| account.provider != Provider::Codex)
+    {
+        return Err(Error::Unavailable(
+            "Codex metadata requires a Codex account and build",
+        ));
+    }
     let model = ModelChoice {
         provider: Provider::Codex,
         id: Id::new(crate::codex::QUALIFIED_MODELS[0])?,
@@ -1270,23 +1300,34 @@ async fn probe_codex(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<V
         let models = protocol
             .initialize(&mut process, "Metadata only; do not create or run a task.")
             .await?;
+        let (email, plan) = protocol.account_identity();
+        let mut quotas = Vec::new();
         if let Some(account) = account {
-            let (email, plan) = protocol.account_identity();
             if email.is_some() || plan.is_some() {
-                store.set_account_identity(account, email, plan)?;
+                store.set_account_identity(account, email.clone(), plan.clone())?;
             }
-            for point in protocol
-                .read_quotas(&mut process, &store.account(account)?.quota_pool)
-                .await?
-            {
+            quotas = protocol
+                .read_quotas(
+                    &mut process,
+                    &store.account(account)?.quota_pool,
+                    allow_reset,
+                )
+                .await?;
+            for point in &quotas {
                 store.record_account_quota(
                     run.as_ref()
                         .ok_or(Error::Conflict("quota probe has no lease"))?,
-                    &point,
+                    point,
                 )?;
             }
         }
-        Ok(models)
+        Ok(crate::codex::Metadata {
+            observed_at_ms: now_ms(),
+            models,
+            email,
+            plan,
+            quotas,
+        })
     }
     .await;
     let process_joined = process.join().await;
@@ -2008,6 +2049,19 @@ pub fn parse_models(value: &Value, now: u64) -> Result<Vec<ModelChoice>> {
             .filter(|resolved| *resolved != id.as_str())
             .map(Id::new)
             .transpose()?;
+        let auto = match model.get("supportsAutoMode") {
+            None | Some(Value::Null) => None,
+            Some(Value::Bool(value)) => Some(*value),
+            _ => return Err(Error::Protocol("model Auto capability")),
+        };
+        if auto == Some(false)
+            || [Some(&id), resolved.as_ref()]
+                .into_iter()
+                .flatten()
+                .any(|id| id.as_str() == "haiku" || id.as_str().starts_with("claude-haiku-"))
+        {
+            continue;
+        }
         let name = model
             .get("displayName")
             .and_then(Value::as_str)
@@ -2203,7 +2257,7 @@ pub(crate) async fn handshake(
     process: &mut StreamProcess,
     tools: bool,
     system: &str,
-) -> Result<Vec<ModelChoice>> {
+) -> Result<claude::Metadata> {
     process.send(&initialize(tools, system)).await?;
     tokio::time::timeout(crate::protocol::INIT_DEADLINE, async {
         for _ in 0..256 {
@@ -2242,7 +2296,7 @@ pub(crate) async fn handshake(
                             Error::Protocol("initialization failed")
                         });
                     }
-                    return parse_models(
+                    return claude::Metadata::parse(
                         value
                             .pointer("/response/response")
                             .ok_or(Error::Protocol("initialize response"))?,
@@ -2270,6 +2324,43 @@ pub async fn probe(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<Vec
     if pin.provider == Provider::Devin {
         return Err(Error::Unavailable(
             "Devin support was removed; use Claude or Codex",
+        ));
+    }
+    probe_claude_metadata(store, pin, account)
+        .await
+        .map(|metadata| metadata.models)
+}
+
+pub async fn probe_claude_metadata(
+    store: &Store,
+    pin: &Pin,
+    account: Option<&Id>,
+) -> Result<claude::Metadata> {
+    probe_claude_metadata_inner(store, pin, account, false).await
+}
+
+pub async fn probe_claude_diagnostics(
+    store: &Store,
+    pin: &Pin,
+    account: &Id,
+) -> Result<claude::Metadata> {
+    probe_claude_metadata_inner(store, pin, Some(account), true).await
+}
+
+async fn probe_claude_metadata_inner(
+    store: &Store,
+    pin: &Pin,
+    account: Option<&Id>,
+    inspect_runtime: bool,
+) -> Result<claude::Metadata> {
+    if pin.provider != Provider::Claude
+        || account
+            .map(|id| store.account(id))
+            .transpose()?
+            .is_some_and(|account| account.provider != Provider::Claude)
+    {
+        return Err(Error::Unavailable(
+            "Claude metadata requires a Claude account and build",
         ));
     }
     let now = now_ms();
@@ -2322,21 +2413,21 @@ pub async fn probe(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<Vec
     )
     .await?;
     let result = async {
-        if let Some(run) = &run { store.mark_spawned(run, process.pid())?; }
-        let models = handshake(&mut process, false, "Return no messages; this connection is for host metadata queries only.").await?;
+        if let Some(run) = &run {
+            store.mark_spawned(run, process.pid())?;
+        }
+        let mut metadata = handshake(
+            &mut process,
+            false,
+            "Return no messages; this connection is for host metadata queries only.",
+        )
+        .await?;
         if let Some(account) = account {
-            process.send(&json!({"type":"control_request","request_id":"xcb_usage","request":{"subtype":"get_usage","skip_behaviors":true}})).await?;
-            let response = tokio::time::timeout(Duration::from_secs(20), async {
-                for _ in 0..128 {
-                    let bytes = process.frame().await?.ok_or(Error::Protocol("usage connection ended"))?;
-                    if let Event::ControlResponse(value) = claude::parse_event(&bytes)?
-                        && value.pointer("/response/request_id").and_then(Value::as_str) == Some("xcb_usage") {
-                            if value.pointer("/response/subtype").and_then(Value::as_str) != Some("success") { return Err(Error::Protocol("quota query unavailable")); }
-                            return value.pointer("/response/response").cloned().ok_or(Error::Protocol("quota response"));
-                        }
-                }
-                Err(Error::Protocol("usage frame limit"))
-            }).await.map_err(|_| Error::Unavailable("usage query timed out"))??;
+            let response = crate::claude_protocol::metadata_query(
+                &mut process,
+                crate::claude_protocol::MetadataQuery::Usage,
+            )
+            .await?;
             let pool = store.account(account)?.quota_pool;
             let now = now_ms();
             let mut points = parse_quotas(&response, &pool, now)?;
@@ -2353,7 +2444,13 @@ pub async fn probe(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<Vec
                     )?;
                 }
             }
-            for point in points { store.record_account_quota(run.as_ref().ok_or(Error::Conflict("quota probe has no lease"))?, &point)?; }
+            for point in points {
+                store.record_account_quota(
+                    run.as_ref()
+                        .ok_or(Error::Conflict("quota probe has no lease"))?,
+                    &point,
+                )?;
+            }
             // subscription_type is the provider's own plan report; the profile
             // file inside our launch profile may carry the account email.
             let plan = response
@@ -2367,17 +2464,49 @@ pub async fn probe(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<Vec
                 })
                 .map(|value| format!("Claude {value}"));
             let base = launch.artifacts.path();
-            let email = auth::claude_profile_email(&[
-                &base.join("scratch").join("config"),
-                &base.join("scratch").join("home"),
-                &base.join("profile"),
-            ]);
+            let email = metadata.account.email.clone().or_else(|| {
+                auth::claude_profile_email(&[
+                    &base.join("scratch").join("config"),
+                    &base.join("scratch").join("home"),
+                    &base.join("profile"),
+                ])
+            });
+            let plan = plan.or_else(|| {
+                metadata
+                    .account
+                    .subscription_type
+                    .as_ref()
+                    .map(|plan| format!("Claude {plan}"))
+            });
             if email.is_some() || plan.is_some() {
                 store.set_account_identity(account, email, plan)?;
             }
         }
-        Ok::<_, Error>(models)
-    }.await;
+        if inspect_runtime {
+            let mcp = crate::claude_protocol::metadata_query(
+                &mut process,
+                crate::claude_protocol::MetadataQuery::McpStatus,
+            )
+            .await?;
+            let context = crate::claude_protocol::metadata_query(
+                &mut process,
+                crate::claude_protocol::MetadataQuery::ContextSummary,
+            )
+            .await?;
+            metadata.runtime = Some(claude::RuntimeDiagnostics {
+                probe_run_id: run
+                    .as_ref()
+                    .ok_or(Error::Conflict("runtime inspection has no lease"))?
+                    .id
+                    .clone(),
+                observed_at_ms: now_ms(),
+                context: claude::ContextSummary::parse(&context)?,
+                mcp_servers: claude::parse_mcp_status(&mcp)?,
+            });
+        }
+        Ok::<_, Error>(metadata)
+    }
+    .await;
     let process_joined = process.join().await;
     let bridge_joined = close_bridge(bridge).await;
     let joined = process_joined && bridge_joined;
@@ -2520,9 +2649,33 @@ pub async fn run(
     cancel: watch::Receiver<bool>,
     observer: Observer,
 ) -> Result<Outcome> {
+    run_with_pin(store, input, cancel, observer, None).await
+}
+
+/// Qualification supplies the exact verified artifact to launch. Never reload
+/// the provider pin after observing a successful fixture and attest new bytes.
+pub(crate) async fn run_with_pin(
+    store: Arc<Store>,
+    input: RunInput,
+    cancel: watch::Receiver<bool>,
+    observer: Observer,
+    expected_pin: Option<Pin>,
+) -> Result<Outcome> {
     let session = &input.session;
     if *cancel.borrow() {
         return Err(Error::Unavailable("cancelled before launch"));
+    }
+    crate::native_backend::require_execution(&input.config, session.requirements)?;
+    if session.requirements.native_execution {
+        let scope = input
+            .config
+            .native_execution
+            .scope(Path::new(&session.workspace), session.model.provider)
+            .ok_or(Error::Unavailable(
+                "native execution is not granted to this workspace and provider",
+            ))?;
+        crate::native_backend::validate_scope(scope, store.root())?;
+        crate::native_backend::require_qualification(store.root())?;
     }
     if session.requirements.signed_in_browser
         && !input.pane_generation
@@ -2549,8 +2702,17 @@ pub async fn run(
         }
     }
     let workspace = Workspace::open(Path::new(&session.workspace))?;
+    let pin = match expected_pin {
+        Some(pin) => {
+            if pin.provider != session.model.provider {
+                return Err(Error::Unavailable("qualification provider pin mismatch"));
+            }
+            pin.verify()?;
+            pin
+        }
+        None => Pin::load(store.root(), session.model.provider)?,
+    };
     if session.model.provider == Provider::Codex {
-        let pin = Pin::load(store.root(), Provider::Codex)?;
         crate::codex::runtime_admitted_with_catalog(store.root(), &pin)?;
         let run = store.prepare_run(&session.id, session.revision, now_ms())?;
         #[cfg(target_os = "macos")]
@@ -2643,7 +2805,6 @@ pub async fn run(
             "native execution for this provider is not yet qualified",
         ));
     }
-    let pin = Pin::load(store.root(), Provider::Claude)?;
     let run = store.prepare_run(&session.id, session.revision, now_ms())?;
     let tools = !input.pane_generation;
     let mut custody = PreparationCustody {
@@ -2679,6 +2840,10 @@ pub(crate) async fn run_prepared<P: Protocol>(
 ) -> Result<Outcome> {
     let session = &input.session;
     let tools = !input.pane_generation;
+    let qualification = session.requirements.native_execution
+        && store
+            .session(&session.id)?
+            .is_none_or(|saved| !saved.requirements.native_execution);
     let prepared = match launch.prepared_run.take() {
         Some(run) => Ok(run),
         None => store.prepare_run(&session.id, session.revision, now_ms()),
@@ -2839,6 +3004,13 @@ pub(crate) async fn run_prepared<P: Protocol>(
                 base64: base64::engine::general_purpose::STANDARD.encode(bytes),
             });
         }
+        let text = if session.requirements.native_execution {
+            format!(
+                "The host explicitly granted native execution for this workspace and provider. Use workspace_native_exec for shell commands, host toolchains, Git and network requests in the real worktree: argv is a string array (use /bin/sh -c for shell syntax), cwd is relative (use .), timeoutMs is bounded, and network must be https. The executor enforces workspace confinement and DNS/HTTPS egress. Host GitHub credentials are available only when the host grant includes them; provider credentials and private configuration remain inaccessible. Changes are immediate, not staged. Do not use workspace_exec or retry uncertain commands. Keep every action inside the user's original authority.\n\n{text}"
+            )
+        } else {
+            text
+        };
         // Once start is attempted, failure or cancellation cannot establish
         // whether its transport partially delivered the request.
         prompt_submission = None;
@@ -3006,6 +3178,11 @@ pub(crate) async fn run_prepared<P: Protocol>(
                         name,
                         arguments,
                     } if admitted && tools => {
+                        if qualification && name != "workspace_native_exec" {
+                            pending_attention = true;
+                            quota_failure = Some(Failure::Policy);
+                            return Ok((Terminal::Failed, vec![]));
+                        }
                         if !seen_calls.insert(call_id.clone()) {
                             return Err(Error::Protocol("duplicate tool call identifier"));
                         }
@@ -3040,7 +3217,18 @@ pub(crate) async fn run_prepared<P: Protocol>(
                         // tool settles its own receipt inside finish_command.
                         // Every other tool settles its receipt together with
                         // the transcript append in one durable transaction.
-                        let (output, settle) = if name == "workspace_exec" {
+                        let (output, settle) = if matches!(
+                            name.as_str(),
+                            "workspace_exec" | "workspace_host_exec"
+                        ) && session.requirements.native_execution
+                        {
+                            (
+                                Err(Error::Unavailable(
+                                    "native tasks cannot fall back to offline or legacy host commands",
+                                )),
+                                Some(EffectState::None),
+                            )
+                        } else if name == "workspace_exec" {
                             match commands
                                 .start(
                                     store.clone(),
@@ -3146,12 +3334,19 @@ pub(crate) async fn run_prepared<P: Protocol>(
                         // Result shaping never aborts the turn: legal tool
                         // output that cannot ride the transcript bound is a
                         // tool rejection with guidance, not a protocol failure.
+                        let native_denial = input.session.requirements.native_execution
+                            && matches!(
+                                name.as_str(),
+                                "workspace_native_exec" | "workspace_exec" | "workspace_host_exec"
+                            )
+                            && output.is_err();
                         let prepared = crate::tool_output::prepare(
                             store.root(),
                             output,
                             name == "xcb_tools_call" || name == "xcb_tools_image",
                         );
                         let text = prepared.text;
+                        let unresolved_tool_effects = settle == Some(EffectState::Uncertain);
                         // The durable transcript carries display-safe text;
                         // the provider still receives the exact result.
                         let message = Message {
@@ -3192,6 +3387,15 @@ pub(crate) async fn run_prepared<P: Protocol>(
                         protocol
                             .reply(&mut process, &call_id, prepared.reply)
                             .await?;
+                        if unresolved_tool_effects {
+                            pending_attention = true;
+                            return Ok((Terminal::Failed, vec![]));
+                        }
+                        if native_denial {
+                            pending_attention = true;
+                            quota_failure = Some(Failure::Policy);
+                            return Ok((Terminal::Failed, vec![]));
+                        }
                         if capabilities
                             .as_ref()
                             .is_some_and(|manager| manager.policy_denied())
@@ -3293,7 +3497,14 @@ pub(crate) async fn run_prepared<P: Protocol>(
     effects = combine_effects(effects, protocol.host_effects());
     pending_attention |= protocol.host_pending_attention();
     let bridge_joined = close_bridge(bridge).await;
-    let joined = process_joined
+    let native_joined = store.run(&run.id)?.is_some_and(|record| {
+        record
+            .capability_processes
+            .keys()
+            .all(|name| !name.starts_with("native_"))
+    });
+    let joined = native_joined
+        && process_joined
         && protocol_joined
         && bridge_joined
         && commands_joined
@@ -4204,6 +4415,11 @@ mod tests {
                 settings["enabledPlugins"]["agents-md@builtin"],
                 json!(false)
             );
+            assert_eq!(
+                settings["enabledPlugins"]["cc-plugin-plugin-authoring@builtin"],
+                json!(false)
+            );
+            assert!(args.iter().any(|arg| arg == "--disable-slash-commands"));
             assert_eq!(settings["disableAllHooks"], json!(true));
             assert_eq!(settings["disableBundledSkills"], json!(true));
             assert_eq!(settings["disableSkillShellExecution"], json!(true));

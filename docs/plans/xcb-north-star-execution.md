@@ -206,30 +206,68 @@ not create a new schedule or authorize a provider call.
 
 ## xcb scheduler setup
 
-The project grant is named `xcb`, lasts 30 days, and permits up to 100 bounded
-follow-up tasks. A pinned controller runs hourly with eight managed calls:
-inspection, implementation, verification, reporting, delivery, recovery,
-maintenance, and capacity review. Managed calls are an offer of work, not a
-parallelism grant: the resident supervisor admits them through the adaptive
-capacity target and durable reservations.
+Start each project from an inactive configuration. Review its exact checkout and
+run offline preflight before creating a grant or schedule. For example, from the
+selected checkout:
 
 ```sh
-xcb projects --json
-xcb schedules program /Users/bg/Documents/xcb \
-  examples/xcb-north-star-controller.algal.json \
-  --workspace /Users/bg/Documents/xcb --managed-calls 8 --every 3600 \
-  --title "xcb north-star herder"
+xcb projects preflight . examples/xcb-north-star-controller.algal.json \
+  --managed-calls 8 --require-file docs/plans/xcb-north-star-execution.md \
+  --expect-revision "$(git rev-parse HEAD)" --task-budget 100
 ```
+
+Preflight reports the canonical workspace, Git root, full commit, branch,
+dirty state, pinned manifest and input digests, and required-file SHA-256
+hashes. Required files must be readable files inside the workspace, at most
+1 MiB each. Missing inputs, dirty work, and a mismatched commit return a
+nonzero status. A budget below the number of declared agent cells produces a
+warning; the estimate assumes one pass through those cells. The command creates no grant, task,
+or schedule and starts no provider. Git inspection disables filesystem monitor
+hooks, blocks tracked files with active filter attributes and submodules,
+and limits each command to 1 MiB of output and a five-second read deadline (plus process cleanup).
+Its result is a local snapshot: repeat it
+if inputs change. It does not enforce these conditions on later schedule runs.
+
+The example controller contains five sequential agent cells: inspection,
+implementation, verification, reporting, and delivery. `--managed-calls 8`
+is a per-run ceiling; it adds neither stages nor parallelism. A remaining
+budget of 100 child tasks covers about 20 complete five-cell cycles before
+other automatic work, failed runs, or expiry consume that allowance. A
+30-day expiry does not guarantee 30 days of hourly runs. Recovery, maintenance,
+and capacity review are separate responsibilities, not additional cells in
+this example.
+
+Before enabling any ongoing work, validate one isolated complete cycle and
+inspect its worker results, restart/resume behavior, and delivery evidence.
+Keep schedules disabled until that project is explicitly selected for setup.
+Provider access, resource capacity, and successful delivery require their own
+checks; an offline preflight result does not establish execution readiness.
+
+The grant also carries task-rate and concurrency controls that can change
+without editing the controller. Actual token use depends on each task, model,
+and context and must be measured separately; these controls enforce no token
+budget:
+`xcb projects configure --parallel N --per-hour N` sets them at grant time
+and `xcb projects scale` changes them later; `--parallel` caps concurrent
+provider-bound lanes across the whole repository family (linked worktrees
+share one project), and `--per-hour` caps automatic admissions in the
+trailing hour. `0` means the project adds no cap of its own. Operator-started
+work always runs — it consumes a lane but never an admission — while paused
+or expired projects hold automatic work rather than dropping it, and
+schedules report their blocker instead of silently skipping wake-ups. Inspect
+with `xcb projects status` or the `schedules`/`projects` sections of
+`xcb native status --json`.
 
 The managed config exposes `max_active_runs` (1–64) and
 `adaptive_parallelism`. Adaptive mode starts at one active task and doubles
 every 30 seconds while queued work, account routes, and host telemetry remain
 healthy. It halves on resource pressure or a configuration fault. Account
-limits, workspace locks, uncertain effects, and capability checks remain hard
-gates, so increasing the ceiling cannot bypass custody. Maintenance and
-recovery work use the same ledger with their own class and priority; a
-maintenance failure is isolated from build work, while recovery retains the
-reservation of an uncertain provider effect until evidence settles it.
+limits, workspace locks, uncertain effects, capability checks, and project
+throughput dials remain hard gates, so increasing the ceiling cannot bypass
+custody. Maintenance and recovery work use the same ledger with their own
+class and priority; a maintenance failure is isolated from build work, while
+recovery retains the reservation of an uncertain provider effect until
+evidence settles it.
 
 The controller must inspect the current tree, grant, backlog, receipts, and
 validation state before selecting work. It should keep at most one integration
@@ -252,6 +290,45 @@ auto-merge state, merge SHA when available, and release workflow/tag evidence.
 It may publish only through the repository's normal gates and workload
 identity. A failed or uncertain push is held for evidence-based reconciliation;
 the controller never retries an ambiguous publication or creates a second tag.
+
+## Provider operating-layer stages
+
+The native-provider work follows the same P1–P3 command, journal, and
+assurance contracts for both Claude and Codex:
+
+1. **Discovery and accounting:** retain a checked method inventory and a
+   per-method disposition. The task build accounts for the complete checked
+   Codex wire schema and pinned Claude Query interface. `native methods`
+   starts no provider; exact-account `native describe` submits no prompt.
+2. **Read-only diagnostics:** Claude summary context and redacted MCP status
+   target the inspection connection and name its probe run. Codex inspection
+   creates no thread and consumes no reset credit. `native status` projects
+   bounded local account/session/run/tool records with exact filters, JSON,
+   JSONL, truncation and cursors; it excludes transcript-derived titles and
+   prompts. Session inspection reads only local custody records: bounded
+   run/tool receipts, lease state, command and capability-process custody,
+   latest settled facts, and method coverage. Active-task provider
+   diagnostics still need a revision-checked command to the owning worker;
+   never attach a second process to a held account to inspect it.
+3. **Owned session controls:** map provider resume/fork, compaction, live
+   steering, and task stop to expected revisions, original account/workspace
+   grants, context lineage, and durable effect identities. Define stale-target,
+   interrupted-call, duplicate-request, and restart tests before activation.
+   Provider transcript operations are not unchecked SDK pass-throughs.
+4. **Granted runtime controls:** model/effort changes must use observed account
+   choices; MCP changes must use registered host server grants and revalidate
+   the effective inventory before another turn. Settings, reloads, rewinds,
+   remote control, and provider-managed children remain unavailable until
+   their own ownership and recovery contracts are implemented and tested.
+5. **Live acceptance and rollout:** preserve supported-build, account/quota,
+   OS, approval, and workspace checks. Source or metadata success does not
+   activate a provider. Claude live native acceptance remains blocked by
+   subscription usage; existing Codex command evidence is not evidence for
+   untested provider controls or a replacement artifact.
+
+This staged method coverage is not completion of the operating layer. Keep
+implemented diagnostics, source-only checks, pending controls, and deployed
+behavior separate in every progress record.
 
 ## Definition of done
 

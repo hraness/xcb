@@ -52,6 +52,22 @@ impl HabitatSchedule {
     }
 }
 
+/// A schedule row joined with its resolved directory, live dispatch blocker
+/// and last outcome — the operator-facing read model. Field names follow
+/// the schedule row's snake_case so `--json` stays a strict superset.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScheduleView {
+    #[serde(flatten)]
+    pub schedule: HabitatSchedule,
+    /// The directory occurrences run in; None when it can no longer be read.
+    pub workspace: Option<String>,
+    /// Why a due, enabled schedule is not dispatching; None when clear.
+    pub blocker: Option<String>,
+    /// How the last occurrence's task settled, when it exists.
+    pub last_task_state: Option<TaskState>,
+    pub last_task_detail: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkMemory {
@@ -103,7 +119,7 @@ pub(super) fn explicit_binding(
 }
 
 /// A schedule's directory: its own in the thread, else its project view's.
-fn schedule_workspace(db: &Connection, schedule: &HabitatSchedule) -> Result<String> {
+pub(super) fn schedule_workspace(db: &Connection, schedule: &HabitatSchedule) -> Result<String> {
     if let Some(workspace) = &schedule.workspace {
         return Ok(workspace.clone());
     }
@@ -215,8 +231,13 @@ impl Occurrence {
             return Err(Error::Conflict("schedule changed before dispatch"));
         }
         let workspace = schedule_workspace(tx, &current)?;
-        if project::policy_from(tx, &workspace)?.is_some_and(|p| !p.enabled) {
-            return Err(Error::Conflict("project is paused"));
+        // A herd pause or exhausted hourly dial covers the whole repository
+        // family, so an occurrence bound to a linked worktree lane waits too.
+        if let Some(policy) = project::herd_for(tx, &workspace)? {
+            if !policy.enabled {
+                return Err(Error::Conflict("project is paused"));
+            }
+            project::check_admission_window(tx, &policy, self.now)?;
         }
         // Block on all outstanding work in this project, including an uncertain
         // terminal record. A timer must never infer that uncertainty settled.
@@ -504,6 +525,10 @@ impl ManagedStore {
                 expires_at_ms,
                 required_provider,
             } => {
+                let (max_active, max_per_hour) = self
+                    .herd_policy_in(&workspace)?
+                    .map(|policy| (policy.max_active, policy.max_per_hour))
+                    .unwrap_or((0, 0));
                 let policy = self.configure_project_policy_in(
                     Path::new(&workspace),
                     expected_revision,
@@ -511,6 +536,8 @@ impl ManagedStore {
                     max_tasks,
                     expires_at_ms,
                     required_provider,
+                    max_active,
+                    max_per_hour,
                 )?;
                 Ok(format!(
                     "Project authority enabled: {} tasks until {}",
@@ -1056,6 +1083,13 @@ impl ManagedStore {
 
     pub fn schedules(&self, conversation: Option<&Id>) -> Result<Vec<HabitatSchedule>> {
         let db = self.db()?;
+        self.schedules_in(&db, conversation)
+    }
+    pub(super) fn schedules_in(
+        &self,
+        db: &Connection,
+        conversation: Option<&Id>,
+    ) -> Result<Vec<HabitatSchedule>> {
         let mut query = db.prepare("SELECT id FROM habitat_schedules WHERE (?1 IS NULL OR conversation=?1) ORDER BY next_due,id LIMIT 128")?;
         let ids = query
             .query_map([conversation.map(Id::as_str)], |row| {
@@ -1066,7 +1100,7 @@ impl ManagedStore {
         for id in ids {
             match Id::new(id.clone())
                 .map_err(Error::from)
-                .and_then(|id| schedule_from(&db, &id))
+                .and_then(|id| schedule_from(db, &id))
             {
                 Ok(Some(schedule)) => schedules.push(schedule),
                 _ => record_supervisor_fault(
@@ -1224,6 +1258,166 @@ impl ManagedStore {
         write_schedule(&tx, &current, &next)?;
         tx.commit()?;
         Ok(next)
+    }
+
+    /// One schedule row, or None.
+    pub fn schedule(&self, id: &Id) -> Result<Option<HabitatSchedule>> {
+        let db = self.db()?;
+        schedule_from(&db, id)
+    }
+
+    /// Edit a schedule's prompt, interval or next due instant under the
+    /// same revision check every other mutation uses. Conversation and
+    /// workspace are identity: a schedule that should run elsewhere is
+    /// deleted and recreated, never moved.
+    pub fn update_schedule(
+        &self,
+        id: &Id,
+        expected_revision: u64,
+        prompt: Option<String>,
+        interval_ms: Option<u64>,
+        next_due_ms: Option<u64>,
+    ) -> Result<HabitatSchedule> {
+        if prompt.is_none() && interval_ms.is_none() && next_due_ms.is_none() {
+            return Err(xcb_core::Error::Invalid("nothing to change").into());
+        }
+        let mut db = self.write_db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = schedule_from(&tx, id)?.ok_or(Error::Unavailable("schedule not found"))?;
+        if current.revision != expected_revision {
+            return Err(Error::Conflict("schedule revision changed"));
+        }
+        let mut next = current.clone();
+        if let Some(prompt) = prompt {
+            next.prompt = prompt;
+        }
+        if let Some(interval_ms) = interval_ms {
+            next.interval_ms = interval_ms;
+        }
+        if let Some(next_due_ms) = next_due_ms {
+            next.next_due_ms = next_due_ms;
+        }
+        next.revision += 1;
+        next.updated_at_ms = now_ms().max(current.updated_at_ms);
+        write_schedule(&tx, &current, &next)?;
+        tx.commit()?;
+        Ok(next)
+    }
+
+    /// Delete a schedule row; occurrences already queued are unaffected.
+    /// The revision check keeps a stale handle from deleting a newer edit.
+    pub fn delete_schedule(&self, id: &Id, expected_revision: u64) -> Result<()> {
+        let mut db = self.write_db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = schedule_from(&tx, id)?.ok_or(Error::Unavailable("schedule not found"))?;
+        if current.revision != expected_revision {
+            return Err(Error::Conflict("schedule revision changed"));
+        }
+        if tx.execute(
+            "DELETE FROM habitat_schedules WHERE id=?1 AND revision=?2",
+            params![id.as_str(), sql(expected_revision)?],
+        )? != 1
+        {
+            return Err(Error::Conflict("schedule revision changed"));
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Why a due, enabled schedule is not dispatching right now — the
+    /// operational question `xcb schedules` must answer. Read-only; the
+    /// occurrence's own transaction checks stay authoritative.
+    fn schedule_blocker(
+        &self,
+        db: &Connection,
+        schedule: &HabitatSchedule,
+        now: u64,
+    ) -> Result<Option<String>> {
+        if !schedule.enabled || schedule.next_due_ms > now {
+            return Ok(None);
+        }
+        if self.conversation_in(db, &schedule.conversation)?.is_none() {
+            return Ok(Some("the schedule's conversation is missing".into()));
+        }
+        let workspace = match schedule_workspace(db, schedule) {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                return Ok(Some(format!(
+                    "no project directory: {}",
+                    fault_text(&error)
+                )));
+            }
+        };
+        if !Path::new(&workspace).is_dir() {
+            return Ok(Some("project directory is unavailable".into()));
+        }
+        if let Some(policy) = project::herd_for(db, &workspace)? {
+            if !policy.enabled {
+                return Ok(Some("project authority is paused".into()));
+            }
+            if project::admissions_in(
+                db,
+                &policy,
+                now.saturating_sub(project::ADMISSION_WINDOW_MS),
+            )? >= policy.max_per_hour
+                && policy.max_per_hour > 0
+            {
+                return Ok(Some("project hourly start limit reached".into()));
+            }
+        }
+        let open = project::outstanding_in(db, &workspace, None)?
+            .iter()
+            .filter(|task| !task.deferred)
+            .count();
+        if open > 0 {
+            return Ok(Some(format!(
+                "{open} open task{} in this project",
+                if open == 1 { "" } else { "s" }
+            )));
+        }
+        Ok(None)
+    }
+
+    /// The view for one already-loaded schedule.
+    pub fn schedule_view(&self, schedule: &HabitatSchedule) -> Result<ScheduleView> {
+        let db = self.db()?;
+        self.schedule_view_in(&db, schedule, now_ms())
+    }
+
+    fn schedule_view_in(
+        &self,
+        db: &Connection,
+        schedule: &HabitatSchedule,
+        now: u64,
+    ) -> Result<ScheduleView> {
+        let workspace = schedule_workspace(db, schedule).ok();
+        let blocker = self.schedule_blocker(db, schedule, now)?;
+        let (last_task_state, last_task_detail) = match &schedule.last_task {
+            Some(id) => match task_from(db, id)? {
+                Some(task) => (Some(task.state), Some(task.detail)),
+                None => (None, None),
+            },
+            None => (None, None),
+        };
+        Ok(ScheduleView {
+            schedule: schedule.clone(),
+            workspace,
+            blocker,
+            last_task_state,
+            last_task_detail,
+        })
+    }
+
+    /// Each schedule with its resolved directory, dispatch blocker and last
+    /// outcome — the read model behind `xcb schedules` and status surfaces.
+    pub fn schedule_views(&self, conversation: Option<&Id>) -> Result<Vec<ScheduleView>> {
+        let db = self.db()?;
+        let now = now_ms();
+        let mut views = Vec::new();
+        for schedule in self.schedules_in(&db, conversation)? {
+            views.push(self.schedule_view_in(&db, &schedule, now)?);
+        }
+        Ok(views)
     }
 
     fn due_schedules(&self, now: u64) -> Result<Vec<HabitatSchedule>> {
@@ -1445,6 +1639,7 @@ impl ManagedStore {
                         generation: policy.generation,
                         required_provider: policy.required_provider,
                         admitted: false,
+                        admitted_at_ms: None,
                     })
                 }
                 Ok(_) => None,

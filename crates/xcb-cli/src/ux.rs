@@ -296,6 +296,7 @@ Setup
   service        Start xcb's background supervisor at login (macOS)
   resources      Inspect memory and disk pressure; enable launch limits
   tools          Manage browser, computer and other host tool connections
+  native         Qualify and grant native shell and network execution
   update         Check for updates and set the update policy
   upgrade        Install the latest verified release
   completions    Print shell completions

@@ -1145,7 +1145,9 @@ async fn execute<P: Protocol>(
                             Some(Failure::AccountQuota | Failure::ModelQuota) => {
                                 Category::QuotaOrResourceLimit
                             }
-                            Some(Failure::Transport) => Category::Transport,
+                            Some(Failure::Transport | Failure::ProviderUnavailable) => {
+                                Category::Transport
+                            }
                             _ => Category::ProviderRejected,
                         };
                         diagnostic::record_category(&store, run, id, Stage::Output, category);

@@ -26,6 +26,8 @@ pub enum Failure {
     Authentication,
     Policy,
     Transport,
+    /// Explicit terminal provider capacity refusal, never a timeout or lost stream.
+    ProviderUnavailable,
     Unknown,
     /// Reported, never recorded: the provider completed the turn without
     /// answer text or workspace effects (see [`no_reply`]). Recorded facts

@@ -79,6 +79,29 @@ The first transport is local stdio or a local Unix socket. A process embedding
 xcb must not need a network account. Remote transports are adapters over the
 same messages, never alternate state models.
 
+### Operating layer for existing subscriptions
+
+xcb should let an agent operate the user's Claude and Codex subscriptions
+through one durable interface: discover capabilities, choose an available
+account and model, inspect context and usage, submit work, steer or stop it,
+and read verified progress after a restart. It should add coordination and
+recovery around provider sessions without substituting API billing or
+weakening provider policy.
+
+Both adapters need explicit method accounting and tests for startup,
+streaming, tools, limits, denials, cancellation, and recovery. Every method
+in a checked provider protocol must be identified as implemented, handled
+by xcb, or unavailable. Account sign-in, model discovery, source tests,
+and live command acceptance are different observations. A broad catalog
+must not imply that disabled provider controls are callable.
+
+Session resume/fork, live steering, context management, MCP changes, and
+background work should use xcb's durable task and command contracts. They
+must retain account identity, workspace grants, context lineage, expected
+revision, process ownership, and effect records. Read-only diagnostics come
+first; mutations require their own tests and relevant live acceptance.
+Raw provider calls are not the agent-facing interface.
+
 ### State, events, commands, and projections
 
 The stable contract has four layers:
@@ -123,6 +146,109 @@ grant, or acknowledge input that was clipped from a prompt.
 Hooks and external projections consume sanitized, bounded events. They do not
 receive provider secrets or arbitrary host paths. Every effect that can be
 retried has a stable identity and a settlement receipt.
+
+### Native provider execution
+
+Claude Code and Codex should run with their own native file, shell, and
+network tools in the granted workspace. xcb should coordinate accounts,
+routes, durable tasks, observations, and recovery around those sessions rather
+than replace ordinary development with offline command replay. This applies to
+both supported providers; native execution is not a Codex-only desktop capability.
+After each backend passes its activation checks, native execution should be the
+normal choice for factory coding tasks. Brokered isolation remains an explicit
+caller choice, not an invisible substitute for missing native capabilities.
+Devin execution remains retired. Its historical account and session tags stay
+readable for recovery, but cannot acquire new native execution grants.
+
+Native execution is an explicit, persistent task requirement. Resume,
+continuation, quota failover, and cross-provider handoff preserve that
+requirement and the workspace capability grant. They cannot satisfy it with
+broker-only tools or silently fall back to the offline VM. The existing
+brokered execution mode and offline command runner remain separate options for
+callers that need their narrower isolation contract.
+
+Each native backend uses a versioned provider transport: Codex app-server or
+Claude's structured stream. It preserves supported provider approval controls
+and organization policy. xcb must verify Claude Auto and Codex automatic
+approval review independently; similar mode names do not establish equivalent
+permissions. Additional approval requests and denials stop automatic work
+rather than grant permission through a different provider.
+
+The host validates the effective native tool inventory, filesystem and network
+limits, isolated account/configuration state, and exact executable before
+activation. A broker-only provider receipt does not establish these claims.
+Workspace shell tools and authorized Git/network operations require their own
+live acceptance cases. Native mutations carry durable effect identities;
+timeouts, missing replies, and process exit alone do not make those mutations
+safe to replay. Unknown or partially settled effects retain account custody.
+
+The macOS implementation exposes `workspace_native_exec` through each
+provider's native tool protocol. xcb runs the command in the granted worktree
+under an OS policy with DNS and TCP 443 access, a private command home, and
+process records tied to the owning task and account. Offline replay and the
+legacy Codex host tool cannot satisfy a native task. Provider-built-in host
+shell and web tools are not enabled by this implementation; enabling them
+requires separate checks of their file access, credentials, and approval
+behavior. The target above includes those tools, not only the host bridge.
+
+Before a workspace can use native commands, `xcb native qualify` must pass the
+OS checks and `xcb native verify --provider <provider>` must record a successful
+provider command, HTTPS request, and Git operation for the running executable.
+The optional `--github` check uses read-only authenticated requests before
+host GitHub credentials can be granted. `xcb native grant` then records the
+workspace, providers, and additional toolchain or Git directories selected by
+the host. Qualification sessions use disposable workspaces and one
+session-bound command; they do not enable native access to real projects.
+Linux and Windows native commands remain unavailable rather than run without
+OS confinement. These checks do not claim live remote writes, provider-built-in
+approval classification, or all planned acceptance cases.
+
+On the development Mac, Codex passed native shell, DNS/HTTPS, local Git,
+and read-only authenticated GitHub checks through this command bridge,
+including with the login service's system-only environment. The installed
+supervisor then completed the same checks in a durable managed task:
+`t_1eb83a062043af67d63e59c04318fe6d1eeabc1a82fb8219c719940f6914f0b6`.
+It made one native command call, returned all four expected markers with exit
+code zero, confirmed process exit and settled effects, and produced one local
+Git commit. Its task record verified. The tested executable's SHA-256 is
+`ff2b38dab24fe2b9923327ded6158189151bf78d79598134a9e19dd57cdeacc7`.
+Host credential helpers resolve trusted absolute toolchain paths independently
+of the restricted PATH supplied by the login service. No remote write was tested.
+
+Claude's effective tool boundary passed startup checks, but an earlier
+account's signed-in session reported that the organization had disabled
+Claude Code subscription access. A later check confirmed the supported Claude
+build and refreshed an existing account's model catalog through startup and
+usage-metadata requests,
+without sending a coding prompt. All 46 targeted offline Claude tests passed.
+The account's quota and reset time remained unmeasured. These checks do not
+establish usable subscription access or clear the earlier organization refusal.
+A newly signed-in account then passed the Auto-mode startup checks on an
+account-pinned Sonnet session, but Claude rejected its prompt at the weekly
+usage limit, with a reported reset of 2026-10-06 at 03:00 UTC. Its process
+exited with no tool effects, and xcb recorded the account's quota block.
+Haiku was unsuitable for this check because it does not support Auto mode.
+The [provider method stages](provider-permissions.md#provider-method-coverage)
+add account-pinned native verification, startup/account inspection for both
+providers, Auto-compatible Claude catalogs, and one-shot cooperative
+cancellation. The task build accounts for all 262 methods in the checked
+Codex wire schema and all 29 pinned Claude SDK Query methods. Claude can
+request summary-only context and redacted MCP status for its metadata
+connection; this is not inspection of an active coding task. Codex metadata
+inspection creates no thread, submits no prompt, and consumes no reset
+credit. `xcb native status` adds a bounded local account/session/run/tool
+projection with exact filters, versioned JSON, JSONL records and cursors,
+while excluding transcript-derived titles and prompt text. Offline tests
+check method drift and refusal before execution; method accounting does not
+establish exhaustive live acceptance. Session,
+MCP, settings, and rewind controls retain separate scope, inventory, and
+recovery gates. These additions do not qualify Claude
+while subscription usage is exhausted or replace the validated live daemon.
+Claude native execution remains unavailable until authorized subscription
+usage and live acceptance succeed. Devin remains retired. Existing project
+grants and uncertain runs do not acquire wider access from these test results.
+[`native_backend.rs`](../crates/xcb-runtime/src/native_backend.rs) keeps the
+planned acceptance list separate from recorded availability.
 
 ### Scoped memory across worker and provider changes
 
@@ -394,6 +520,14 @@ regressions; they are never silently retried until they pass.
 - **M1 — agent-first local kernel:** remove the Ratatui surface, preserve
   agent/JSON parity, and pass native, compatibility, recovery, and operator
   acceptance checks.
+- **M1N — native workers:** implement Claude Code and Codex native
+  tool backends under the same durable task contract. For each exact runtime,
+  pass the declared native inventory, shell/toolchain, DNS/HTTPS, workspace
+  confinement, private account/configuration, authorized Git effects, approval
+  readback/denial, descendant cancellation, uncertain recovery, resume, and
+  cross-provider handoff cases before activation. Promote native execution to
+  the normal coding path only with rollback evidence; keep existing tasks and
+  uncertain runs under their original execution grants during migration.
 - **M2 — SDK and projections:** release Rust and TypeScript clients, a reference
   `/status` projection, schema-digest checks, and external-agent examples.
 - **M3 — measured harness:** connect ALGAL evidence and hill-climbing to route,

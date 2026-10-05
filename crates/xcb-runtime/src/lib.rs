@@ -45,18 +45,22 @@ pub mod kernel;
 pub mod managed;
 pub mod managed_program;
 mod managed_supervisor;
+pub mod native_backend;
 #[cfg(unix)]
 pub mod native_mcp;
+pub mod native_verification;
 pub mod offers;
 mod os;
 pub mod panes;
 pub mod private;
 pub mod process;
 mod protocol;
+pub mod provider_methods;
 #[cfg(any(all(test, unix), target_os = "macos"))]
 mod public_ca;
 pub mod qualification;
 pub mod reflex;
+pub mod retry;
 pub mod route;
 pub mod routing;
 pub mod routing_stack;

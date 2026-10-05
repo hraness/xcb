@@ -8,6 +8,71 @@ use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::PathBuf};
 use xcb_core::models::ModelChoice;
 
+#[derive(Clone, Copy)]
+pub(crate) enum MetadataQuery {
+    Usage,
+    McpStatus,
+    ContextSummary,
+}
+
+impl MetadataQuery {
+    fn request(self) -> Value {
+        let (id, request) = match self {
+            Self::Usage => (
+                "xcb_usage",
+                json!({"subtype":"get_usage","skip_behaviors":true}),
+            ),
+            Self::McpStatus => ("xcb_mcp_status", json!({"subtype":"mcp_status"})),
+            Self::ContextSummary => (
+                "xcb_context_summary",
+                json!({"subtype":"get_context_usage","detail":"summary"}),
+            ),
+        };
+        json!({"type":"control_request","request_id":id,"request":request})
+    }
+
+    fn response(self, frame: &[u8]) -> Result<Option<Value>> {
+        match claude::parse_event(frame)? {
+            claude::Event::Notice => Ok(None),
+            claude::Event::ControlResponse(value) => {
+                if value.pointer("/response/request_id") != Some(&self.request()["request_id"]) {
+                    return Err(Error::Protocol("metadata query response identity"));
+                }
+                if value.pointer("/response/subtype").and_then(Value::as_str) != Some("success") {
+                    return Err(Error::Protocol("metadata query unavailable"));
+                }
+                value
+                    .pointer("/response/response")
+                    .cloned()
+                    .map(Some)
+                    .ok_or(Error::Protocol("metadata query response"))
+            }
+            _ => Err(Error::Protocol("unexpected metadata query frame")),
+        }
+    }
+}
+
+pub(crate) async fn metadata_query(
+    process: &mut StreamProcess,
+    query: MetadataQuery,
+) -> Result<Value> {
+    process.send(&query.request()).await?;
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        for _ in 0..128 {
+            let frame = process
+                .frame()
+                .await?
+                .ok_or(Error::Protocol("metadata query connection ended"))?;
+            if let Some(value) = query.response(&frame)? {
+                return Ok(value);
+            }
+        }
+        Err(Error::Protocol("metadata query frame limit"))
+    })
+    .await
+    .map_err(|_| Error::Unavailable("metadata query timed out"))?
+}
+
 pub(crate) struct ClaudeProtocol {
     tools: bool,
     cwd: PathBuf,
@@ -16,6 +81,9 @@ pub(crate) struct ClaudeProtocol {
     completed_output: u64,
     current_output: u64,
     permission_denied: bool,
+    active: bool,
+    interrupted: bool,
+    metadata: Option<claude::Metadata>,
 }
 impl ClaudeProtocol {
     pub(crate) fn new(tools: bool, cwd: PathBuf, model: ModelChoice) -> Self {
@@ -27,19 +95,50 @@ impl ClaudeProtocol {
             completed_output: 0,
             current_output: 0,
             permission_denied: false,
+            active: false,
+            interrupted: false,
+            metadata: None,
         }
     }
 }
 impl Protocol for ClaudeProtocol {
+    fn account_identity(&self) -> (Option<String>, Option<String>) {
+        self.metadata.as_ref().map_or((None, None), |metadata| {
+            (
+                metadata.account.email.clone(),
+                metadata
+                    .account
+                    .subscription_type
+                    .as_ref()
+                    .map(|plan| format!("Claude {plan}")),
+            )
+        })
+    }
+
+    fn interruption(&mut self) -> Option<Value> {
+        if !self.active || self.interrupted {
+            return None;
+        }
+        self.interrupted = true;
+        Some(
+            json!({"type":"control_request","request_id":"xcb_interrupt","request":{"subtype":"interrupt"}}),
+        )
+    }
+
     async fn initialize(
         &mut self,
         process: &mut StreamProcess,
         instructions: &str,
     ) -> Result<Vec<ModelChoice>> {
-        runner::handshake(process, self.tools, instructions).await
+        let metadata = runner::handshake(process, self.tools, instructions).await?;
+        let models = metadata.models.clone();
+        self.metadata = Some(metadata);
+        Ok(models)
     }
     async fn start(&mut self, process: &mut StreamProcess, prompt: Prompt) -> Result<()> {
         self.permission_denied = false;
+        self.active = true;
+        self.interrupted = false;
         let mut content = vec![json!({"type":"text","text":prompt.text})];
         for image in prompt.images {
             content.push(json!({"type":"image","source":{"type":"base64","media_type":image.media_type,"data":image.base64}}));
@@ -119,6 +218,7 @@ impl Protocol for ClaudeProtocol {
                 models,
                 mut failure,
             } => {
+                self.active = false;
                 if failure == Some(xcb_core::policy::Failure::Policy) || self.permission_denied {
                     self.record_denial(&mut events);
                     terminal = xcb_core::policy::Terminal::Failed;
@@ -239,6 +339,105 @@ impl ClaudeProtocol {
 mod tests {
     use super::*;
     use xcb_core::{Id, Provider, models::Mode};
+    #[test]
+    fn metadata_queries_are_summary_only_correlated_and_never_dispatch_tools() {
+        assert_eq!(
+            MetadataQuery::ContextSummary.request()["request"],
+            json!({"subtype":"get_context_usage","detail":"summary"})
+        );
+        assert_eq!(
+            MetadataQuery::Usage.request()["request"]["skip_behaviors"],
+            true
+        );
+        for query in [
+            MetadataQuery::Usage,
+            MetadataQuery::McpStatus,
+            MetadataQuery::ContextSummary,
+        ] {
+            let id = query.request()["request_id"].clone();
+            let valid = json!({"type":"control_response","response":{"subtype":"success","request_id":id,"response":{}}});
+            assert_eq!(
+                query
+                    .response(&serde_json::to_vec(&valid).unwrap())
+                    .unwrap(),
+                Some(json!({}))
+            );
+            for bad in [
+                json!({"type":"control_response","response":{"subtype":"success","request_id":"foreign","response":{}}}),
+                json!({"type":"control_response","response":{"subtype":"error","request_id":id,"error":"SYNTHETIC_PRIVATE_DETAIL"}}),
+                json!({"type":"control_request","request_id":"tool","request":{"subtype":"mcp_message","server_name":"xcb","message":{"method":"tools/call"}}}),
+                json!({"type":"control_request","request_id":"permission","request":{"subtype":"can_use_tool"}}),
+                json!({"type":"result","subtype":"success","is_error":false,"result":"SYNTHETIC_PRIVATE_DETAIL"}),
+            ] {
+                let error = query
+                    .response(&serde_json::to_vec(&bad).unwrap())
+                    .unwrap_err();
+                assert!(!error.to_string().contains("SYNTHETIC_PRIVATE_DETAIL"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn metadata_queries_reject_eof_and_notice_floods_with_bounded_cleanup() {
+        for script in [
+            "exit 0",
+            "i=0; while [ $i -lt 128 ]; do printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"status\",\"status\":\"compacting\"}'; i=$((i+1)); done; cat >/dev/null",
+        ] {
+            let mut command = tokio::process::Command::new("/bin/sh");
+            command.arg("-c").arg(script);
+            let mut process = StreamProcess::spawn(command).unwrap();
+            assert!(
+                metadata_query(&mut process, MetadataQuery::McpStatus)
+                    .await
+                    .is_err()
+            );
+            assert!(process.join().await);
+        }
+    }
+
+    #[tokio::test]
+    async fn cooperative_interrupt_is_one_shot_and_only_for_an_active_turn() {
+        let root = tempfile::tempdir().unwrap();
+        let model = ModelChoice {
+            provider: Provider::Claude,
+            id: Id::new("fixture-model").unwrap(),
+            label: "Fixture".into(),
+            mode: Mode::Fixed,
+            resolved: None,
+            effort: None,
+            observed_at_ms: 1,
+        };
+        let mut protocol = ClaudeProtocol::new(false, root.path().to_owned(), model);
+        let mut process = StreamProcess::spawn(tokio::process::Command::new("/bin/cat")).unwrap();
+        assert!(protocol.interruption().is_none());
+        protocol
+            .start(
+                &mut process,
+                Prompt {
+                    text: "fixture".into(),
+                    images: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            protocol.interruption(),
+            Some(
+                json!({"type":"control_request","request_id":"xcb_interrupt","request":{"subtype":"interrupt"}})
+            )
+        );
+        assert!(protocol.interruption().is_none());
+        protocol
+            .receive(
+                &mut process,
+                br#"{"type":"result","subtype":"success","is_error":false,"result":"done"}"#,
+            )
+            .await
+            .unwrap();
+        assert!(protocol.interruption().is_none());
+        assert!(process.join().await);
+    }
+
     #[tokio::test]
     async fn advisory_denial_is_sticky_and_final_list_cannot_clear_it() {
         let model = ModelChoice {

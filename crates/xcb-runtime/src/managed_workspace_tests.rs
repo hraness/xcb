@@ -86,11 +86,15 @@ fn downgrade(state: &Path) {
         .unwrap();
 }
 
-/// A v7 value in its 0.8.x shape: keyed on a conversation, not a directory.
+/// A v7 value in its 0.8.x shape: keyed on a conversation, not a directory,
+/// and without the fields the herd dials added after v6.
 fn legacy(value: impl Serialize, conversation: &str) -> String {
     let mut value = serde_json::to_value(value).unwrap();
     let object = value.as_object_mut().unwrap();
     object.remove("workspace");
+    object.remove("repo");
+    object.remove("max_active");
+    object.remove("max_per_hour");
     object.insert("conversation".into(), json!(conversation));
     value.to_string()
 }
@@ -106,6 +110,9 @@ fn insert_legacy(db: &Connection, table: &str, key: &str, revision: u64, payload
 fn policy(workspace: &Path, enabled: bool, admitted: u32, revision: u64) -> ProjectPolicy {
     ProjectPolicy {
         workspace: text(workspace).into(),
+        repo: None,
+        max_active: 0,
+        max_per_hour: 0,
         generation: new_id("grant"),
         goal: "Maintain the project".into(),
         enabled,
@@ -403,6 +410,7 @@ async fn v7_single_grant_moves_preserving_generation_budget_revision_and_admitte
             generation: grant.generation.clone(),
             admitted: true,
             required_provider: Some(Provider::Codex),
+            admitted_at_ms: Some(now_ms()),
         });
         project::check_dispatch(&store.db().unwrap(), &task, now_ms()).unwrap();
         task.project_proposal.as_mut().unwrap().generation = new_id("grant");

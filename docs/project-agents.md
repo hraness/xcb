@@ -111,9 +111,12 @@ demonstrate and how to compare it without assuming token or cost savings.
 
 ```sh
 xcb projects configure <dir|name> "Maintain and improve the parser" --tasks 10 --hours 24
+xcb projects configure <dir|name> "Climb the migration" --tasks 100 --hours 720 --parallel 4 --per-hour 12
+xcb projects scale <dir|name> --parallel 1 --per-hour 4 --revision 3
+xcb projects status <dir|name>
 xcb projects --json
-xcb projects pause <dir|name> --revision 1
-xcb projects resume <dir|name> --revision 2
+xcb projects pause <dir|name> --revision 4
+xcb projects resume <dir|name> --revision 5
 ```
 
 In the TUI, use `/project grant 10 24 Maintain and improve the parser`, `/project`,
@@ -130,17 +133,74 @@ says `name the project: /project grant <name|dir> …`.
 `workspace`, `name`, and `status`, and `conversation` names the latest project
 view over that directory, or is null. CLI replacement grants
 require the current revision. A grant contains a user-authored goal, an expiry
-from one hour to 30 days, and a budget of 1–100 automatic follow-up tasks. An
+from one hour to 30 days, and a budget of 1–10,000 automatic follow-up tasks. An
 optional CLI `--provider` is a hard constraint inherited by automatic work.
 Configuring a grant does not invent an initial task: submit the first prompt,
 release a backlog item, or add a schedule to begin the project work.
 
-A grant authorizes automatic work in its own directory only. It covers every
+Two throughput dials scale token spend on a long-running project without
+editing it: `--parallel` (0–64) caps how many provider-bound tasks the project
+may run at once, and `--per-hour` (0–512) caps how many automatic tasks it may
+start per hour. `0` leaves the project's own limit unset; global capacity,
+account, and directory rules still apply. `xcb projects scale` changes the
+dials under the same revision check as every grant change, and
+`xcb projects status` shows live workers, open and unfinished work, starts in
+the current hour, and the schedules feeding the project.
+
+The global `max_active_runs` setting is a ceiling of 1–64 tasks;
+`max_runs_per_account` caps each subscription at 1–32 simultaneous runs.
+With `adaptive_parallelism` enabled, the supervisor starts at one and reviews
+capacity every 30 seconds. It adds at most one slot when the current target is
+occupied, another independent workspace has ready work, and local account data
+shows spare capacity with positive remaining quota. Paused, deferred, held,
+recovering and waiting-for-input work does not justify growth. Account access,
+provider/model support and workspace checks still run for each launch.
+
+Host pressure halves the target. Host warnings prevent growth, and a shortage
+of account capacity or ready work reduces it. Reducing the target lets running
+work finish. Resource protection must be enabled and reporting successfully to
+observe host pressure; when disabled, it supplies no host-health evidence.
+Unknown quota cannot justify adding slots, though the normal router may still
+attempt work at the current target. A restart begins at one again. The latest
+local decision, timestamp, demand and reason are saved in
+`managed/adaptive-capacity.json` under the state directory. This is an
+observation, so check its timestamp when the supervisor is stopped.
+
+These controls limit concurrency and starts, not tokens or dollars. Managed
+accounts currently have no token-runway estimate. Priority then age determines
+which ready task gets a slot; projects have caps, without weighted fair shares.
+A sequential program stays sequential even if its project's cap increases.
+
+For a month of unattended work, budget every child and leave recovery headroom.
+An hourly program with five agent cells needs about 3,600 child tasks over 30
+days, plus about 720 parent records. The explicit 10,000-task grant maximum
+supports that budget; existing grants keep their original limits. Expiry stays
+at most 30 days and is never renewed automatically. The shared store keeps up
+to 65,536 task records, with separate limits of 128 unfinished tasks, 128
+schedules, 200,000 messages and a 4 GiB database. Large outputs or many projects
+can reach another bound first. Status and preflight estimates should inform the
+budget; a large grant does not promise a month of available subscription usage.
+Retention keeps its existing 30-day horizon and protects unresolved work and
+dependencies. Increasing capacity does not delete history.
+
+Routing and continuation rules can learn from local labeled outcomes, compare
+candidates against fresh labels, and keep versioned parameters for rollback.
+This does not yet optimize project progress per token or automatically roll
+back a policy after a production regression. A month-long deployment still
+needs an external, tested recovery copy and reviewable records of goals,
+validation results and blockers. No schedule or grant is created by changing
+these limits.
+
+A grant authorizes automatic work in its own directory. It covers every
 task bound there, from the thread, a project view, or a remote dispatch, and no
 task in any other directory, even one in the same thread. An explicit binding to
 a subdirectory such as `/repo/sub` is a different project from `/repo`; prompts
 that mention a path inside a repository bind to the repository root, so the
-root's grant applies to them.
+root's grant applies to them. Linked worktrees of the same repository are the
+one exception: they share the checkout's pause and throughput limits, so
+automatic work across the whole family slows together rather than racing on
+sibling checkouts. Your own prompts never wait for the dials — they count as
+live work but are not rate-limited as automatic starts.
 
 Workers propose deferred follow-ups with `xcb_backlog_add`. xcb admits one only
 when its parent completed conclusively, the proposal belongs to the current
@@ -161,9 +221,14 @@ ordinary per-task attempt/time limits; pause them separately when ending them.
 ## Schedules and startup
 
 ```sh
+xcb schedules
 xcb schedules add <dir|name> "Inspect the project and report the next useful step" --every 3600
-xcb schedules pause <schedule-id> --revision 1
-xcb schedules resume <schedule-id> --revision 2
+xcb schedules show <schedule-id>
+xcb schedules edit <schedule-id> --revision 2 --every 7200 --next-in 300
+xcb schedules pause <schedule-id> --revision 3
+xcb schedules resume <schedule-id> --revision 4
+xcb schedules delete <schedule-id> --revision 5
+xcb schedules --workspace ~/src/app --enabled --due
 ```
 
 Use `/schedule`, `/schedule all`, `/schedule every 3600 <prompt>`, and
@@ -176,6 +241,13 @@ project view, and the thread's ID needs `--workspace <dir>`. The host owns the c
 scheduler is involved. Downtime coalesces missed intervals into one occurrence.
 Durable occurrence identities prevent duplicate enqueue, and outstanding work,
 questions or uncertainty block overlapping project occurrences.
+
+Every mutation takes the schedule's current revision, so an edit and a wake-up
+can never interleave into a half-applied change. The list view reports why a
+due schedule is not running — a paused project, open work, an unfinished
+previous run, or the project's hourly start limit — and its wake-up stays put
+until the blocker clears instead of being silently skipped. `xcb native
+status --json` carries the same schedule and project sections for agents.
 
 The supervisor remains alive while enabled schedules exist. Closing the terminal
 detaches; reopening xcb resumes persisted state. Opt-in [macOS login
@@ -328,3 +400,6 @@ How the upgrade treats existing settings:
   its open conflicts. A notice in the terminal stays up while any remain.
 - A project view rooted at your home directory or a hidden directory inside it
   can no longer start tasks; use a project directory instead.
+
+See [unattended operation](unattended-operations.md) for recovery, account health,
+completion checks, and the limits of month-long operation.

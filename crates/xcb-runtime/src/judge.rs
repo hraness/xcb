@@ -21,6 +21,9 @@ use zeroize::Zeroizing;
 
 use crate::{Error, Result, config::JudgeConfig, private};
 
+#[path = "judge_chat.rs"]
+pub mod chat;
+
 /// One yes/no question; the answer is a probability in `[0, 1]`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -355,9 +358,9 @@ pub fn judge_token(root: &Path) -> Result<Option<(Zeroizing<String>, JudgeKeySou
 /// key; future backends own distinct credential custody rather than repurposing
 /// the System One vault.
 pub fn check_key_target(source: JudgeKeySource, config: &JudgeConfig) -> Result<()> {
-    if config.is_clef() {
+    if config.is_clef() || config.is_chat() {
         return Err(Error::Unavailable(
-            "legacy System One keys cannot authenticate Cloudflare Clef",
+            "legacy System One keys cannot authenticate another judge provider",
         ));
     }
     if crate::jev::Endpoint::parse(&crate::jev::effective_target(config)?.1)?.host
@@ -384,16 +387,23 @@ pub fn check_key_target(source: JudgeKeySource, config: &JudgeConfig) -> Result<
     Ok(())
 }
 
-pub fn effective_target(config: &JudgeConfig) -> Result<(Id, Option<String>)> {
-    if config.is_clef() {
-        crate::clef::effective_target(config)
+pub fn effective_target(config: &JudgeConfig) -> Result<(String, Option<String>)> {
+    if config.is_chat() {
+        let target = chat::target(config)?;
+        Ok((target.model, Some(target.endpoint)))
+    } else if config.is_clef() {
+        let (model, endpoint) = crate::clef::effective_target(config)?;
+        Ok((model.into(), endpoint))
     } else {
         let (model, endpoint) = crate::jev::effective_target(config)?;
-        Ok((model, Some(endpoint)))
+        Ok((model.into(), Some(endpoint)))
     }
 }
 
 pub fn configured_key(root: &Path, config: &JudgeConfig) -> Result<Option<JudgeKeySource>> {
+    if config.is_chat() {
+        return Ok(chat::token(root, config)?.map(|(_, source)| source));
+    }
     if config.is_clef() {
         Ok(crate::clef::token()?.map(|_| JudgeKeySource::Env))
     } else {
@@ -411,6 +421,9 @@ pub fn configured_key(root: &Path, config: &JudgeConfig) -> Result<Option<JudgeK
 pub fn resolve(root: &Path, config: &JudgeConfig) -> Result<Option<Arc<dyn Judge>>> {
     if !config.enabled {
         return Ok(None);
+    }
+    if config.is_chat() {
+        return chat::resolve(root, config);
     }
     if config.is_clef() {
         return crate::clef::resolve(config);

@@ -187,6 +187,81 @@ async fn pause_race_cannot_publish_a_schedule_occurrence() {
 }
 
 #[tokio::test]
+async fn schedule_edit_delete_and_view_project_blocker_and_outcome() {
+    let f = fixture().await;
+    let now = now_ms();
+    let schedule = f
+        .managed
+        .create_schedule(&f.conversation, "sweep".into(), 60_000, now)
+        .await
+        .unwrap();
+    // Due and enabled with open work: the view names the blocker.
+    let open = enqueue(&f, "in progress", false).await;
+    let view = f.managed.schedule_view(&schedule).unwrap();
+    assert_eq!(view.workspace.as_deref(), f.workspace.to_str());
+    assert_eq!(view.blocker.as_deref(), Some("1 open task in this project"));
+    assert!(view.last_task_state.is_none());
+    // Once the work settles the view is clear.
+    set_state(&f, &open, TaskState::Completed).await;
+    assert!(
+        f.managed
+            .schedule_view(&schedule)
+            .unwrap()
+            .blocker
+            .is_none()
+    );
+    // Edits carry the revision check; a stale handle cannot overwrite.
+    let edited = f
+        .managed
+        .update_schedule(
+            &schedule.id,
+            schedule.revision,
+            Some("deep sweep".into()),
+            Some(120_000),
+            Some(now + 5_000),
+        )
+        .unwrap();
+    assert_eq!(edited.prompt, "deep sweep");
+    assert_eq!(edited.interval_ms, 120_000);
+    assert_eq!(edited.next_due_ms, now + 5_000);
+    assert!(
+        f.managed
+            .update_schedule(
+                &schedule.id,
+                schedule.revision,
+                Some("stale".into()),
+                None,
+                None
+            )
+            .is_err()
+    );
+    assert!(
+        f.managed
+            .update_schedule(&schedule.id, edited.revision, None, None, None)
+            .is_err()
+    );
+    // One dispatch stamps the last outcome into the view.
+    f.managed.tick_schedules(now + 5_000).await.unwrap();
+    let current = f.managed.schedule(&schedule.id).unwrap().unwrap();
+    assert!(current.last_task.is_some());
+    let view = f.managed.schedule_view(&current).unwrap();
+    assert_eq!(view.last_task_state, Some(TaskState::Queued));
+    assert!(view.last_task_detail.is_some());
+    // Deletion is revision-checked and leaves no row behind.
+    assert!(f.managed.delete_schedule(&schedule.id, 1).is_err());
+    f.managed
+        .delete_schedule(&schedule.id, current.revision)
+        .unwrap();
+    assert!(f.managed.schedule(&schedule.id).unwrap().is_none());
+    assert!(
+        f.managed
+            .schedule_views(Some(&f.conversation))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn unresolved_attention_and_uncertainty_block_timer_work_and_survive_retention() {
     let f = fixture().await;
     let task = enqueue(&f, "existing work", false).await;
@@ -872,7 +947,16 @@ async fn thread_children_carry_inherited_bindings_and_replay_exactly() {
     let store = Store::open(&state).unwrap();
     let thread = thread(&managed).await;
     managed
-        .configure_project_policy_in(&a, None, "Maintain A".into(), 8, now_ms() + 7_200_000, None)
+        .configure_project_policy_in(
+            &a,
+            None,
+            "Maintain A".into(),
+            8,
+            now_ms() + 7_200_000,
+            None,
+            0,
+            0,
+        )
         .unwrap();
 
     // Schedule occurrence.

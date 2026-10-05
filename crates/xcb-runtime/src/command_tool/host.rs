@@ -160,16 +160,42 @@ async fn host_value(
     Ok(Some(Zeroizing::new(trimmed.to_owned())))
 }
 
+fn host_path(current: Option<String>) -> Result<String> {
+    let mut path =
+        current.unwrap_or_else(|| "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin".into());
+    if path.len() > 4096
+        || path.contains(['\0', '\r', '\n'])
+        || path
+            .split(':')
+            .any(|root| !xcb_core::absolute_clean(Path::new(root)))
+    {
+        return Err(Error::PrivateState);
+    }
+    for root in [
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+        "/usr/local/bin",
+        "/opt/homebrew/bin",
+    ] {
+        if !path.split(':').any(|existing| existing == root) {
+            path.push(':');
+            path.push_str(root);
+        }
+    }
+    if path.len() > 4096 {
+        return Err(Error::PrivateState);
+    }
+    Ok(path)
+}
+
 async fn credentials(cancel: watch::Receiver<bool>) -> Result<(Credentials, PathBuf, String)> {
     let home = PathBuf::from(std::env::var_os("HOME").ok_or(Error::PrivateState)?);
     if !home.is_absolute() || xcb_core::canonical(&home)? != home {
         return Err(Error::PrivateState);
     }
-    let path = std::env::var("PATH")
-        .unwrap_or_else(|_| "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin".into());
-    if path.len() > 4096 || path.contains(['\0', '\n']) {
-        return Err(Error::PrivateState);
-    }
+    let path = host_path(std::env::var("PATH").ok())?;
     let token = host_value("gh", &["auth", "token"], &home, &path, 4096, cancel.clone())
         .await?
         .ok_or(Error::Unavailable(
@@ -416,10 +442,67 @@ pub(super) async fn call(
     execute(root, request, credentials, home, path, cancel, &env_root).await
 }
 
+#[cfg(target_os = "macos")]
+pub(super) async fn native_environment(
+    command: &mut Command,
+    directory: &Path,
+    home: &Path,
+    path: &str,
+    github: bool,
+    cancel: watch::Receiver<bool>,
+) -> Result<Zeroizing<String>> {
+    command
+        .env_clear()
+        .env("HOME", home)
+        .env("PATH", path)
+        .env("TMPDIR", home.join("tmp"))
+        .env("LANG", "en_US.UTF-8")
+        .env("NO_COLOR", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+    if !github {
+        return Ok(Zeroizing::new(String::new()));
+    }
+    let (mut credentials, _, _) = credentials(cancel).await?;
+    credentials.ssh_socket = None;
+    child_environment(command, directory, &credentials, home, path)?;
+    command
+        .env("TMPDIR", home.join("tmp"))
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+    Ok(credentials.token)
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn credential_helpers_complete_service_paths_without_losing_host_toolchains() {
+        let path = host_path(Some("/usr/bin:/bin:/usr/sbin:/sbin:/trusted/bin".into())).unwrap();
+        let roots: Vec<_> = path.split(':').collect();
+        assert_eq!(
+            &roots[..5],
+            &["/usr/bin", "/bin", "/usr/sbin", "/sbin", "/trusted/bin"]
+        );
+        for root in ["/usr/local/bin", "/opt/homebrew/bin"] {
+            assert!(roots.contains(&root), "{root}");
+        }
+        assert_eq!(host_path(Some(path.clone())).unwrap(), path);
+        for path in [
+            "",
+            "/usr/bin\n/bin",
+            "/usr/bin\r/bin",
+            "/usr/bin::/bin",
+            "/usr/bin:.",
+            "relative",
+        ] {
+            assert!(host_path(Some(path.to_string())).is_err(), "{path:?}");
+        }
+        for path in ["x".repeat(4097), format!("/{}", "x".repeat(4090))] {
+            assert!(host_path(Some(path)).is_err());
+        }
+    }
 
     #[test]
     fn request_is_closed_and_bounded() {
