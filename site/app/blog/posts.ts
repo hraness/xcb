@@ -1,6 +1,7 @@
 import type {
   ArticleAdmission,
   ArticleAuthor,
+  ArticleHumanReview,
   ArticleIsoDate,
   ArticleReview,
   ArticleSourceItem,
@@ -37,14 +38,20 @@ const revisionAt = (path: string) => `https://github.com/hraness/xcb/blob/1e6435
 /** Sources pinned to the commits the fact check read. */
 const xcbAt = (rev: string, path: string) => `https://github.com/hraness/xcb/blob/${rev}/${path}`;
 
-/** Independent launch copy and source review; prior records are archived in docs/editorial. */
-const beatsReview: ArticleReview = {
-  reviewer: "Codex",
-  reviewerType: "ai",
-  reviewedOn: "2026-10-01",
-};
-const beatsAt = (path: string) => xcbAt("1e64357a40fb9b0cb167e9803bc572675100d469", path);
-const beatsCheckedOn: ArticleIsoDate = "2026-10-01";
+/**
+ * Ben Guo's review in the October 4 editorial pass, recorded both as the
+ * review of the posts it revised and as the human review of every post.
+ * Earlier records are archived in docs/editorial.
+ */
+const editorReview = {
+  reviewer: "Ben Guo",
+  reviewerType: "human-editor",
+  reviewedOn: "2026-10-04",
+} as const satisfies ArticleHumanReview;
+const editorCheckedOn: ArticleIsoDate = "2026-10-04";
+const editorReassessOn: ArticleIsoDate = "2026-11-15";
+/** Sources the October 4 pass checked, pinned to the v0.18.0 release tag. */
+const releaseAt = (path: string) => xcbAt("v0.18.0", path);
 
 export type BlogPost = Readonly<{
   slug: string;
@@ -77,7 +84,10 @@ function sourceRecords(sources: readonly ArticleSourceItem[]) {
 
 function post(
   entry: Omit<BlogPost, "admission"> & Readonly<{
-    admission: Omit<ArticleAdmission, "href" | "sources" | "drafting" | "humanReview" | "owner">;
+    admission: Omit<ArticleAdmission, "href" | "sources" | "drafting" | "humanReview" | "owner"> & Readonly<{
+      /** A person's review on record. Never an AI review; AI review stays in `review`. */
+      humanReview?: ArticleHumanReview | null;
+    }>;
   }>,
 ): BlogPost {
   return {
@@ -88,37 +98,87 @@ function post(
       sources: sourceRecords(entry.sources),
       owner: "Hraness",
       drafting: "ai-from-source",
-      humanReview: null,
+      humanReview: entry.admission.humanReview ?? null,
     },
   };
 }
 
 export const blogPosts: readonly BlogPost[] = [
   post({
+    slug: "how-xcb-uses-aicharts",
+    title: "How xcb uses aicharts to show your token use",
+    dek: "The xcb installer adds aicharts, which keeps a daily record of your agents' token use on your computer.",
+    eyebrow: "Integration",
+    published: "2026-10-04",
+    keywords: ["xcb", "aicharts", "token usage", "coding agents", "Claude Code", "Codex", "MCP"],
+    relation: "runtime:xcb:aicharts:installs",
+    statusInBody: false,
+    sources: [
+      { title: "xcb usage: forwarded history commands and the connect registration", href: releaseAt("crates/xcb-cli/src/usage.rs"), checkedOn: editorCheckedOn },
+      { title: "Installer: pinned aicharts digests, signature check and first-install history", href: releaseAt("scripts/install.sh"), checkedOn: editorCheckedOn },
+      { title: "Usage history tools: what connect registers and when to renew it", href: releaseAt("docs/tools.md"), checkedOn: editorCheckedOn },
+      { title: "xcb doctor usage-history line", href: releaseAt("crates/xcb-cli/src/doctor.rs"), checkedOn: editorCheckedOn },
+      { title: "Provider runs: private Claude Code and Codex profiles, Claude without saved sessions", href: releaseAt("crates/xcb-runtime/src/runner.rs"), checkedOn: editorCheckedOn },
+      { title: "Usage extensions and local aicharts exports", href: releaseAt("crates/xcb-runtime/src/exports.rs"), checkedOn: editorCheckedOn },
+      { title: "aicharts usage history and agent queries", href: "https://github.com/hraness/aicharts/blob/main/docs/usage-history.md", checkedOn: editorCheckedOn },
+      { title: "aicharts CLI 0.3.1 release", href: "https://github.com/hraness/aicharts/releases/tag/cli-v0.3.1", checkedOn: editorCheckedOn },
+    ],
+    admission: {
+      lifecycle: "indexable",
+      readerJob: "Find out what the xcb installer adds for usage history, how to read it, and how to let routed tasks query it.",
+      nonObviousAnswer: "xcb's quota view and aicharts' record answer different questions, the record covers the agents' own session folders but not the runs xcb starts, and the tools xcb usage connect gives tasks are pinned to one aicharts build, so they need reconnecting after an aicharts update; the installer and xcb doctor handle that.",
+      originalContribution: "The installer's checks and defaults, the five forwarded history commands, the pinned host tool registration and its renewal path, and why xcb's own runs stay out of the record, read from xcb's usage.rs, install.sh, doctor.rs, runner.rs, exports.rs and docs/tools.md at v0.18.0.",
+      hostFit: "A How xcb uses aicharts post on xcb's host for the registered relation runtime:xcb:aicharts:installs, expanding its detail sentence.",
+      nearestUrls: [
+        { url: "/docs/reference", distinction: "The reference lists the commands; the post explains where the numbers come from and what connect registers." },
+        { url: "https://aicharts.io/usage", distinction: "aicharts' page covers the collector and its dashboard; this post covers what xcb installs and exposes to tasks." },
+      ],
+      observations: [
+        "The installer verifies the aicharts archive against digests pinned in scripts/install.sh, not a checksum file fetched alongside it.",
+        "Host tool servers get a private home, so the registration names aicharts' record folder through AICHARTS_HOME.",
+        "xcb starts Claude Code with --no-session-persistence and a private CLAUDE_CONFIG_DIR, and Codex with a private CODEX_HOME, so aicharts' daily record does not see xcb's own runs.",
+      ],
+      scores: { readerUtility: 2, originalEvidence: 1, factualConfidence: 2, hostFit: 2, voiceIntegrity: 2, maintenanceValue: 2 },
+      review: editorReview,
+      humanReview: editorReview,
+      reassessOn: editorReassessOn,
+      harmIfWrong: "A reader could confuse quota left with spend, expect usage data to leave the computer, expect xcb's own runs in the daily record, or miss that the task tools need reconnecting after an aicharts update.",
+      refreshTriggers: [
+        "Change to the relation runtime:xcb:aicharts:installs",
+        "Change to the pinned aicharts version or digests in scripts/install.sh",
+        "Change to the forwarded commands or the registration in crates/xcb-cli/src/usage.rs",
+        "Change to aicharts' collection schedule or MCP tools",
+        "A change to where xcb's provider runs keep session files, or aicharts reading xcb's exports",
+        "xcb release tag bump",
+        "Rename of xcb or aicharts",
+      ],
+    },
+  }),
+  post({
     slug: launchPostSlug,
     title: "Introducing Excalibur: one agent for all your AI coding plans",
     dek: "Run tasks across your Claude and Codex plans, use available quota, and keep work moving between accounts.",
     eyebrow: "Launch",
-    updated: "2026-10-01",
+    updated: "2026-10-04",
     published: "2026-09-29",
     keywords: ["xcb", "Excalibur", "Claude Code", "Codex", "multiple AI subscriptions", "usage limits", "coding agents"],
     relation: "all",
     statusInBody: false,
     format: "beats",
     sources: [
-      { title: "xcb README: providers, how routing works, everyday commands, limits", href: beatsAt("README.md"), checkedOn: beatsCheckedOn },
-      { title: "Quota routing: fresh usage within five minutes, Claude and Codex windows, failover on a reported limit", href: beatsAt("docs/quota-routing.md"), checkedOn: beatsCheckedOn },
-      { title: "Remote operations: xcb link, fleet, dispatch, end-to-end encrypted task content, your own relay", href: beatsAt("docs/remote-operations.md"), checkedOn: beatsCheckedOn },
-      { title: "Route contract: the JSON request and result", href: beatsAt("docs/route.md"), checkedOn: beatsCheckedOn },
-      { title: "Launch facts", href: beatsAt("site/app/launch/facts.ts"), checkedOn: beatsCheckedOn },
-      { title: "Registered host tools and browser access", href: beatsAt("docs/tools.md"), checkedOn: beatsCheckedOn },
-      { title: "Published release record", href: beatsAt("site/published-release.json"), checkedOn: beatsCheckedOn },
+      { title: "xcb README: providers, how routing works, everyday commands, limits", href: releaseAt("README.md"), checkedOn: editorCheckedOn },
+      { title: "Quota routing: fresh usage within five minutes, Claude and Codex windows, failover on a reported limit", href: releaseAt("docs/quota-routing.md"), checkedOn: editorCheckedOn },
+      { title: "Agent and SDK interface: xcb run, the JSON route, and task projections", href: releaseAt("docs/terminal.md"), checkedOn: editorCheckedOn },
+      { title: "Route contract: the JSON request and result", href: releaseAt("docs/route.md"), checkedOn: editorCheckedOn },
+      { title: "Launch facts", href: releaseAt("site/app/launch/facts.ts"), checkedOn: editorCheckedOn },
+      { title: "Registered host tools and browser access", href: releaseAt("docs/tools.md"), checkedOn: editorCheckedOn },
+      { title: "Published release record", href: xcbAt("c0ff3abb21a04df49dc17f15c8ddf61e8bf3d7b0", "site/published-release.json"), checkedOn: editorCheckedOn },
     ],
     admission: {
       lifecycle: "indexable",
       readerJob: "Decide in a minute whether xcb is for you when you pay for more than one AI coding plan, and share the one piece that makes the case.",
       nonObviousAnswer: "xcb does not add capacity; it spends the quota you already have in the right order, favoring unused quota close to a reset, and moves a task to another account when a provider reports a limit mid-task.",
-      originalContribution: "Ten standalone claims, each checked against xcb's README and docs at the pinned commit and paired with an illustration drawn from the CLI's own output shapes, which the social posts are cut from without rewording.",
+      originalContribution: "Nine standalone claims, each checked against xcb's README and docs at v0.18.0 and paired with an illustration drawn from the CLI's own output shapes, which the social posts are cut from without rewording.",
       hostFit: "The product's own launch post on its own host, with the long introduction at /blog/introducing-excalibur as its technical companion.",
       nearestUrls: [
         { url: "/blog/introducing-excalibur", distinction: "The introduction follows one task through sign-in, sandbox, and recorded outcome in long form; this post gives the same product as short standalone claims for a first look and for sharing." },
@@ -126,17 +186,19 @@ export const blogPosts: readonly BlogPost[] = [
       ],
       observations: [
         "Every number in the post comes from app/launch/facts.ts, and tests read the README and docs to check each one.",
-        "The illustrations reuse the exact line shapes `xcb accounts`, `xcb tasks`, `xcb attention`, and `xcb fleet` print, and a test fails if a shape drifts from the CLI source.",
+        "The illustrations reuse the exact line shapes `xcb accounts`, `xcb tasks`, `xcb attention`, and the managed runtime's start and limit notices print, and a test fails if a shape drifts from the CLI source.",
       ],
       scores: { readerUtility: 2, originalEvidence: 1, factualConfidence: 2, hostFit: 2, voiceIntegrity: 2, maintenanceValue: 2 },
-      review: beatsReview,
-      reassessOn: "2026-11-12",
-      harmIfWrong: "A reader could expect xcb to add usage, to keep provider plugins inside its runs, or to move every task on any limit, and pay for a plan they would not use.",
+      review: editorReview,
+      humanReview: editorReview,
+      reassessOn: editorReassessOn,
+      harmIfWrong: "A reader could expect xcb to add usage, to keep provider plugins inside its runs, to open an interactive terminal, or to move every task on any limit, and pay for a plan they would not use.",
       refreshTriggers: [
         "xcb release tag bump (site/published-release.json)",
         "A change to quota routing freshness, the windows xcb reads, or failover on a reported limit",
-        "A change to xcb link, fleet, dispatch, or relay encryption",
-        "A change to the output shapes of xcb accounts, tasks, attention, or fleet",
+        "A change to xcb run, xcb backlog, or the background supervisor that runs managed tasks",
+        "Remote commands returning, for example over Valhalla",
+        "A change to the output shapes of xcb accounts, tasks, attention, or the managed runtime notices",
       ],
     },
   }),
@@ -145,21 +207,23 @@ export const blogPosts: readonly BlogPost[] = [
     title: "Introducing Excalibur",
     dek: "xcb, short for Excalibur, sends each coding task to one of your Claude or Codex accounts that is signed in, idle, and not at a known usage limit.",
     eyebrow: "Release",
-    updated: "2026-10-01",
+    updated: "2026-10-04",
     published: "2026-09-27",
     keywords: ["xcb", "Excalibur", "coding agents", "routing", "Claude Code", "Codex"],
     relation: "all",
     statusInBody: true,
     sources: [
-      { title: "Current provider support and task routing", href: revisionAt("README.md"), checkedOn: revisionCheckedOn },
-      { title: "Claude and Codex usage, cooldowns, and account constraints", href: revisionAt("docs/quota-routing.md"), checkedOn: revisionCheckedOn },
-      { title: "Registered host tools and browser access", href: revisionAt("docs/tools.md"), checkedOn: revisionCheckedOn },
+      { title: "Current provider support, task routing, and the headless commands", href: releaseAt("README.md"), checkedOn: editorCheckedOn },
+      { title: "Agent and SDK interface: xcb run, the JSON route, and task projections", href: releaseAt("docs/terminal.md"), checkedOn: editorCheckedOn },
+      { title: "Claude and Codex usage, cooldowns, and account constraints", href: releaseAt("docs/quota-routing.md"), checkedOn: editorCheckedOn },
+      { title: "Registered host tools and browser access", href: releaseAt("docs/tools.md"), checkedOn: editorCheckedOn },
+      { title: "Installer: xcb and the pinned aicharts build", href: releaseAt("scripts/install.sh"), checkedOn: editorCheckedOn },
     ],
     admission: {
       lifecycle: "indexable",
       readerJob: "Decide whether xcb is worth installing today when you pay for more than one of Claude and Codex or build agent tooling, and know the first commands to run.",
       nonObviousAnswer: "xcb runs provider tools under your sign-in, holds an account until the provider process exits, and sandboxes the run. The route command picks the account and model; an SDK host names both. Registered host tools run separately with their own permissions.",
-      originalContribution: "One account of how xcb runs a task, the thread and the route and SDK uses, its account, sandbox, host-tool, and usage limits, revised against current xcb source and linked to detailed guides.",
+      originalContribution: "One account of how xcb runs a task, the headless run, backlog, route, and SDK uses, and its account, sandbox, host-tool, and usage limits, revised against the v0.18.0 source and linked to detailed guides.",
       hostFit: "The product’s introduction on its own host; the retired Introducing xcb URL redirects here.",
       nearestUrls: [
         { url: "/docs/getting-started", distinction: "The guide gives install and sign-in steps for each provider; the post explains what xcb does, who it suits, and its limits, and ends with the shortest start." },
@@ -171,11 +235,13 @@ export const blogPosts: readonly BlogPost[] = [
         "Fresh Claude and Codex usage reports affect account preference only within the task’s quality requirements and explicit account, model, or provider constraints.",
       ],
       scores: { readerUtility: 2, originalEvidence: 1, factualConfidence: 2, hostFit: 2, voiceIntegrity: 2, maintenanceValue: 2 },
-      review: revisionReview,
-      reassessOn: "2026-11-12",
-      harmIfWrong: "A reader could install xcb expecting Linux coding sessions or the newest Codex build to work today, run several accounts believing xcb raises usage limits, or enable a hook believing it runs inside xcb's sandbox.",
+      review: editorReview,
+      humanReview: editorReview,
+      reassessOn: editorReassessOn,
+      harmIfWrong: "A reader could install xcb expecting Linux coding sessions, the newest Codex build, or an interactive terminal to work today, run several accounts believing xcb raises usage limits, or enable a hook believing it runs inside xcb's sandbox.",
       refreshTriggers: [
         "xcb release tag bump (site/published-release.json)",
+        "A change to xcb run, xcb backlog, or the background supervisor that runs backlog tasks",
         "A change to which providers have a confirmed coding session, or to the supported Codex builds: update the Limits paragraph",
         "A change to the supported Codex builds (qualified-builds.json) or the Claude Code version floor, or a coding session confirmed for Claude on Linux or on the current Codex build",
         "The one-line installer at /install.sh shipping, changing its platforms, or being withdrawn, or a change to xcb setup",
@@ -216,6 +282,7 @@ export const blogPosts: readonly BlogPost[] = [
       ],
       scores: { readerUtility: 2, originalEvidence: 1, factualConfidence: 2, hostFit: 2, voiceIntegrity: 2, maintenanceValue: 2 },
       review: revisionReview,
+      humanReview: editorReview,
       reassessOn: "2026-11-12",
       harmIfWrong: "A reader could expect elided output to be gone for good, or expect provider sessions to be trimmed, and size their sessions on a wrong assumption.",
       refreshTriggers: [
@@ -260,6 +327,7 @@ export const blogPosts: readonly BlogPost[] = [
       ],
       scores: { readerUtility: 2, originalEvidence: 2, factualConfidence: 2, hostFit: 2, voiceIntegrity: 2, maintenanceValue: 2 },
       review: revisionReview,
+      humanReview: editorReview,
       reassessOn: "2026-11-12",
       harmIfWrong: "A reader could treat a passing check as proof the agent's work is right, or run it against their only state directory.",
       refreshTriggers: [
@@ -305,6 +373,7 @@ export const blogPosts: readonly BlogPost[] = [
       ],
       scores: { readerUtility: 2, originalEvidence: 1, factualConfidence: 2, hostFit: 2, voiceIntegrity: 2, maintenanceValue: 2 },
       review: revisionReview,
+      humanReview: editorReview,
       reassessOn: "2026-11-12",
       harmIfWrong: "A reader could let reflexes answer go-ahead requests on the belief that a certificate guarantees a correct call.",
       refreshTriggers: [
@@ -345,6 +414,7 @@ export const blogPosts: readonly BlogPost[] = [
       ],
       scores: { readerUtility: 2, originalEvidence: 1, factualConfidence: 2, hostFit: 2, voiceIntegrity: 2, maintenanceValue: 2 },
       review: revisionReview,
+      humanReview: editorReview,
       reassessOn: "2026-11-12",
       harmIfWrong: "A reader could place a vault inside the workspace believing workers cannot write to it.",
       refreshTriggers: [

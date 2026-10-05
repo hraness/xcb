@@ -521,7 +521,7 @@ test("native install reclaims a lock whose owner died before recording its pid",
 // scripts/install.sh, the xcb.sh bootstrap, must accept exactly the hosts the
 // tag-pinned installer can install, and stop early when the requested release
 // has no archive for this host.
-function bootstrap(system: string, machine: string, assetStatus = "200") {
+function bootstrap(system: string, machine: string, assetStatus = "200", extraEnv: Record<string, string> = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "xcb-bootstrap-")));
   roots.push(root);
   const stubs = join(root, "stubs");
@@ -545,6 +545,7 @@ while [ "$#" -gt 0 ]; do
 done
 printf '%s %s\\n' "$head" "$url" >> "$FIXTURE_CURL_LOG"
 if [ "$head" = yes ]; then printf '%s' "$FIXTURE_ASSET_STATUS"; exit 0; fi
+case "$url" in */aicharts-*) cp "$FIXTURE_AICHARTS_ARCHIVE" "$out"; exit 0 ;; esac
 printf '#!/bin/sh\\n# Install native xcb stand-in\\nprintf "%%s\\\\n" "$XCB_VERSION" > "$FIXTURE_INSTALLER_LOG"\\n' > "$out"
 `, { mode: 0o755 });
   const result = completed(spawnSync("/bin/sh", [new URL("./install.sh", import.meta.url).pathname], {
@@ -554,11 +555,95 @@ printf '#!/bin/sh\\n# Install native xcb stand-in\\nprintf "%%s\\\\n" "$XCB_VERS
       XCB_VERSION: "0.4.0", XCB_INSTALL_PREFIX: join(root, "prefix"),
       FIXTURE_UNAME_S: system, FIXTURE_UNAME_M: machine, FIXTURE_ASSET_STATUS: assetStatus,
       FIXTURE_CURL_LOG: join(root, "curl.log"), FIXTURE_INSTALLER_LOG: join(root, "installer.log"),
+      FIXTURE_HISTORY_LOG: join(root, "history.log"), XCB_AICHARTS: "no", ...extraEnv,
     },
   }));
   const read = (name: string) => existsSync(join(root, name)) ? readFileSync(join(root, name), "utf8") : null;
-  return { result, curl: read("curl.log"), installer: read("installer.log") };
+  return { result, curl: read("curl.log"), installer: read("installer.log"), history: read("history.log"), root };
 }
+
+// A stand-in aicharts build: reports the pinned version and an off history
+// status, and records each `history enable`.
+function aichartsArchive(target = "x86_64-unknown-linux-gnu"): { path: string; sha256: string } {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "xcb-aicharts-")));
+  roots.push(root);
+  const directory = `aicharts-0.3.1-${target}`;
+  mkdirSync(join(root, directory, "bin"), { recursive: true });
+  writeFileSync(join(root, directory, "bin/aicharts"), `#!/bin/sh
+case "$*" in
+  --version) echo ran >> "$FIXTURE_HISTORY_LOG.ran"; echo 'aicharts 0.3.1 (0123456789ab)' ;;
+  'history status --json') echo '{"data":{"collecting":"off"},"ok":true}' ;;
+  'history enable') echo enabled >> "$FIXTURE_HISTORY_LOG" ;;
+  *) exit 2 ;;
+esac
+`, { mode: 0o755 });
+  const path = join(root, "aicharts.tar.gz");
+  completed(spawnSync("tar", ["-czf", path, "-C", root, directory], { encoding: "utf8" }));
+  return { path, sha256: createHash("sha256").update(readFileSync(path)).digest("hex") };
+}
+
+function aichartsEnv(overrides: Record<string, string> = {}, target?: string) {
+  const fixture = aichartsArchive(target);
+  return {
+    XCB_AICHARTS: "yes", XCB_AICHARTS_BASE_URL: "http://127.0.0.1:9", XCB_AICHARTS_SHA256: fixture.sha256,
+    FIXTURE_AICHARTS_ARCHIVE: fixture.path, ...overrides,
+  };
+}
+
+test("bootstrap adds the checked aicharts and turns on local usage history on a first install", () => {
+  const { result, curl, history, root } = bootstrap("Linux", "x86_64", "200", aichartsEnv());
+  expect(result.status).toBe(0);
+  expect(curl?.trim().split("\n").at(-1)).toBe("no http://127.0.0.1:9/aicharts-0.3.1-x86_64-unknown-linux-gnu.tar.gz");
+  expect(existsSync(join(root, "prefix/bin/aicharts"))).toBe(true);
+  expect(result.stdout).toContain("Local usage history is on");
+  expect(result.stdout).toContain("aicharts history disable");
+  expect(history).toBe("enabled\n");
+});
+
+test("bootstrap renews a connected aicharts tool registration after replacing aicharts", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "xcb-bootstrap-prefix-")));
+  roots.push(root);
+  const log = join(root, "xcb.log");
+  // An existing xcb whose tools include aicharts; it records each command.
+  const existing = `#!/bin/sh
+echo "$*" >> ${JSON.stringify(log)}
+case "$*" in '--json tools list') echo '{"servers":[{"name":"aicharts","tools":[]}]}' ;; esac
+`;
+  const prefix = join(root, "prefix");
+  mkdirSync(join(prefix, "bin"), { recursive: true });
+  writeFileSync(join(prefix, "bin/xcb"), existing, { mode: 0o755 });
+  const { result, history } = bootstrap("Linux", "x86_64", "200", aichartsEnv({ XCB_INSTALL_PREFIX: prefix }));
+  expect(result.status).toBe(0);
+  expect(existsSync(join(prefix, "bin/aicharts"))).toBe(true);
+  expect(readFileSync(log, "utf8").trim().split("\n")).toEqual(["--json tools list", "usage connect"]);
+  // xcb was already installed, so the history choice stays with the user.
+  expect(history).toBeNull();
+});
+
+test("bootstrap aicharts opt-outs and failures leave the xcb install alone", () => {
+  const off = bootstrap("Linux", "x86_64", "200", aichartsEnv({ XCB_USAGE_HISTORY: "no" }));
+  expect(off.result.status).toBe(0);
+  expect(existsSync(join(off.root, "prefix/bin/aicharts"))).toBe(true);
+  expect(off.history).toBeNull();
+  const mismatch = bootstrap("Linux", "x86_64", "200", aichartsEnv({ XCB_AICHARTS_SHA256: "0".repeat(64) }));
+  expect(mismatch.result.status).toBe(0);
+  expect(mismatch.result.stderr).toContain("checksum mismatch for aicharts-0.3.1-x86_64-unknown-linux-gnu.tar.gz");
+  expect(existsSync(join(mismatch.root, "prefix/bin/aicharts"))).toBe(false);
+  expect(mismatch.history).toBeNull();
+  const remote = bootstrap("Linux", "x86_64", "200", aichartsEnv({ XCB_AICHARTS_BASE_URL: "https://example.com" }));
+  expect(remote.result.status).toBe(0);
+  expect(remote.result.stderr).toContain("may only name a loopback test server");
+  expect(remote.curl).not.toContain("aicharts");
+  // An unsigned Mac build is refused before it ever runs.
+  const unsigned = bootstrap("Darwin", "arm64", "200", aichartsEnv({}, "aarch64-apple-darwin"));
+  expect(unsigned.result.status).toBe(0);
+  expect(unsigned.result.stderr).toContain("aicharts does not have the required Apple Developer ID signature");
+  expect(existsSync(join(unsigned.root, "prefix/bin/aicharts"))).toBe(false);
+  expect(existsSync(join(unsigned.root, "history.log.ran"))).toBe(false);
+  const skipped = bootstrap("Linux", "aarch64", "200", aichartsEnv());
+  expect(skipped.result.status).toBe(0);
+  expect(skipped.result.stdout).toContain("aicharts has no release for this platform yet");
+});
 
 for (const [system, machine, platform] of releaseHosts) {
   test(`bootstrap on ${system}/${machine} checks the ${platform} archive, then runs the tag's installer`, () => {

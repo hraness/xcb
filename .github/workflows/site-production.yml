@@ -35,7 +35,15 @@ jobs:
           key: site-chromium-${{ runner.os }}-1.58.2
       - name: Install Chromium
         working-directory: site
-        run: node node_modules/playwright-core/cli.js install --with-deps chromium
+        run: |
+          set -euo pipefail
+          sudo python3 ../scripts/browser_acquisition.py
+          config=/etc/apt/apt.conf.d/99-browser-acquisition
+          sudo test ! -e "$config"
+          sudo test ! -L "$config"
+          trap 'sudo rm -f "$config"' EXIT
+          printf '%s\n' 'Acquire::http::Timeout "20";' 'Acquire::https::Timeout "20";' 'Acquire::Retries "1";' | sudo tee "$config" >/dev/null
+          node node_modules/playwright-core/cli.js install --with-deps chromium
       - name: Check public pages in a browser
         working-directory: site
         env:

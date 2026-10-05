@@ -37,6 +37,14 @@ and installs `~/.local/bin/xcb`:
 curl -fsSL https://xcb.sh/install.sh | sh
 ```
 
+On macOS with Apple silicon and Linux x86_64 it also installs
+[aicharts](https://aicharts.io/usage) beside xcb, checked against a pinned
+SHA-256 digest and, on macOS, its Developer ID signature. On a first install
+it turns on local usage history: daily token totals for your agents, kept on
+this computer and never uploaded. `aicharts history disable` turns it off.
+Set `XCB_USAGE_HISTORY=no` to leave it off, or `XCB_AICHARTS=no` to skip
+aicharts.
+
 New release installs update automatically before an interactive `run` or
 `doctor` command, at most once a day and only when no other
 xcb command or service is using the installation. Run `xcb update disable` to
@@ -229,11 +237,14 @@ xcb never captures screenshots automatically. See the
 
 `xcb usage` shows your token use across coding agents by day, agent, provider,
 and model. The numbers come from [aicharts](https://aicharts.io), which keeps a
-daily record on your computer and uploads nothing, so it needs the `aicharts`
-command installed ([get it](https://aicharts.io/usage)). `xcb usage enable`
-has aicharts collect four times a day, `xcb usage report --csv` exports the
-rows, and agents can read the same record through `aicharts mcp`. Quota left
-on each subscription stays in `xcb accounts`.
+daily record on your computer and uploads nothing. The installer above adds
+aicharts; after another install method, [get it](https://aicharts.io/usage).
+`xcb usage enable` has aicharts collect four times a day, and
+`xcb usage report --csv` exports the rows. `xcb usage connect` gives Claude and
+Codex tasks aicharts' read-only usage tools, so an agent you route can answer
+questions about your token use or chart it; run it again after updating
+aicharts. `xcb doctor` shows whether the record is collecting and the tools are
+connected. Quota left on each subscription stays in `xcb accounts`.
 
 ## Limits
 

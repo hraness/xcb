@@ -1,5 +1,5 @@
-use std::collections::BTreeMap;
 use base64::{Engine, engine::general_purpose::STANDARD};
+use std::collections::BTreeMap;
 use xcb_runtime::{
     clef,
     config::JudgeConfig,
@@ -10,7 +10,9 @@ fn crc(data: &[u8]) -> u32 {
     let mut value = u32::MAX;
     for byte in data {
         value ^= u32::from(*byte);
-        for _ in 0..8 { value = (value >> 1) ^ if value & 1 == 1 { 0xedb88320 } else { 0 }; }
+        for _ in 0..8 {
+            value = (value >> 1) ^ if value & 1 == 1 { 0xedb88320 } else { 0 };
+        }
     }
     value ^ u32::MAX
 }
@@ -56,8 +58,8 @@ fn clef_accepts_recorded_provider_rounding() {
     ] {
         let model = recorded["model"].as_str().unwrap();
         let envelope = serde_json::json!({"success":true,"errors":[],"result":recorded});
-        let parsed = clef::parse_response(200, &serde_json::to_vec(&envelope).unwrap(), model, &q)
-            .unwrap();
+        let parsed =
+            clef::parse_response(200, &serde_json::to_vec(&envelope).unwrap(), model, &q).unwrap();
         assert_eq!(parsed.model.as_deref(), Some(model));
         assert_eq!(
             parsed.answers["urgent"].noul(),
@@ -65,13 +67,18 @@ fn clef_accepts_recorded_provider_rounding() {
         );
         assert_eq!(
             parsed.answers["team"].choice(),
-            Some(("technical", recorded["answers"]["team"]["confidence"].as_f64().unwrap()))
+            Some((
+                "technical",
+                recorded["answers"]["team"]["confidence"].as_f64().unwrap()
+            ))
         );
         assert_eq!(
             parsed.answers["severity"].score(),
             Some((
                 recorded["answers"]["severity"]["score"].as_f64().unwrap(),
-                recorded["answers"]["severity"]["confidence"].as_f64().unwrap()
+                recorded["answers"]["severity"]["confidence"]
+                    .as_f64()
+                    .unwrap()
             ))
         );
     }
@@ -182,8 +189,13 @@ fn clef_rounding_requires_normalization_and_an_attainable_score() {
             serde_json::json!({"0":zero,"1":one});
         value["result"]["answers"]["score"]["score"] = score.into();
         assert_eq!(
-            clef::parse_response(200, &serde_json::to_vec(&value).unwrap(), "clef", &questions())
-                .is_ok(),
+            clef::parse_response(
+                200,
+                &serde_json::to_vec(&value).unwrap(),
+                "clef",
+                &questions()
+            )
+            .is_ok(),
             accepted,
             "zero={zero}, one={one}, score={score}"
         );
@@ -221,26 +233,45 @@ fn clef_accepts_rounded_normalized_distributions_across_score_levels() {
                 .map(|level| ((seed * 7 + level * 11) % 17) as f64)
                 .collect::<Vec<_>>();
             let total = weights.iter().sum::<f64>();
-            let original = weights.iter().map(|weight| weight / total).collect::<Vec<_>>();
-            let criteria = (0..levels).map(|level| format!("level {level}")).collect::<Vec<_>>();
-            let legend = criteria.iter().enumerate()
+            let original = weights
+                .iter()
+                .map(|weight| weight / total)
+                .collect::<Vec<_>>();
+            let criteria = (0..levels)
+                .map(|level| format!("level {level}"))
+                .collect::<Vec<_>>();
+            let legend = criteria
+                .iter()
+                .enumerate()
                 .map(|(level, criterion)| (level.to_string(), criterion.clone()))
                 .collect::<BTreeMap<_, _>>();
-            let probabilities = original.iter().enumerate()
+            let probabilities = original
+                .iter()
+                .enumerate()
                 .map(|(level, probability)| (level.to_string(), round(*probability)))
                 .collect::<BTreeMap<_, _>>();
-            let score = round(original.iter().enumerate()
-                .map(|(level, probability)| level as f64 * probability).sum());
-            let q = BTreeMap::from([("score".into(), JudgeQuestion::Score {
-                instructions: "Rate".into(), criteria,
-            })]);
+            let score = round(
+                original
+                    .iter()
+                    .enumerate()
+                    .map(|(level, probability)| level as f64 * probability)
+                    .sum(),
+            );
+            let q = BTreeMap::from([(
+                "score".into(),
+                JudgeQuestion::Score {
+                    instructions: "Rate".into(),
+                    criteria,
+                },
+            )]);
             let value = serde_json::json!({"success":true,"errors":[],"result":{
                 "model":"clef","usage":{"input_tokens":1,"output_tokens":0},
                 "answers":{"score":{"type":"score","score":score,"confidence":0.5,
                     "probabilities":probabilities,"legend":legend}}
             }});
-            let parsed = clef::parse_response(200, &serde_json::to_vec(&value).unwrap(), "clef", &q)
-                .unwrap();
+            let parsed =
+                clef::parse_response(200, &serde_json::to_vec(&value).unwrap(), "clef", &q)
+                    .unwrap();
             assert_eq!(parsed.answers["score"].score(), Some((score, 0.5)));
         }
     }
@@ -249,33 +280,67 @@ fn clef_accepts_rounded_normalized_distributions_across_score_levels() {
 #[test]
 fn clef_accepts_embedded_formats_and_rejects_pixel_byte_and_body_limits() {
     use image::ImageEncoder;
-    for (mime, format) in [("image/png", image::ImageFormat::Png), ("image/jpeg", image::ImageFormat::Jpeg), ("image/webp", image::ImageFormat::WebP)] {
+    for (mime, format) in [
+        ("image/png", image::ImageFormat::Png),
+        ("image/jpeg", image::ImageFormat::Jpeg),
+        ("image/webp", image::ImageFormat::WebP),
+    ] {
         let mut data = Vec::new();
         match format {
-            image::ImageFormat::Png => image::codecs::png::PngEncoder::new(&mut data).write_image(&[255,0,0], 1, 1, image::ExtendedColorType::Rgb8).unwrap(),
-            image::ImageFormat::Jpeg => image::codecs::jpeg::JpegEncoder::new(&mut data).write_image(&[255,0,0], 1, 1, image::ExtendedColorType::Rgb8).unwrap(),
-            _ => image::codecs::webp::WebPEncoder::new_lossless(&mut data).write_image(&[255,0,0], 1, 1, image::ExtendedColorType::Rgb8).unwrap(),
+            image::ImageFormat::Png => image::codecs::png::PngEncoder::new(&mut data)
+                .write_image(&[255, 0, 0], 1, 1, image::ExtendedColorType::Rgb8)
+                .unwrap(),
+            image::ImageFormat::Jpeg => image::codecs::jpeg::JpegEncoder::new(&mut data)
+                .write_image(&[255, 0, 0], 1, 1, image::ExtendedColorType::Rgb8)
+                .unwrap(),
+            _ => image::codecs::webp::WebPEncoder::new_lossless(&mut data)
+                .write_image(&[255, 0, 0], 1, 1, image::ExtendedColorType::Rgb8)
+                .unwrap(),
         }
-        clef::check_images(&[serde_json::json!({"content_type":mime,"base64":STANDARD.encode(&data)})]).unwrap();
+        clef::check_images(&[
+            serde_json::json!({"content_type":mime,"base64":STANDARD.encode(&data)}),
+        ])
+        .unwrap();
         if format == image::ImageFormat::Png {
             let mut pixels = data.clone();
-            pixels[16..20].copy_from_slice(&4001_u32.to_be_bytes()); pixels[20..24].copy_from_slice(&4000_u32.to_be_bytes());
-            let checksum = crc(&pixels[12..29]); pixels[29..33].copy_from_slice(&checksum.to_be_bytes());
-            assert!(clef::check_images(&[serde_json::json!({"content_type":mime,"base64":STANDARD.encode(pixels)})]).is_err());
+            pixels[16..20].copy_from_slice(&4001_u32.to_be_bytes());
+            pixels[20..24].copy_from_slice(&4000_u32.to_be_bytes());
+            let checksum = crc(&pixels[12..29]);
+            pixels[29..33].copy_from_slice(&checksum.to_be_bytes());
+            assert!(
+                clef::check_images(&[
+                    serde_json::json!({"content_type":mime,"base64":STANDARD.encode(pixels)})
+                ])
+                .is_err()
+            );
             let size = 3 * 1024 * 1024;
             let mut padded = data[..33].to_vec();
-            let mut chunk = vec![0_u8; size + 12]; chunk[..4].copy_from_slice(&(size as u32).to_be_bytes()); chunk[4..8].copy_from_slice(b"raNd");
-            let checksum = crc(&chunk[4..size+8]); chunk[size+8..].copy_from_slice(&checksum.to_be_bytes());
-            padded.extend(chunk); padded.extend(&data[33..]);
+            let mut chunk = vec![0_u8; size + 12];
+            chunk[..4].copy_from_slice(&(size as u32).to_be_bytes());
+            chunk[4..8].copy_from_slice(b"raNd");
+            let checksum = crc(&chunk[4..size + 8]);
+            chunk[size + 8..].copy_from_slice(&checksum.to_be_bytes());
+            padded.extend(chunk);
+            padded.extend(&data[33..]);
             let image = serde_json::json!({"content_type":mime,"base64":STANDARD.encode(padded)});
             clef::check_images(std::slice::from_ref(&image)).unwrap();
             assert!(clef::check_images(&[image.clone(), image.clone(), image]).is_err());
         }
     }
     assert!(clef::check_images(&[serde_json::json!({"content_type":"image/png","base64":"A".repeat(clef::MAX_IMAGE_BYTES.div_ceil(3)*4+4)})]).is_err());
-    let questions = (0..64).map(|i| (format!("q{i}"), JudgeQuestion::Choice {
-        instructions: "Choose".into(), criteria: (0..64).map(|j| (format!("o{j}"), Some("x".repeat(4096)))).collect(),
-    })).collect();
+    let questions = (0..64)
+        .map(|i| {
+            (
+                format!("q{i}"),
+                JudgeQuestion::Choice {
+                    instructions: "Choose".into(),
+                    criteria: (0..64)
+                        .map(|j| (format!("o{j}"), Some("x".repeat(4096))))
+                        .collect(),
+                },
+            )
+        })
+        .collect();
     assert!(clef::request(&serde_json::json!("evidence"), &questions, "clef", &[]).is_err());
 }
 

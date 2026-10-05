@@ -1548,7 +1548,9 @@ async fn dispatch_inner(
     }
     // Usage reports belong to aicharts' local record; they need no xcb state,
     // account or update check.
-    if let Some(Commands::Usage { args }) = &cli.command {
+    if let Some(Commands::Usage { args }) = &cli.command
+        && !usage::needs_state(args)
+    {
         return Ok(usage::run(args, cli.json));
     }
     // The sandbox test's confined half runs inside bwrap with no state root
@@ -3670,7 +3672,8 @@ async fn dispatch_inner(
         Some(Commands::NativeMcpStdio) => native_mcp_stdio().await,
         // Dispatched before any state opens.
         Some(Commands::SandboxProbe { .. }) => Ok(2),
-        Some(Commands::Usage { .. }) => unreachable!("usage dispatched before application state"),
+        // Only connect and disconnect reach here; reports ran before state opened.
+        Some(Commands::Usage { args }) => usage::connect(&store, &args, cli.json),
         Some(Commands::Completions { shell }) => {
             // `clap_complete` panics on a closed pipe, so render into a buffer
             // and write it through the pipe-tolerant stdout helper.
