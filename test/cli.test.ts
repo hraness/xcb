@@ -14,7 +14,7 @@ async function stateDir(): Promise<string> {
 
 /** Run the CLI source under Bun in an isolated state root with provider
  * discovery pinned to paths that cannot exist. */
-async function cli(args: readonly string[], input?: string, state?: string): Promise<{ code: number; stdout: string; stderr: string }> {
+async function cli(args: readonly string[], input?: string, state?: string, env: Record<string, string> = {}): Promise<{ code: number; stdout: string; stderr: string }> {
   const root = state ?? await stateDir();
   const child = Bun.spawn([process.execPath, CLI, ...args], {
     cwd: ROOT,
@@ -25,6 +25,8 @@ async function cli(args: readonly string[], input?: string, state?: string): Pro
       // Bun's transpiler cache otherwise creates Library/Caches in the fake
       // HOME, independently of CLI application or updater state.
       BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
+      CLOUDFLARE_ACCOUNT_ID: "", CLOUDFLARE_API_TOKEN: "", CLOUDFLARE_AUTH_TOKEN: "", XCB_JUDGE_PROVIDER: "clef", XCB_CLEF_MODEL: "clef",
+      ...env,
     },
     stdin: input === undefined ? "ignore" : "pipe",
     stdout: "pipe", stderr: "pipe",
@@ -73,6 +75,21 @@ describe("xcb CLI", () => {
     expect(code).toBe(1);
     expect(stdout).toContain("claude: not found");
     expect(stdout).toContain("codex: not found");
+  });
+
+  test("Clef help, status and test use separate environment auth without inference or token output", async () => {
+    const env = { CLOUDFLARE_ACCOUNT_ID: "a".repeat(32), CLOUDFLARE_API_TOKEN: "synthetic-clef-cli-token" };
+    const help = await cli(["--help"]);
+    expect(help.stdout).toContain("CLOUDFLARE_ACCOUNT_ID");
+    for (const command of [["judge", "status"], ["judge", "test"]]) {
+      const result = await cli(command, undefined, undefined, env);
+      expect(result.code, result.stderr).toBe(0);
+      expect(result.stdout).toContain("configuration valid");
+      expect(result.stdout + result.stderr).not.toContain(env.CLOUDFLARE_API_TOKEN);
+    }
+    const rejected = await cli(["judge", "token"], "synthetic-legacy-token");
+    expect(rejected.code).toBe(2);
+    expect(rejected.stderr).toContain("environment only");
   });
 
   test("auth claude refuses when the pinned binary is absent", async () => {

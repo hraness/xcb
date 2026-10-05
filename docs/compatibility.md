@@ -188,13 +188,13 @@ that evidence. Selecting an unqualified provider fails closed.
 
 ### Judged routing, continuation, and compaction (optional)
 
-`xcb-compat` can ask a judgment service — the jev interface — to pick among admitted
-routes, advise whether a safely stopped turn remains unfinished, or veto
-Gobstopper elision of stale tool results that remain important. The port is
-provider-neutral: `ask(state, questions)` returns typed answers (`noul`,
-`choice`, `score`), so other decision services can implement the same contract.
-TypeSafe's System One endpoint (`api.typesafe.ai`, model `jev-latest`) is the
-shipped backend.
+`xcb-compat` can ask Cloudflare Clef to pick among supported routes, advise
+whether a safely stopped turn remains unfinished, or veto Gobstopper elision
+of stale tool results that remain important. The provider-neutral port,
+`ask(state, questions, options?)`, returns typed answers (`noul`, `choice`,
+`score`). Clef is the default; `clef-flash` is an explicit alternative.
+Requests go only to Cloudflare Workers AI at `api.cloudflare.com`, under your
+32-hex Cloudflare account ID. Clef inference has its own provider charges.
 
 Opting in is deliberate: routing sends bounded task text; native continuation
 advice sends at most 8 KiB each of the original task and last response. Judged
@@ -205,19 +205,34 @@ bodies themselves. Every call allows ≤ 128 KiB total state, ≤ 64 questions, 
 itself the opt-in on the compatibility surface — the flag names the behavior,
 and it needs a key:
 
+Set `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` through your trusted
+host environment. `CLOUDFLARE_AUTH_TOKEN` is a fallback alias. Tokens are never
+stored in xcb configuration or reused from TypeSafe authentication.
+
 ```sh
-xcb-compat judge token < /secure/path/to/judge-key   # pipe the key on stdin — never an argument
-xcb-compat judge status            # where the key resolves from (never prints it)
-xcb-compat judge test              # one live bounded batch (noul, choice, score)
-xcb-compat judge logout            # remove the vaulted key
+xcb-compat judge status
+xcb-compat judge test
 ```
 
-The key vaults mode-0600 under the private state root; `XCB_JEV_API_KEY` or
-the vendor name `TYPESAFE_API_KEY` override it without touching the file. A
-vaulted key is bound to the canonical System One endpoint; a deliberate custom
-endpoint requires an environment-supplied key. Future judgment backends own
-separate credential custody rather than redirecting the TypeSafe vault. The
-native Rust build keeps the same contract under `extensions.judge` —
+Both commands check configuration locally without inference. Set
+`XCB_CLEF_MODEL=clef-flash` to select the faster model. The TypeScript SDK
+exports `createClefJudge({ accountId, token, model? })`; pass supplied images
+as `judge.ask(state, questions, { images, signal? })`. Native callers use
+`ask_with_images(state, questions, images)`. Only embedded PNG, JPEG and WebP
+are accepted: four images, 4 MiB and 16 megapixels per image, 8 MiB total
+decoded bytes, and 13 MiB for the whole request. Invalid, remote, or oversized
+images are rejected before transport. xcb never collects screenshots or
+silently drops supplied images; legacy System One rejects images.
+
+Explicit System One model/endpoint configurations select the legacy backend.
+Select `provider: "system-one"` in native judge config, or
+`XCB_JUDGE_PROVIDER=system-one` for the compatibility CLI, to use legacy
+authentication. Its mode-0600 `jev-api-token` vault remains bound to the
+canonical System One endpoint; custom endpoints require `XCB_JEV_API_KEY`
+or `TYPESAFE_API_KEY` from the environment. These keys never reach Cloudflare.
+A legacy key alone does not select the legacy backend.
+
+The native Rust build keeps the same contract under `extensions.judge` —
 `xcb judge enable` gates it there, `--model auto` routes account/model pairs
 with each description carrying the account's remaining quota, quota failover
 asks the judge to order already-eligible routes, auto-continuation

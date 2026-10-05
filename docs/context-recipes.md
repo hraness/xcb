@@ -105,6 +105,23 @@ passed them to this child. Direct sessions and older
 children without a saved snapshot do not have this tool's context. Historical
 reports still need fresh checks before relying on changing facts.
 
+The same tool's `history` operation pages the program's retained call records
+at progressive detail: `{"op":"history","history":{"contract":"xcb.program-history.v1","view":"overview"}}`.
+Every retained call appears as a leaf carrying its original call index, child
+task identity and settled state; a call's report body is present only when
+that call was declared an input of the audience cell, so workspace membership
+still cannot disclose hidden inputs or sibling reports. `view` is `inspect`,
+`overview`, `expand` (one node), `read` (one exact leaf) or `search` (literal
+text). Recent calls stay in detail and older ranges arrive as expandable
+nodes; `recentLeaves` widens the detailed tail up to the shared leaf bound,
+and `derivatives` may carry a caller-supplied summary generation that the
+contract validates against this captured history — summaries are navigation
+records, not stored facts. The view is rebuilt from the digest-verified call
+records on every query, reads write nothing, and the request envelope is
+bounded at 256 KiB. History describes what the program already retained; it
+does not grant access to new sources or prove that a recorded outcome still
+holds.
+
 Replay uses the completed task's original results and checks its final record.
 For experiments, `--results results.json` accepts an array of `requestDigest` and
 `summary` objects instead. These supplied results are evidence of deterministic

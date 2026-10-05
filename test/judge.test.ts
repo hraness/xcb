@@ -166,7 +166,7 @@ test("resolveJudge stays null when disabled or unkeyed and never leaks the token
     await chmod(root, 0o700);
     expect(await resolveJudge({ stateRoot: root, enabled: false, env: envWith({ [JUDGE_KEY_ENV]: TOKEN }) })).toBe(null);
     expect(await resolveJudge({ stateRoot: root, enabled: true, env: cleanEnv })).toBe(null);
-    const judge = await resolveJudge({ stateRoot: root, enabled: true, env: envWith({ [JUDGE_KEY_ENV]: TOKEN }) });
+    const judge = await resolveJudge({ stateRoot: root, enabled: true, provider: "system-one", env: envWith({ [JUDGE_KEY_ENV]: TOKEN }) });
     expect(judge).not.toBe(null);
     expect(JSON.stringify(judge).includes(TOKEN)).toBe(false);
 
@@ -176,6 +176,7 @@ test("resolveJudge stays null when disabled or unkeyed and never leaks the token
     expect(await resolveJudge({
       stateRoot: root,
       enabled: true,
+      provider: "system-one",
       env: envWith({ [JUDGE_KEY_ENV]: TOKEN, [JUDGE_URL_ENV]: "https://judge.example/v1/systemone" }),
     })).not.toBe(null);
   } finally {

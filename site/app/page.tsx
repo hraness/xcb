@@ -30,9 +30,9 @@ const metaDescription = productMessaging.meta;
 
 const questions = [
   { question: "Can I use the subscriptions I already have?", answer: "Yes. You sign in to your own Claude and Codex accounts through each provider’s own tool, and xcb routes work among them. It has no model access of its own and does not lift provider usage limits; each provider’s pricing and terms still apply." },
-  { question: "What happens when an account hits its limit?", answer: "When a provider reports an exhausted usage window for an account, xcb skips that account and sends the next task to another account that can take it. A task from your thread that stops on a reported limit can move to another account with its original instructions. If no account can take it, the task waits for the reset. xcb never falls back to an API key." },
+  { question: "What happens when an account hits its limit?", answer: "When a provider reports an exhausted usage window for an account, xcb skips that account and sends the next task to another account that can take it. A managed task that stops on a reported limit can move to another account with its original instructions. If no account can take it, the task waits for the reset. xcb never falls back to an API key." },
   { question: "How is xcb different from claude-swap, Claude Code Router, or herdr?", answer: "claude-swap changes which login Claude Code uses and keeps every Claude Code feature; xcb picks an account for each task across Claude and Codex and sandboxes each run. Claude Code Router sends each API request to a provider you configure; xcb never touches API traffic and runs whole tasks on your subscriptions. herdr keeps many agent terminals alive and visible, and xcb can run inside a herdr pane. The comparison pages cover these and more." },
-  { question: "What stays on my computer?", answer: "xcb stores accounts, credentials, sessions, and settings on your computer, outside your projects. Model requests go to the provider that runs the task. The optional judge sends limited task context to TypeSafe’s System One service; the current source build has no hosted remote commands. Valhalla transport is planned, not shipped." },
+  { question: "What stays on my computer?", answer: "xcb stores accounts, credentials, sessions, and settings on your computer, outside your projects. Model requests go to the provider that runs the task. The optional judge sends limited task context to Cloudflare’s Clef service; the current source build has no hosted remote commands. Valhalla transport is planned, not shipped. The usage history the installer turns on is kept by aicharts on your computer and never uploaded." },
   { question: "Can xcb run my tests and builds?", answer: "On macOS with Apple silicon, commands run offline in a Linux VM with public dependencies you prepare in advance. Git is read-only there, so you review and commit the changes yourself. Native macOS builds cannot run. Registered host MCP tools can provide additional capabilities; native provider shells remain unavailable." },
   { question: "What does it cost?", answer: "xcb is free and MIT licensed. You pay only for your provider subscriptions and any services you choose to use." },
 ] as const;
@@ -78,7 +78,7 @@ export default function Home() {
       <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(structuredData) }} />
       <SiteHeader active="home" />
       <main id="main" tabIndex={-1}>
-        <MarketingPage className="product-landscape">
+        <MarketingPage>
           <ProductHero
             align="start"
             backdrop={false}
@@ -119,7 +119,7 @@ export default function Home() {
               {
                 label: productMessaging.headings["home-interface-agent"],
                 summary: "Send work through the headless CLI. xcb picks an account and model and prints the result; managed backlog tasks can outlive their caller.",
-                example: <><CodeBlock code={agentExample} copyLabel="Copy command" /><p>The current source build removes the interactive terminal. Run this command in your project folder.</p><a className="xcb-text-link" href="/docs/getting-started">Getting started →</a></>,
+                example: <><CodeBlock code={agentExample} copyLabel="Copy command" /><p>Run this command in your project folder.</p><a className="xcb-text-link" href="/docs/getting-started">Getting started →</a></>,
               },
               {
                 label: productMessaging.headings["home-interface-integration"],

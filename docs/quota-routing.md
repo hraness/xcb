@@ -235,7 +235,7 @@ fitting lowers log loss within the accuracy and AUC guardrails described in
 restores the fitted head.
 
 Score answers use zero-based criterion indices, as specified by the
-[TypeSafe API](https://docs.typesafe.ai/api#score-answer). Five criteria therefore
+[Cloudflare Clef API](https://developers.cloudflare.com/workers-ai/models/clef/). Five criteria therefore
 admit indices 0–4; their text labels do not change the numeric scale. The ALGAL
 example response fixture includes an out-of-range probability bucket `5` and
 is not a live-wire conformance fixture. Native tests preserve the fitted

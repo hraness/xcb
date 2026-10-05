@@ -28,7 +28,7 @@ impl Default for ContextPolicy {
     }
 }
 
-/// Judge (jev-style judgment API) policy. Disabled by default: routing asks
+/// Judge (Cloudflare Clef by default) policy. Disabled by default: routing asks
 /// send bounded prompt state to an external service, so use is opt-in.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -36,6 +36,46 @@ pub struct JudgeConfig {
     pub enabled: bool,
     pub model: Option<Id>,
     pub endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<JudgeProvider>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum JudgeProvider {
+    Clef,
+    SystemOne,
+}
+
+impl JudgeConfig {
+    pub fn is_clef(&self) -> bool {
+        match self.provider {
+            Some(JudgeProvider::Clef) => true,
+            Some(JudgeProvider::SystemOne) => false,
+            None => {
+                self.endpoint.is_none()
+                    && self
+                        .model
+                        .as_ref()
+                        .is_none_or(|model| matches!(model.as_str(), "clef" | "clef-flash"))
+            }
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.is_clef() {
+            let model = self.model.as_ref().map_or("clef", Id::as_str);
+            if !matches!(model, "clef" | "clef-flash") {
+                return Err(xcb_core::Error::Invalid("Clef model").into());
+            }
+            if self.endpoint.is_some() {
+                return Err(xcb_core::Error::Invalid("Clef endpoint is environment-only").into());
+            }
+        } else if let Some(url) = &self.endpoint {
+            crate::jev::Endpoint::parse(url)?;
+        }
+        Ok(())
+    }
 }
 
 /// How a reflex participates in decisions. `Observe` records decisions and
@@ -194,6 +234,7 @@ impl Default for Config {
 }
 impl Config {
     pub fn validate(&self) -> Result<()> {
+        self.extensions.judge.validate()?;
         self.capabilities.validate()?;
         self.native_execution.validate()?;
         self.resources.validate().map_err(|message| Error::Guided {

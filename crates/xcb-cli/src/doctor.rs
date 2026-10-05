@@ -417,10 +417,7 @@ pub async fn run(
             )
         })
         .collect();
-    let judge_key = judge::judge_token(store.root())?.map(|(_, source)| source);
-    if let Some(source) = judge_key {
-        judge::check_key_target(source, &config.extensions.judge)?;
-    }
+    let judge_key = judge::configured_key(store.root(), &config.extensions.judge)?;
     let judge_key_name = match judge_key {
         Some(judge::JudgeKeySource::Env) => "env",
         Some(judge::JudgeKeySource::Vault) => "vault",
@@ -429,10 +426,10 @@ pub async fn run(
     // Remove only launch folders already marked safe to delete after their
     // run finished; the parent exiting doesn't prove the provider stopped.
     let sweep = runner::reclaim_launch_artifacts(root, true)?;
-    let (judge_model, judge_endpoint) =
-        xcb_runtime::jev::effective_target(&config.extensions.judge)?;
+    let (judge_model, judge_endpoint) = judge::effective_target(&config.extensions.judge)?;
     let judge_status = json!({
         "enabled": config.extensions.judge.enabled,
+        "provider": if config.extensions.judge.is_clef() { "clef" } else { "system-one" },
         "key": judge_key_name,
         "model": judge_model,
         "endpoint": judge_endpoint,
@@ -566,7 +563,7 @@ pub async fn run(
     }
     println!("{}", usage_line(style, &usage_history));
     println!(
-        "{} judge: {} · key {judge_key_name} · {judge_endpoint}",
+        "{} judge: {} · key {judge_key_name} · {}",
         if config.extensions.judge.enabled {
             style.symbol(ux::Symbol::On)
         } else {
@@ -577,6 +574,7 @@ pub async fn run(
         } else {
             "disabled"
         },
+        judge_endpoint.as_deref().unwrap_or("unset"),
     );
     if sweep.reclaimed > 0 {
         println!(
