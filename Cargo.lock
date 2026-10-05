@@ -85,7 +85,7 @@ dependencies = [
 [[package]]
 name = "algal"
 version = "0.2.0"
-source = "git+https://github.com/hraness/algal?rev=14915465c3d7c5ee2c55e2977e36ee03f6bcbff0#14915465c3d7c5ee2c55e2977e36ee03f6bcbff0"
+source = "git+https://github.com/hraness/algal?rev=8f6f32a1d1068bc64da28e43f8eb88041be99881#8f6f32a1d1068bc64da28e43f8eb88041be99881"
 dependencies = [
  "algal-expr",
  "anyhow",
@@ -108,7 +108,7 @@ dependencies = [
 [[package]]
 name = "algal-expr"
 version = "0.2.0"
-source = "git+https://github.com/hraness/algal?rev=14915465c3d7c5ee2c55e2977e36ee03f6bcbff0#14915465c3d7c5ee2c55e2977e36ee03f6bcbff0"
+source = "git+https://github.com/hraness/algal?rev=8f6f32a1d1068bc64da28e43f8eb88041be99881#8f6f32a1d1068bc64da28e43f8eb88041be99881"
 dependencies = [
  "ryu-js",
  "serde_json",

@@ -12,7 +12,7 @@ workspace = true
 [dependencies]
 aes-gcm = "=0.11.1"
 aicharts-core = { git = "https://github.com/hraness/aicharts", rev = "091433796f7253386c3e3186c67c275fb273b704", version = "0.1.0" }
-algal = { git = "https://github.com/hraness/algal", rev = "14915465c3d7c5ee2c55e2977e36ee03f6bcbff0", version = "0.2.0" }
+algal = { git = "https://github.com/hraness/algal", rev = "8f6f32a1d1068bc64da28e43f8eb88041be99881", version = "0.2.0" }
 base64 = "=0.23.1"
 convex = "=0.10.4"
 getrandom = "=0.4.3"

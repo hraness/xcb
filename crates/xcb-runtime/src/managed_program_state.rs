@@ -12,7 +12,42 @@ use algal::agent_context::{
 
 const MAX_CONTEXT_SOURCE_BYTES: usize = 32 * 1024;
 const MAX_CALL_RECORD_BYTES: usize = 128 * 1024;
+const MAX_HISTORY_INPUT_BYTES: usize = 256 * 1024;
 const CONTEXT_LIMITS: &str = r#"{"maxReadBytes":32768,"maxScanBytes":32768,"maxSearchResults":32}"#;
+const HISTORY_LIMITS: &str = r#"{"maxReadBytes":32768,"maxScanBytes":262144,"maxOutputBytes":32768,"maxNodes":256,"maxWork":4194304,"maxSearchResults":16}"#;
+const PROGRAM_HISTORY_CONTRACT: &str = "xcb.program-history.v1";
+
+/// Scope fields are bounded application identifiers; a task or workspace
+/// identity joins them through its digest rather than raw bytes.
+fn scope_id(value: &str) -> String {
+    format!("h{}", &digest(value.as_bytes())[..63])
+}
+
+/// The versioned `xcb.program-history.v1` read input carried by
+/// `xcb_context_query` op `history`. Fields beyond the contract and view are
+/// used only by the view they name.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProgramHistoryQuery {
+    contract: String,
+    view: String,
+    #[serde(default)]
+    recent_leaves: Option<usize>,
+    #[serde(default)]
+    derivatives: Option<Value>,
+    #[serde(default)]
+    node: Option<String>,
+    #[serde(default)]
+    source_index: Option<usize>,
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    max_results: Option<usize>,
+    #[serde(default)]
+    max_scan_bytes: Option<usize>,
+    #[serde(default)]
+    limits: Option<Value>,
+}
 
 /// Exact sources live inside the existing digest-protected call record. The
 /// reconstructed ALGAL CAS is read-only to the worker and shared identities are
@@ -610,11 +645,20 @@ impl ManagedStore {
                 #[serde(default, rename = "maxScanBytes")]
                 max_scan_bytes: Option<usize>,
             },
+            History {
+                history: Box<ProgramHistoryQuery>,
+            },
         }
         fn page_limit() -> usize {
             16
         }
-        if serde_json::to_vec(input)?.len() > 8192 {
+        if serde_json::to_vec(input)?.len()
+            > if input["op"] == "history" {
+                MAX_HISTORY_INPUT_BYTES
+            } else {
+                8192
+            }
+        {
             return Err(xcb_core::Error::Limit("context query bytes").into());
         }
         for key in ["maxResults", "maxScanBytes"] {
@@ -692,7 +736,233 @@ impl ManagedStore {
                 }
                 serde_json::to_value(host.search(&granted, &options).map_err(context_error)?)?
             }
+            Query::History { history } => {
+                self.program_history_query(&db, source, link, &call, &history)?
+            }
         };
+        bounded_text(&serde_json::to_string(&result)?, xcb_core::MAX_TEXT_BYTES)?;
+        Ok(result)
+    }
+
+    /// Progressive view over the program's retained call records, scoped to
+    /// this child as the audience (`xcb.program-history.v1`). Every leaf keeps
+    /// its original call index, child task identity and settled state; a call's
+    /// report body is present only when that call was declared an input of the
+    /// audience cell, so workspace membership never discloses hidden inputs or
+    /// sibling reports. The history is rebuilt from the digest-verified call
+    /// records on each query; the store is in-memory and reads write nothing.
+    /// Summaries arrive only through caller-supplied derivative generations,
+    /// which the shared contract validates against this captured history.
+    fn program_history_query(
+        &self,
+        db: &Connection,
+        source: &ManagedTask,
+        link: &ProgramChild,
+        own_call: &Call,
+        input: &ProgramHistoryQuery,
+    ) -> Result<Value> {
+        if input.contract != PROGRAM_HISTORY_CONTRACT {
+            return Err(Error::Unavailable("unsupported program history contract"));
+        }
+        let parent =
+            task_from(db, &link.parent)?.ok_or(Error::Conflict("program parent is missing"))?;
+        let program = parent
+            .program
+            .as_ref()
+            .ok_or(Error::Conflict("program source missing"))?;
+        program.verify()?;
+        let execution = read_execution(db, &parent.id)?
+            .ok_or(Error::Unavailable("program has no retained calls"))?;
+        if execution.calls == 0 {
+            return Err(Error::Unavailable("program has no retained calls"));
+        }
+        let own_request = crate::managed_program::retained_request(&own_call.request)?;
+        let own_cell = own_request["cellId"]
+            .as_str()
+            .ok_or(Error::Conflict("program call cell is missing"))?
+            .to_owned();
+        let mut declared = BTreeSet::from([own_cell.clone()]);
+        if let Some(edges) = program.manifest["edges"].as_array() {
+            for edge in edges.iter().take(128) {
+                if edge["to"]["cell"].as_str() == Some(own_cell.as_str())
+                    && let Some(cell) = edge["from"]["cell"].as_str()
+                {
+                    declared.insert(cell.to_owned());
+                }
+            }
+        }
+        let mut store = algal::store::Store::default();
+        let mut entries = Vec::new();
+        let mut sources = Vec::new();
+        for index in 1..=execution.calls {
+            let call = read_call(db, &parent.id, index)?;
+            let cell = call
+                .request
+                .request
+                .as_ref()
+                .and_then(|_| crate::managed_program::retained_request(&call.request).ok())
+                .and_then(|request| request["cellId"].as_str().map(str::to_owned));
+            let state = task_from(db, &call.child)?
+                .map_or("unavailable", |task| task.state.as_str())
+                .to_owned();
+            let mut record = json!({
+                "schema": "xcb.program-call-record.v1",
+                "call": index,
+                "cellId": cell,
+                "requestDigest": call.request.digest,
+                "state": state,
+                "task": call.child.as_str(),
+            });
+            if cell.as_ref().is_some_and(|cell| declared.contains(cell)) {
+                record["result"] = call.result.as_ref().map_or(Value::Null, |result| {
+                    json!({
+                        "outcomeDigest": result.outcome_digest,
+                        "receipt": result.receipt,
+                        "revision": result.revision,
+                        "summary": result.summary,
+                        "summaryDigest": result.summary_digest,
+                    })
+                });
+            }
+            // The event is the leaf's immutable identity: call position and
+            // request digest only. The live task state lives in the leaf body,
+            // so an already-published leaf cannot churn as tasks settle.
+            let event = algal::canonical::digest(&json!({
+                "schema": "xcb.program-call-event.v1",
+                "call": index,
+                "requestDigest": call.request.digest,
+            }))
+            .map_err(|_| Error::Conflict("program history event is invalid"))?;
+            sources.push(json!({
+                "sourceIndex": entries.len(),
+                "position": entries.len(),
+                "event": event,
+            }));
+            entries.push(AgentContextEntryInput {
+                kind: AgentContextKind::Observation,
+                label: format!("call-{index}"),
+                text: algal::canonical::canonical(&record)
+                    .map_err(|_| Error::Conflict("program history source is invalid"))?,
+            });
+        }
+        let snapshot = put_agent_context(&mut store, &entries)
+            .map_err(|_| Error::Conflict("program history source bound exceeded"))?;
+        let scope = json!({
+            "application": "xcb-managed",
+            "realm": "program",
+            "workspace": scope_id(&parent.workspace),
+            "task": scope_id(parent.id.as_str()),
+            "audience": scope_id(source.id.as_str()),
+        });
+        let head = algal::canonical::digest(&json!({
+            "schema": "xcb.program-call-head.v1",
+            "calls": execution.calls,
+            "manifestDigest": program.manifest_digest,
+            "parent": parent.id.as_str(),
+            "receipt": execution.receipt,
+        }))
+        .map_err(|_| Error::Conflict("program history head is invalid"))?;
+        let history = serde_json::to_value(
+            algal::context_history::capture_context_history(
+                &store,
+                &json!({
+                    "scope": scope,
+                    "head": head,
+                    "snapshot": snapshot,
+                    "epoch": 0,
+                    "firstPosition": 0,
+                    "sources": sources,
+                }),
+            )
+            .map_err(|_| Error::Conflict("program history capture failed"))?,
+        )?;
+        let history_id =
+            algal::canonical::digest(&history).map_err(|_| Error::Conflict("program history"))?;
+        let history_scope = history["scope"].clone();
+        let indices = json!((0..execution.calls as usize).collect::<Vec<usize>>());
+        let resolve =
+            move |captured: &algal::context_history_contract::ContextHistory,
+                  _principal: &str|
+                  -> algal::Result<algal::context_history::ContextHistoryCurrent> {
+                Ok(algal::context_history::ContextHistoryCurrent {
+                    access: json!({
+                        "schema": "algal.context-history-access.v1",
+                        "history": history_id,
+                        "scope": history_scope,
+                        "head": captured.head,
+                        "snapshot": captured.snapshot,
+                        "revision": 0,
+                        "indices": indices,
+                        "state": "active",
+                    }),
+                    invalidated: Vec::new(),
+                })
+            };
+        let mut host = algal::context_history::ContextHistoryHost::new(
+            &store,
+            &scope_id(source.id.as_str()),
+            resolve,
+        )
+        .map_err(|_| Error::Conflict("program history host failed"))?;
+        let mut config = json!({
+            "recentLeaves": input.recent_leaves.unwrap_or(2),
+        });
+        if let Some(derivatives) = &input.derivatives {
+            config["derivatives"] = derivatives.clone();
+        }
+        let limits: Value = serde_json::from_str(HISTORY_LIMITS)?;
+        let context_error =
+            |_| Error::Conflict("context history query exceeds its scope or limits");
+        let reference = host
+            .admit(&history, Some(&config), None, Some(&limits))
+            .map_err(context_error)?;
+        let requested = input.limits.as_ref();
+        let result = match input.view.as_str() {
+            "inspect" => host.inspect(&reference, None),
+            "overview" => {
+                let mut options = json!({});
+                if let Some(limits) = requested {
+                    options["limits"] = limits.clone();
+                }
+                host.overview(&reference, &options, None)
+            }
+            "expand" => host.expand(
+                &reference,
+                input
+                    .node
+                    .as_deref()
+                    .ok_or(Error::Unavailable("program history node is required"))?,
+                requested,
+                None,
+            ),
+            "read" => host.read(
+                &reference,
+                input.source_index.ok_or(Error::Unavailable(
+                    "program history sourceIndex is required",
+                ))?,
+                requested,
+                None,
+            ),
+            "search" => {
+                let query = input
+                    .query
+                    .as_deref()
+                    .ok_or(Error::Unavailable("program history query is required"))?;
+                if query.is_empty() || query.len() > 4096 {
+                    return Err(xcb_core::Error::Limit("context history query text").into());
+                }
+                let mut options = json!({"query": query});
+                if let Some(limit) = input.max_results {
+                    options["maxResults"] = json!(limit);
+                }
+                if let Some(limit) = input.max_scan_bytes {
+                    options["maxScanBytes"] = json!(limit);
+                }
+                host.search(&reference, &options, requested, None)
+            }
+            _ => return Err(Error::Unavailable("unsupported program history view")),
+        }
+        .map_err(context_error)?;
         bounded_text(&serde_json::to_string(&result)?, xcb_core::MAX_TEXT_BYTES)?;
         Ok(result)
     }
