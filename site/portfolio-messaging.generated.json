@@ -5,7 +5,7 @@
   "portfolio": {
     "contract": "hraness.portfolio-public/v1",
     "url": "https://hraness.com/portfolio.json",
-    "digest": "sha256:d3eb11b155ab8267165e25a96109d7efa2d1001165690ff59de0891ae0b50d3d"
+    "digest": "sha256:58c4deb5e80e8aa781e484ec645169eaee17ce302e284d480facb35efc6cc049"
   },
   "messaging": {
     "formatVersion": 1,
@@ -20,13 +20,13 @@
       ]
     },
     "category": "Agent subscription router",
-    "tagline": "Use your Claude and Codex plans from one agent.",
-    "short": "Routes coding tasks across the Claude and Codex plans you have",
-    "meta": "Excalibur (xcb) routes coding tasks across the Claude and Codex subscriptions you already pay for, picking an account that is signed in and idle.",
-    "medium": "Excalibur (xcb) routes coding tasks across the Claude and Codex subscriptions you already pay for. Each task runs on an account that is signed in, idle, and not at a known usage limit, on a model that fits the work.",
-    "long": "Excalibur (xcb) is a terminal and router for developers who pay for more than one coding agent. Type the work into one conversation, and xcb sends each task to a Claude or Codex account that is signed in, idle, and not at a known usage limit, on a model that fits the job. Tasks keep running after you close the terminal, every session appears on one screen, and each account runs one task at a time. Other agents can hand xcb work with one JSON command. xcb is free and MIT licensed, with releases for macOS and Linux.",
+    "tagline": "Use your Claude, Codex, and Devin plans from one agent.",
+    "short": "Routes coding tasks across the Claude, Codex, and Devin plans you have",
+    "meta": "Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for, picking an account that is signed in and idle.",
+    "medium": "Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for. Each task runs on an account that is signed in, idle, and not at a known usage limit, on a model that fits the work.",
+    "long": "Excalibur (xcb) is a terminal and router for developers who pay for more than one coding agent. Type the work into one conversation, and xcb sends each task to a Claude, Codex, or Devin account that is signed in, idle, and not at a known usage limit, on a model that fits the job. Tasks keep running after you close the terminal, every session appears on one screen, and each account runs one task at a time. Other agents can hand xcb work with one JSON command. xcb is free and MIT licensed, with releases for macOS and Linux.",
     "hero": {
-      "heading": "Use your Claude and Codex plans from one agent.",
+      "heading": "Use your Claude, Codex, and Devin plans from one agent.",
       "summary": "Use the AI plans you already pay for. xcb routes each task to an available account, from your terminal or app.",
       "primaryAction": "Install xcb",
       "secondaryAction": "See how it works"
@@ -71,7 +71,7 @@
     {
       "id": "xcb",
       "name": "Excalibur (xcb)",
-      "description": "routes coding tasks across the claude and codex plans you have",
+      "description": "routes coding tasks across the claude, codex, and devin plans you have",
       "canonicalUrl": "https://xcb.sh",
       "surface": {
         "actionLabel": "explore Excalibur (xcb)",
@@ -91,8 +91,8 @@
             "HRA"
           ]
         },
-        "short": "Routes coding tasks across the Claude and Codex plans you have",
-        "tagline": "Use your Claude and Codex plans from one agent."
+        "short": "Routes coding tasks across the Claude, Codex, and Devin plans you have",
+        "tagline": "Use your Claude, Codex, and Devin plans from one agent."
       }
     },
     {
@@ -274,10 +274,7 @@
       "messaging": {
         "names": {
           "name": "TextButler",
-          "command": "textbutler",
-          "formerly": [
-            "Message Like Me"
-          ]
+          "command": "textbutler"
         },
         "short": "AI butler for the iMessage, WhatsApp, and Beeper chats you choose",
         "tagline": "An AI butler in your messaging apps."
@@ -670,6 +667,26 @@
       }
     },
     {
+      "id": "textmock",
+      "name": "Textmock",
+      "description": "fictional text message screenshots and animations, made in your browser",
+      "canonicalUrl": "https://textmock.com",
+      "surface": {
+        "actionLabel": "open the studio",
+        "interfaces": [
+          "web app"
+        ],
+        "proof": "fictional iMessage, WhatsApp, Telegram, and Instagram conversations exported as PNG, GIF, or silent MP4 from the browser"
+      },
+      "messaging": {
+        "names": {
+          "name": "Textmock"
+        },
+        "short": "Fictional text message screenshots and animations, made in your browser",
+        "tagline": "Create text message screenshots and animations in your browser."
+      }
+    },
+    {
       "id": "pattern-language",
       "name": "Pattern Language",
       "description": "tests whether alexander-inspired patterns help agents write better code",
@@ -1025,7 +1042,7 @@
       "kind": "contract",
       "label": "shared bundle format",
       "direction": "shared",
-      "detail": "Both tools implement the versioned message-like-me.local-message-bundle interchange without importing each other's private state."
+      "detail": "Both tools read and write the same versioned TextButler local message bundle format without importing each other's private state."
     },
     {
       "source": "gobstopper",
@@ -1040,6 +1057,14 @@
       "kind": "runtime",
       "label": "uses",
       "direction": "forward"
+    },
+    {
+      "source": "gobstopper",
+      "target": "aicharts",
+      "kind": "runtime",
+      "label": "installs",
+      "direction": "forward",
+      "detail": "The Gobstopper installer adds aicharts and turns on its local usage history, which stays on your computer and never uploads."
     },
     {
       "source": "gobstopper",
@@ -1066,10 +1091,10 @@
     {
       "source": "xcb",
       "target": "aicharts",
-      "kind": "contract",
-      "label": "exports sessions for",
+      "kind": "runtime",
+      "label": "installs",
       "direction": "forward",
-      "detail": "Excalibur (xcb) measures subscription usage locally and, when you turn on exports, writes session files in the aicharts format. Automatic upload is not available."
+      "detail": "The Excalibur (xcb) installer adds aicharts and turns on its local usage history, which stays on your computer. With exports on, xcb also writes session files in the aicharts format; automatic upload is not available."
     },
     {
       "source": "soulscrape",
@@ -1215,6 +1240,21 @@
     {
       "source": "kb",
       "target": "design-kit",
+      "kind": "runtime",
+      "label": "uses",
+      "direction": "forward"
+    },
+    {
+      "source": "textmock",
+      "target": "textmockups",
+      "kind": "runtime",
+      "label": "renders chats with",
+      "direction": "forward",
+      "detail": "Textmock describes each conversation as a JSON scene and draws it with the open-source textmockups React components, the same renderer the package publishes for other sites."
+    },
+    {
+      "source": "textmock",
+      "target": "posthog-sdk",
       "kind": "runtime",
       "label": "uses",
       "direction": "forward"

@@ -13,6 +13,7 @@ mod stop;
 mod table;
 mod terminal_input;
 mod tools;
+mod usage;
 mod ux;
 mod workspaces;
 
@@ -166,6 +167,14 @@ enum Commands {
     Models {
         #[command(subcommand)]
         command: Option<ModelCommand>,
+    },
+    /// Your token use by day, agent and model, from aicharts' record on this
+    /// computer. Nothing is uploaded. `xcb usage --help` lists the commands.
+    #[command(disable_help_flag = true)]
+    Usage {
+        /// report (default), status, enable, disable or collect, then options.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Inspect and teach the learned reflexes: model routing and turn categorization.
     Reflex {
@@ -1536,6 +1545,13 @@ async fn dispatch_inner(
     {
         *installation = xcb_runtime::update::hold_installation(std::path::Path::new("/"))?;
         return egress_forward(socket, *port, lo_up, env_file, *target_port, child).await;
+    }
+    // Usage reports belong to aicharts' local record; they need no xcb state,
+    // account or update check.
+    if let Some(Commands::Usage { args }) = &cli.command
+        && !usage::needs_state(args)
+    {
+        return Ok(usage::run(args, cli.json));
     }
     // The sandbox test's confined half runs inside bwrap with no state root
     // bound, exactly like the forwarder: it reads only its arguments.
@@ -3705,6 +3721,8 @@ async fn dispatch_inner(
         Some(Commands::NativeMcpStdio) => native_mcp_stdio().await,
         // Dispatched before any state opens.
         Some(Commands::SandboxProbe { .. }) => Ok(2),
+        // Only connect and disconnect reach here; reports ran before state opened.
+        Some(Commands::Usage { args }) => usage::connect(&store, &args, cli.json),
         Some(Commands::Completions { shell }) => {
             // `clap_complete` panics on a closed pipe, so render into a buffer
             // and write it through the pipe-tolerant stdout helper.

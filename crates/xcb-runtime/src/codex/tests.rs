@@ -519,12 +519,18 @@ fn native_execution_and_permission_requests_are_not_granted() {
         "item/fileChange/requestApproval",
         "item/permissions/requestApproval",
     ] {
-        let (events, replies) = started()
+        let mut codec = started();
+        codec
+            .accept(json!({"method":"telemetry/futureShape","params":{}}))
+            .unwrap();
+        let (events, replies) = codec
             .accept(
                 json!({"id":1,"method":method,"params":{"threadId":"thread1","turnId":"turn1"}}),
             )
             .unwrap();
-        assert!(matches!(events.as_slice(), [Event::Attention]));
+        assert!(
+            matches!(events.as_slice(), [Event::Diagnostic(detail), Event::Attention] if detail.as_str() == "Codex requested native permissions outside its admitted tools; xcb denied the request.")
+        );
         assert_eq!(replies[0]["error"]["code"], -32601);
         assert!(replies[0].get("result").is_none());
     }

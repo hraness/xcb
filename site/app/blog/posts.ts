@@ -95,6 +95,51 @@ function post(
 
 export const blogPosts: readonly BlogPost[] = [
   post({
+    slug: "how-xcb-uses-aicharts",
+    title: "How xcb uses aicharts to show your token use",
+    dek: "The xcb installer adds aicharts, which keeps a daily record of your agents' token use on your computer.",
+    eyebrow: "Integration",
+    published: "2026-10-04",
+    keywords: ["xcb", "aicharts", "token usage", "coding agents", "Claude Code", "Codex", "MCP"],
+    relation: "runtime:xcb:aicharts:installs",
+    statusInBody: false,
+    sources: [
+      { title: "xcb usage: forwarded history commands and the connect registration", href: xcbAt("d3f9fbcc28729a8ce7a283c2562726ebd283a36b", "crates/xcb-cli/src/usage.rs"), checkedOn: "2026-10-04" },
+      { title: "Installer: pinned aicharts digests, signature check and first-install history", href: xcbAt("d3f9fbcc28729a8ce7a283c2562726ebd283a36b", "scripts/install.sh"), checkedOn: "2026-10-04" },
+      { title: "Usage history tools: what connect registers and when to renew it", href: xcbAt("d3f9fbcc28729a8ce7a283c2562726ebd283a36b", "docs/tools.md"), checkedOn: "2026-10-04" },
+      { title: "xcb doctor usage-history line", href: xcbAt("d3f9fbcc28729a8ce7a283c2562726ebd283a36b", "crates/xcb-cli/src/doctor.rs"), checkedOn: "2026-10-04" },
+      { title: "aicharts usage history and agent queries", href: "https://github.com/hraness/aicharts/blob/main/docs/usage-history.md", checkedOn: "2026-10-04" },
+      { title: "aicharts CLI 0.3.1 release", href: "https://github.com/hraness/aicharts/releases/tag/cli-v0.3.1", checkedOn: "2026-10-04" },
+    ],
+    admission: {
+      lifecycle: "quarantined",
+      readerJob: "Find out what the xcb installer adds for usage history, how to read it, and how to let routed tasks query it.",
+      nonObviousAnswer: "xcb's quota view and aicharts' record answer different questions, and the tools xcb usage connect gives tasks are pinned to one aicharts build, so they need reconnecting after an aicharts update; the installer and xcb doctor handle that.",
+      originalContribution: "The installer's checks and defaults, the five forwarded history commands, the pinned host tool registration and its renewal path, read from xcb's usage.rs, install.sh, doctor.rs and docs/tools.md at the pinned revision.",
+      hostFit: "A How xcb uses aicharts post on xcb's host for the registered relation runtime:xcb:aicharts:installs, expanding its detail sentence.",
+      nearestUrls: [
+        { url: "/docs/reference", distinction: "The reference lists the commands; the post explains where the numbers come from and what connect registers." },
+        { url: "https://aicharts.io/usage", distinction: "aicharts' page covers the collector and its dashboard; this post covers what xcb installs and exposes to tasks." },
+      ],
+      observations: [
+        "The installer verifies the aicharts archive against digests pinned in scripts/install.sh, not a checksum file fetched alongside it.",
+        "Host tool servers get a private home, so the registration names aicharts' record folder through AICHARTS_HOME.",
+      ],
+      scores: { readerUtility: 2, originalEvidence: 1, factualConfidence: 2, hostFit: 2, voiceIntegrity: 2, maintenanceValue: 2 },
+      review: null,
+      reassessOn: "2026-11-15",
+      harmIfWrong: "A reader could confuse quota left with spend, expect usage data to leave the computer, or miss that the task tools need reconnecting after an aicharts update.",
+      refreshTriggers: [
+        "Change to the relation runtime:xcb:aicharts:installs",
+        "Change to the pinned aicharts version or digests in scripts/install.sh",
+        "Change to the forwarded commands or the registration in crates/xcb-cli/src/usage.rs",
+        "Change to aicharts' collection schedule or MCP tools",
+        "xcb release tag bump",
+        "Rename of xcb or aicharts",
+      ],
+    },
+  }),
+  post({
     slug: launchPostSlug,
     title: "Introducing Excalibur: one agent for all your AI coding plans",
     dek: "Run tasks across your Claude and Codex plans, use available quota, and keep work moving between accounts.",

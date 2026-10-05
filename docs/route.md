@@ -16,6 +16,37 @@ Three commands run one task at a time:
 - `xcb --json generate` is for applications: one model response with no tools,
   folder, or session. See the [application API](application-api.md).
 
+## Call from an agent
+
+From Claude Code or Codex, use the shell tool to call the native `xcb` CLI.
+First [install and set up xcb](https://xcb.sh/docs/getting-started), sign in an account, and
+check `xcb --json doctor`. Run a dry run before handing over file changes:
+
+```sh
+xcb --json route <<'JSON'
+{
+  "version": 1,
+  "workspace": "/absolute/path/to/project",
+  "task": "Fix the failing parser test and show the diff",
+  "dryRun": true
+}
+JSON
+```
+
+Replace the workspace with the existing project folder. A successful preview
+prints `status: "selected"` and the chosen provider, account, and model; it
+starts no provider and changes no project files. If it fails with
+`code: "unavailable"`, check account sign-in and the supported provider build in
+[troubleshooting](https://xcb.sh/docs/troubleshooting) before retrying.
+
+After reviewing the choice and your agent's shell permission prompt, repeat
+the request with `dryRun: false` to run one turn. The provider then changes
+files only inside the named workspace, through xcb's file tools. Read the
+response and review the diff; `status: "completed"` confirms the turn
+finished, not that tests passed or the patch is correct. A preview does not
+reserve the account, so a later run can select a different eligible route
+unless you pin it with the request fields below.
+
 ## Request
 
 Write one UTF-8 JSON document to stdin, close stdin, and read the result from

@@ -109,6 +109,17 @@ Native provider shells and unrelated plugins remain separate from the
 shared tool bridge. See [provider permissions](provider-permissions.md) and
 the [command runner](command-runner.md).
 
+### Usage history tools
+
+`xcb usage connect` registers aicharts' read-only MCP server, `aicharts mcp`,
+for Claude and Codex tasks. The tools are `usage_summary`, `usage_daily`,
+`usage_report`, `usage_clients` and `usage_history_status`. They read
+aicharts' daily record on this computer, and none of them uploads,
+enrolls or changes it. Like any registration, it pins the aicharts executable's
+SHA-256, so run `xcb usage connect` again after updating aicharts; the xcb
+installer does this when it replaces aicharts. `xcb doctor` reports a pin
+that no longer matches, and `xcb usage disconnect` removes the registration.
+
 ## Route browser and desktop work
 
 Use an explicit requirement when the task needs an existing signed-in page

@@ -437,6 +437,11 @@ pub async fn run(
         "model": judge_model,
         "endpoint": judge_endpoint,
     });
+    let usage_history = crate::usage::doctor_status(config).await;
+    // A stale aicharts pin makes host tool listing refuse until it is renewed.
+    if usage_history["connected"] == "stale" {
+        tally.warnings += 1;
+    }
     let unsettled = store.unsettled_runs()?;
     tally.warnings += pending_admissions.len() + unsettled.len();
     if !sweep.unprovable.is_empty() {
@@ -495,6 +500,7 @@ pub async fn run(
     };
     if as_json {
         let mut report = json!({"version":1,"providers":reports,"unsettledRuns":unsettled});
+        report["usageHistory"] = usage_history.clone();
         report["accounts"] = json!(account_reports);
         report["judge"] = judge_status;
         report["catalog"] = json!({
@@ -558,6 +564,7 @@ pub async fn run(
             println!("  {fix}");
         }
     }
+    println!("{}", usage_line(style, &usage_history));
     println!(
         "{} judge: {} · key {judge_key_name} · {judge_endpoint}",
         if config.extensions.judge.enabled {
@@ -613,6 +620,35 @@ pub async fn run(
 }
 
 /// The next step when a provider isn't installed.
+/// One line on aicharts' local usage history, which `xcb usage` reads.
+fn usage_line(style: ux::Style, status: &serde_json::Value) -> String {
+    if status["aicharts"].is_null() {
+        return format!(
+            "{} usage history: aicharts is not installed · {}",
+            style.symbol(ux::Symbol::Off),
+            crate::usage::GET_AICHARTS
+        );
+    }
+    let version = status["version"].as_str().unwrap_or("version unknown");
+    let collecting = match status["collecting"].as_str() {
+        Some("off") => "collection off · xcb usage enable".to_owned(),
+        Some(state) => format!("collecting {state}"),
+        None => "status unavailable".to_owned(),
+    };
+    let (symbol, tools) = match status["connected"].as_str() {
+        Some("yes") => (ux::Symbol::On, " · tools connected"),
+        Some("stale") => (
+            ux::Symbol::Warn,
+            " · aicharts changed since its tools were connected; run xcb usage connect",
+        ),
+        _ => (ux::Symbol::On, ""),
+    };
+    format!(
+        "{} usage history: aicharts {version} · {collecting}{tools}",
+        style.symbol(symbol)
+    )
+}
+
 fn install_step(provider: Provider) -> String {
     format!(
         "install {}, or run xcb doctor --provider {provider} --executable <absolute path>",

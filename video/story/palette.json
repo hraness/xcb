@@ -1,0 +1,8 @@
+{
+  "url": "https://xcb.sh",
+  "readOn": "2026-10-04",
+  "palette": {
+    "background": "#1a1b26", "foreground": "#c0caf5", "muted": "#a9b1d6", "surface": "#16161e",
+    "surfaceRaised": "#24283b", "primary": "#7aa2f7", "primarySoft": "#262b3f", "primaryForeground": "#1a1b26"
+  }
+}

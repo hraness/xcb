@@ -222,7 +222,7 @@ export const comparisons: readonly Comparison[] = [
     title: "xcb vs Claude Code and Codex: when to add a router",
     description: "Use Claude Code or Codex on its own when one subscription covers you. Add xcb when you pay for several and want each task sent to an account that can take it.",
     lead: "Use Claude Code or Codex on its own when one subscription covers your work and you want every native feature. Add xcb when you pay for more than one: it runs those same tools under your accounts, sends each task to one that can take it now, and keeps the work going after you close the terminal.",
-    updated: "2026-10-01",
+    updated: "2026-10-04",
     picks: {
       tool: [
         "One Claude subscription covers your work.",
@@ -258,6 +258,15 @@ export const comparisons: readonly Comparison[] = [
         ],
       },
       {
+        id: "codex-plugin",
+        title: "OpenAI’s Codex plugin for Claude Code",
+        paragraphs: [
+          "OpenAI’s [Codex plugin for Claude Code](https://github.com/openai/codex-plugin-cc) adds slash commands that hand work from a Claude Code session to the Codex CLI on the same machine. `/codex:review` runs a read-only Codex review, `/codex:rescue` gives a task to a Codex subagent, and `/codex:status` and `/codex:result` follow background jobs. The plugin uses your existing Codex sign-in, configuration, and checkout, and its work counts toward your Codex usage limits.",
+          "Pick the plugin when you work in Claude Code and one Codex sign-in covers the Codex side: it is OpenAI’s own integration, and Codex keeps its own tools and settings. Pick xcb when you hold several Claude or Codex accounts and want each task sent to one that is idle and not at a known limit. Claude Code calls `xcb --json route` from its shell, and xcb chooses the provider, account, and model, runs one turn in its sandbox with xcb’s file tools in place of the provider’s built-in tools, and returns JSON. [Call from an agent](/docs/route#call-from-an-agent) starts with a dry run.",
+          "The plugin details come from its README, read on 4 October 2026.",
+        ],
+      },
+      {
         id: "claude-plan",
         title: "Your Claude plan through xcb",
         paragraphs: [
@@ -277,6 +286,7 @@ export const comparisons: readonly Comparison[] = [
       { label: "Claude help center: the Agent SDK and `claude -p` on your plan", href: "https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan", checkedOn },
       { label: "Codex on GitHub", href: "https://github.com/openai/codex", checkedOn },
       { label: "Codex app-server", href: "https://learn.chatgpt.com/docs/app-server", checkedOn },
+      { label: "OpenAI: Codex plugin for Claude Code README", href: "https://github.com/openai/codex-plugin-cc/blob/main/README.md", checkedOn: "2026-10-04" },
       { label: "xcb: Accounts and models", href: "/docs/providers", checkedOn },
       { label: "xcb: Tests, builds, and recovery", href: "/docs/workspace", checkedOn },
     ],
