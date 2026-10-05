@@ -32,7 +32,12 @@ impl Default for Timing {
     fn default() -> Self {
         Self {
             poll: Duration::from_secs(5),
-            startup_grace: Duration::from_secs(180),
+            // Startup reconciliation is bounded but can legitimately take
+            // several minutes when a durable state root contains a large
+            // history or retained recovery records.  Keep the child under
+            // custody while it publishes its first heartbeat; restarting it
+            // at the old three-minute mark could livelock startup forever.
+            startup_grace: Duration::from_secs(600),
             stale: Duration::from_secs(120),
             confirmation: Duration::from_secs(30),
             wake_grace: Duration::from_secs(30),
