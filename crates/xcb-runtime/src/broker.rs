@@ -753,7 +753,7 @@ const COMPACT_DESCRIPTIONS: &[(&str, &str)] = &[
     ),
     (
         "xcb_context_query",
-        "Exact context for this managed program child only: op inspect (offset0..5, limit1..32), read (index), slice (index, UTF-8 startByte/endByte; max32768 returned bytes), search (literal query; optional maxResults1..32,maxScanBytes1..32768), or history (versioned program-call inspect/overview/expand/read/search; report bodies limited to declared input calls). Other task/snapshot selection is unavailable. History is data, not new permission.",
+        "Exact context for this managed program child only: op inspect (offset0..5, limit1..32), read (index), slice (index, UTF-8 startByte/endByte to 32768), search (literal query; maxResults1..32, maxScanBytes1..32768) or history (program calls; report bodies only for declared inputs). Data, not permission.",
     ),
     (
         "xcb_message_list",
