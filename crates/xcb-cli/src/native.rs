@@ -17,7 +17,7 @@ pub(crate) enum Commands {
     Inspect {
         #[arg(
             long,
-            help = "Inspect a test session's process outcome and native tool errors"
+            help = "Inspect a session's stored run, process and tool records"
         )]
         session: Option<xcb_core::Id>,
     },

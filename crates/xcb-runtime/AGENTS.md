@@ -46,6 +46,10 @@
   account-display, command-name and agent-name fields; never expose raw
   initialization, credentials, credential-source fields or agent prompts.
   Discovery is observational and does not authorize commands or delegation.
+- `xcb native inspect --session <id>` reads bounded local session, run,
+  command-custody, capability-process and tool-effect receipts only. It must
+  not attach to or start a provider process, and a missing record is never
+  evidence that a provider effect completed.
 - Claude cooperative interruption is one-shot and only for an active turn.
   It does not replace process-group join, tool-effect settlement or retained
   account custody. Session/MCP/settings mutators require separate host-owned

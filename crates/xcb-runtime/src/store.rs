@@ -529,6 +529,28 @@ pub struct UsageObservation {
     pub at_ms: u64,
 }
 
+#[derive(Debug)]
+pub(crate) struct SessionRunReceipt {
+    pub run: RunRecord,
+    pub lease_held: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct ToolEffectRecord {
+    pub call: String,
+    pub operation: String,
+    pub input_digest: String,
+    pub settled: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct SessionReceipts {
+    pub run_count: u64,
+    pub runs: Vec<SessionRunReceipt>,
+    pub effect_count: u64,
+    pub effects: BTreeMap<Id, Vec<ToolEffectRecord>>,
+}
+
 pub struct Store {
     root: PathBuf,
     /// Test-only count of fsync'd observability commits, proving a batch of
@@ -2104,6 +2126,95 @@ impl Store {
         }
         Ok(Some(record))
     }
+    /// Bounded local receipts for one session. This reads xcb's custody
+    /// records only; it does not attach a provider process to the account.
+    pub(crate) fn session_receipts(&self, session: &Id) -> Result<SessionReceipts> {
+        const RUN_LIMIT: i64 = 16;
+        const EFFECT_LIMIT: i64 = 256;
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let run_count: i64 = tx.query_row(
+            "SELECT count(*) FROM runs WHERE session=?1",
+            [session.as_str()],
+            |row| row.get(0),
+        )?;
+        let mut query = tx.prepare(
+            "SELECT id,payload, EXISTS(
+                SELECT 1 FROM leases WHERE leases.run=runs.id AND leases.account=runs.account
+            ) FROM runs WHERE session=?1 ORDER BY rowid DESC LIMIT ?2",
+        )?;
+        let rows = query.query_map(params![session.as_str(), RUN_LIMIT], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, bool>(2)?,
+            ))
+        })?;
+        let mut runs = Vec::new();
+        for row in rows {
+            let (id, payload, lease_held) = row?;
+            let run: RunRecord = decode(&payload)?;
+            run.validate()?;
+            if run.id.as_str() != id || run.session.as_ref() != Some(session) {
+                return Err(Error::Conflict("run receipt session changed"));
+            }
+            runs.push(SessionRunReceipt { run, lease_held });
+        }
+        drop(query);
+        let effect_count: i64 = tx.query_row(
+            "SELECT count(*) FROM tool_effects t JOIN runs r ON r.id=t.run WHERE r.session=?1",
+            [session.as_str()],
+            |row| row.get(0),
+        )?;
+        let mut query = tx.prepare(
+            "SELECT r.payload,t.run,t.call,t.operation,t.input_digest,t.settled
+            FROM tool_effects t JOIN runs r ON r.id=t.run
+            WHERE r.session=?1 ORDER BY t.run,t.call LIMIT ?2",
+        )?;
+        let rows = query.query_map(params![session.as_str(), EFFECT_LIMIT], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })?;
+        let mut effects: BTreeMap<Id, Vec<ToolEffectRecord>> = BTreeMap::new();
+        for row in rows {
+            let (payload, run_id, call, operation, input_digest, settled) = row?;
+            let run: RunRecord = decode(&payload)?;
+            run.validate()?;
+            if run.session.as_ref() != Some(session) || run.id.as_str() != run_id {
+                return Err(Error::Conflict("tool receipt run changed"));
+            }
+            label(&call, 160)?;
+            xcb_core::bounded_text(&operation, 160)?;
+            xcb_core::bounded_text(&input_digest, 160)?;
+            if !matches!(settled, 0 | 1) {
+                return Err(Error::Conflict("tool receipt settlement changed"));
+            }
+            effects.entry(run.id).or_default().push(ToolEffectRecord {
+                call,
+                operation,
+                input_digest,
+                settled: settled == 1,
+            });
+        }
+        drop(query);
+        let receipts = SessionReceipts {
+            run_count: u64::try_from(run_count)
+                .map_err(|_| xcb_core::Error::Invalid("run count"))?,
+            runs,
+            effect_count: u64::try_from(effect_count)
+                .map_err(|_| xcb_core::Error::Invalid("tool receipt count"))?,
+            effects,
+        };
+        tx.finish()?;
+        Ok(receipts)
+    }
+
     pub fn unsettled_runs(&self) -> Result<Vec<RunRecord>> {
         let db = self.db()?;
         let mut query =
@@ -4480,6 +4591,129 @@ mod tests {
             .unwrap();
         assert!(!viewer.remote_active(&session.id).unwrap());
     }
+
+    #[test]
+    fn session_receipts_bound_recent_runs_and_effects_without_losing_counts() {
+        let dir = root();
+        let base = xcb_core::canonical(dir.path()).unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Test", 1, None)
+            .unwrap();
+        let session = store
+            .create_session(&account.id, choice(), &base.join("work"), 2)
+            .unwrap();
+        let mut latest = None;
+        for index in 0..17u64 {
+            let current = store.session(&session.id).unwrap().unwrap();
+            let run = store
+                .prepare_run(&session.id, current.revision, 10 + index)
+                .unwrap();
+            if index == 16 {
+                for effect in 0..257 {
+                    store
+                        .begin_tool(
+                            &run,
+                            &format!("call_{effect:03}"),
+                            "workspace_native_exec",
+                            &format!("digest_{effect}"),
+                        )
+                        .unwrap();
+                }
+                latest = Some(run.id.clone());
+            } else {
+                store.settle(&run, State::Idle, 20 + index).unwrap();
+            }
+        }
+        let receipts = store.session_receipts(&session.id).unwrap();
+        assert_eq!(receipts.run_count, 17);
+        assert_eq!(receipts.runs.len(), 16);
+        assert_eq!(receipts.effect_count, 257);
+        assert_eq!(receipts.effects.values().map(Vec::len).sum::<usize>(), 256);
+        assert!(receipts.runs[0].lease_held);
+        assert!(receipts.runs.iter().skip(1).all(|run| !run.lease_held));
+        assert_eq!(
+            receipts.effects[&latest.unwrap()].len(),
+            256,
+            "the bounded effect window stays attached to its exact run"
+        );
+    }
+
+    #[test]
+    fn session_receipts_reject_changed_identity_or_invalid_effect_rows() {
+        let dir = root();
+        let base = xcb_core::canonical(dir.path()).unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Test", 1, None)
+            .unwrap();
+        let session = store
+            .create_session(&account.id, choice(), &base.join("work"), 2)
+            .unwrap();
+        let other = store
+            .create_session(&account.id, choice(), &base.join("work"), 3)
+            .unwrap();
+        let run = store.prepare_run(&session.id, session.revision, 4).unwrap();
+        store
+            .begin_tool(&run, "native-call", "workspace_native_exec", "digest")
+            .unwrap();
+        store
+            .db()
+            .unwrap()
+            .execute(
+                "UPDATE tool_effects SET settled=2 WHERE run=?1",
+                [run.id.as_str()],
+            )
+            .unwrap();
+        assert!(store.session_receipts(&session.id).is_err());
+        store
+            .db()
+            .unwrap()
+            .execute(
+                "UPDATE tool_effects SET settled=1 WHERE run=?1",
+                [run.id.as_str()],
+            )
+            .unwrap();
+        let mut forged = run.clone();
+        forged.id = Id::new("r_other").unwrap();
+        store
+            .db()
+            .unwrap()
+            .execute(
+                "UPDATE runs SET payload=?1 WHERE id=?2",
+                params![serde_json::to_string(&forged).unwrap(), run.id.as_str()],
+            )
+            .unwrap();
+        assert!(store.session_receipts(&session.id).is_err());
+        store
+            .db()
+            .unwrap()
+            .execute(
+                "UPDATE runs SET payload=?1 WHERE id=?2",
+                params![serde_json::to_string(&run).unwrap(), run.id.as_str()],
+            )
+            .unwrap();
+        store
+            .db()
+            .unwrap()
+            .execute(
+                "UPDATE runs SET session=?1 WHERE id=?2",
+                params![other.id.as_str(), run.id.as_str()],
+            )
+            .unwrap();
+        assert!(store.session_receipts(&other.id).is_err());
+        assert_eq!(store.session_receipts(&session.id).unwrap().run_count, 0);
+        store
+            .db()
+            .unwrap()
+            .execute(
+                "UPDATE runs SET session=?1,payload='not-json' WHERE id=?2",
+                params![session.id.as_str(), run.id.as_str()],
+            )
+            .unwrap();
+        assert!(store.session_receipts(&session.id).is_err());
+    }
+
     fn command_custody(run: &RunRecord) -> crate::command::CommandCustody {
         crate::command::CommandCustody {
             version: 1,

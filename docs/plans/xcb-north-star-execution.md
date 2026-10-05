@@ -247,9 +247,12 @@ assurance contracts for both Claude and Codex:
    starts no provider; exact-account `native describe` submits no prompt.
 2. **Read-only diagnostics:** Claude summary context and redacted MCP status
    target the inspection connection and name its probe run. Codex inspection
-   creates no thread and consumes no reset credit. Active-task diagnostics
-   still need a revision-checked command to the owning worker; never attach a
-   second process to a held account to inspect it.
+   creates no thread and consumes no reset credit. Session inspection reads
+   only local custody records: bounded run/tool receipts, lease state,
+   command and capability-process custody, latest settled facts, and method
+   coverage. Active-task provider diagnostics still need a revision-checked
+   command to the owning worker; never attach a second process to a held
+   account to inspect it.
 3. **Owned session controls:** map provider resume/fork, compaction, live
    steering, and task stop to expected revisions, original account/workspace
    grants, context lineage, and durable effect identities. Define stale-target,

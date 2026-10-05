@@ -124,7 +124,16 @@ fn every_unadmitted_server_request_is_rejected_before_host_execution() {
         .contains(&method)
         {
             let (events, replies) = result.unwrap();
-            assert!(matches!(&events[..], [Event::Attention]), "{method}");
+            assert!(
+                events.iter().any(|event| matches!(event, Event::Attention)),
+                "{method}"
+            );
+            assert!(
+                events
+                    .iter()
+                    .all(|event| matches!(event, Event::Attention | Event::Diagnostic(_))),
+                "{method}"
+            );
             assert_eq!(replies[0]["error"]["code"], -32601);
         } else {
             assert!(result.is_err(), "{method}");

@@ -93,6 +93,20 @@ Its output separates build-level native qualification from account-specific
 live acceptance: metadata inspection establishes neither usable quota nor
 native command acceptance for that account.
 
+`xcb native inspect --session <id>` is a local receipt query. It starts no
+provider process, attaches to none, and does not infer completion from a
+missing record. The projection names the session, provider, account, model,
+workspace, state, revision, route pins, persisted task requirements, managed
+task, timestamps, latest settled facts, and that provider's method-coverage
+summary. It then reports bounded xcb custody: up to 16 recent runs and 256
+tool-effect receipts, with run/account/revision identity, lease state, owner
+process facts including an unknown liveness marker, provider process group,
+pending command custody, capability process groups, and tool settlement.
+Truncation is reported separately from the records shown. Changed session
+identity, malformed run payloads, invalid tool rows, or an out-of-bounds
+receipt field fail the inspection rather than produce a partially trusted
+result.
+
 ## Codex integration methods
 
 Codex inspection returns the checked executable identity, available

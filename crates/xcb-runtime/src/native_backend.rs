@@ -420,6 +420,7 @@ pub fn inspect_session(store: &Store, id: &xcb_core::Id) -> Result<serde_json::V
         .session(id)?
         .ok_or(Error::Unavailable("session not found"))?;
     let outcome = store.latest_settled_outcome(id)?;
+    let receipts = store.session_receipts(id)?;
     let errors: Vec<_> = store
         .messages(id, 64)?
         .into_iter()
@@ -436,9 +437,104 @@ pub fn inspect_session(store: &Store, id: &xcb_core::Id) -> Result<serde_json::V
             }
         })
         .collect();
-    Ok(
-        serde_json::json!({"session":id,"provider":session.model.provider,"state":session.state,"facts":outcome.as_ref().map(|outcome| &outcome.facts),"diagnostic":outcome.as_ref().and_then(|outcome|outcome.diagnostic.as_ref()),"nativeToolErrors":errors}),
-    )
+    let runs: Vec<_> = receipts
+        .runs
+        .iter()
+        .map(|receipt| {
+            let run = &receipt.run;
+            serde_json::json!({
+                "id": &run.id,
+                "phase": &run.phase,
+                "account": &run.account,
+                "revision": run.revision,
+                "createdAtMs": run.created_at_ms,
+                "model": &run.model,
+                "leaseHeld": receipt.lease_held,
+                "owner": run.owner.as_ref().map(|owner| serde_json::json!({
+                    "instance": &owner.instance,
+                    "pid": owner.pid,
+                    "alive": crate::os::process_exists(owner.pid),
+                })),
+                "processGroup": run.pid,
+                "commandCustody": &run.command_custody,
+                "capabilityProcesses": &run.capability_processes,
+                "toolEffects": receipts.effects.get(&run.id).map(|effects| effects.iter().map(|effect| {
+                    serde_json::json!({
+                        "call": &effect.call,
+                        "operation": &effect.operation,
+                        "inputDigest": &effect.input_digest,
+                        "settled": effect.settled,
+                    })
+                }).collect::<Vec<_>>()).unwrap_or_default(),
+            })
+        })
+        .collect();
+    let shown_effects: u64 = receipts
+        .runs
+        .iter()
+        .map(|receipt| {
+            receipts
+                .effects
+                .get(&receipt.run.id)
+                .map_or(0, |effects| effects.len() as u64)
+        })
+        .sum();
+    Ok(serde_json::json!({
+        "version": 1,
+        "session": &session.id,
+        "provider": session.model.provider,
+        "account": &session.account,
+        "model": &session.model,
+        "workspace": &session.workspace,
+        "state": session.state,
+        "revision": session.revision,
+        "routePins": &session.route_pins,
+        "requirements": &session.requirements,
+        "managedTask": &session.managed_task,
+        "createdAtMs": session.created_at_ms,
+        "lastActiveAtMs": session.last_active_at_ms,
+        "facts": outcome.as_ref().map(|outcome| &outcome.facts),
+        "diagnostic": outcome.as_ref().and_then(|outcome| outcome.diagnostic.as_ref()),
+        "methodCoverage": method_coverage(session.model.provider)?,
+        "receipts": {
+            "runCount": receipts.run_count,
+            "runsTruncated": receipts.run_count > runs.len() as u64,
+            "effectCount": receipts.effect_count,
+            "effectsTruncated": receipts.effect_count > shown_effects,
+            "runs": runs,
+        },
+        "nativeToolErrors": errors,
+    }))
+}
+
+fn method_coverage(provider: Provider) -> Result<serde_json::Value> {
+    if !Provider::SUPPORTED.contains(&provider) {
+        return Ok(serde_json::json!({
+            "provider": provider,
+            "status": "retired",
+            "executionAvailable": false,
+        }));
+    }
+    let catalog = crate::provider_methods::describe(provider)?;
+    let mut statuses = std::collections::BTreeMap::new();
+    for method in catalog["methods"]
+        .as_array()
+        .ok_or(Error::Protocol("provider method inventory"))?
+    {
+        let status = method["status"]
+            .as_str()
+            .ok_or(Error::Protocol("provider method status"))?;
+        *statuses.entry(status.to_owned()).or_insert(0u64) += 1;
+    }
+    Ok(serde_json::json!({
+        "scope": catalog["scope"],
+        "arbitraryProviderCalls": catalog["arbitraryProviderCalls"],
+        "coverageMeaning": catalog["coverageMeaning"],
+        "codexSchemaSha256": catalog["codexSchemaSha256"],
+        "claudeSdkVersion": catalog["claudeSdkVersion"],
+        "total": catalog["methods"].as_array().map(Vec::len),
+        "statuses": statuses,
+    }))
 }
 
 pub fn statuses() -> Vec<NativeBackendStatus> {
@@ -616,6 +712,183 @@ mod tests {
                 "native qualification permit does not authorize this exact command"
             ))
         ));
+    }
+
+    #[test]
+    fn session_inspection_reports_custody_effects_and_method_coverage_without_a_provider() {
+        use xcb_core::{
+            Id, Provider,
+            models::{Mode, ModelChoice},
+            session::State,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        let workspace = crate::private::directory(&root.join("workspace")).unwrap();
+        let store = Store::open(&root.join("state")).unwrap();
+        let account = store
+            .add_account(Provider::Codex, "Fixture", 1, None)
+            .unwrap();
+        let model = ModelChoice {
+            provider: Provider::Codex,
+            id: Id::new("fixture").unwrap(),
+            label: "Fixture".into(),
+            mode: Mode::Fixed,
+            resolved: None,
+            effort: None,
+            observed_at_ms: 1,
+        };
+        let session = store
+            .create_session(&account.id, model, &workspace, 1)
+            .unwrap();
+        store
+            .require_session_capabilities(
+                &session.id,
+                TaskRequirements {
+                    native_execution: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let session = store.session(&session.id).unwrap().unwrap();
+        let run = store.prepare_run(&session.id, session.revision, 2).unwrap();
+        let custody = crate::command::CommandCustody {
+            version: 1,
+            command_id: Id::new("cmd_synthetic").unwrap(),
+            run_id: run.id.clone(),
+            workspace_id: "a".repeat(64),
+            snapshot_sha256: "b".repeat(64),
+            request_sha256: "c".repeat(64),
+            backend_sha256: "d".repeat(64),
+            boot_id: "00000000-0000-0000-0000-000000000001".into(),
+        };
+        store.record_command_custody(&run, &custody).unwrap();
+        store.mark_capability_starting(&run, "browser").unwrap();
+        store
+            .mark_capability_spawned(&run, "browser", i32::MAX as u32)
+            .unwrap();
+        let run = store.run(&run.id).unwrap().unwrap();
+        store
+            .begin_tool(
+                &run,
+                "native-call",
+                "workspace_native_exec",
+                "synthetic-digest",
+            )
+            .unwrap();
+
+        let inspection = inspect_session(&store, &session.id).unwrap();
+        assert_eq!(inspection["provider"], Provider::Codex.as_str());
+        assert_eq!(inspection["session"], session.id.as_str());
+        assert_eq!(inspection["requirements"]["native_execution"], true);
+        assert_eq!(inspection["receipts"]["runCount"], 1);
+        assert_eq!(inspection["receipts"]["effectCount"], 1);
+        assert_eq!(
+            inspection["receipts"]["runs"][0]["id"].as_str(),
+            Some(run.id.as_str())
+        );
+        assert_eq!(
+            inspection["receipts"]["runs"][0]["leaseHeld"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            inspection["receipts"]["runs"][0]["owner"]["pid"],
+            std::process::id()
+        );
+        assert_eq!(inspection["receipts"]["runs"][0]["owner"]["alive"], true);
+        assert_eq!(
+            inspection["receipts"]["runs"][0]["toolEffects"][0],
+            serde_json::json!({
+                "call": "native-call",
+                "operation": "workspace_native_exec",
+                "inputDigest": "synthetic-digest",
+                "settled": false,
+            })
+        );
+        assert_eq!(
+            inspection["receipts"]["runs"][0]["commandCustody"]["commandId"],
+            "cmd_synthetic"
+        );
+        assert_eq!(
+            inspection["receipts"]["runs"][0]["capabilityProcesses"]["browser"],
+            i32::MAX
+        );
+        assert_eq!(
+            inspection["methodCoverage"]["codexSchemaSha256"],
+            crate::codex::SCHEMA_SHA256
+        );
+        assert_eq!(inspection["methodCoverage"]["total"], 262);
+        assert_eq!(
+            inspection["methodCoverage"]["coverageMeaning"],
+            "accountedForNotAllEnabled"
+        );
+        assert_eq!(inspection["nativeToolErrors"], serde_json::json!([]));
+
+        store.clear_command_custody(&run, &custody).unwrap();
+        store.clear_capability_custody(&run, "browser").unwrap();
+        store.settle_tool(&run, "native-call").unwrap();
+        store.settle(&run, State::Idle, 3).unwrap();
+        let inspection = inspect_session(&store, &session.id).unwrap();
+        let receipt = &inspection["receipts"]["runs"][0];
+        assert_eq!(receipt["leaseHeld"], false);
+        assert_eq!(receipt["toolEffects"][0]["settled"], true);
+        assert!(receipt["commandCustody"].is_null());
+        assert_eq!(receipt["capabilityProcesses"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn session_inspection_marks_effects_hidden_by_run_truncation() {
+        use xcb_core::{
+            Id, Provider,
+            models::{Mode, ModelChoice},
+            session::State,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        let workspace = crate::private::directory(&root.join("workspace")).unwrap();
+        let store = Store::open(&root.join("state")).unwrap();
+        let account = store
+            .add_account(Provider::Codex, "Fixture", 1, None)
+            .unwrap();
+        let model = ModelChoice {
+            provider: Provider::Codex,
+            id: Id::new("fixture").unwrap(),
+            label: "Fixture".into(),
+            mode: Mode::Fixed,
+            resolved: None,
+            effort: None,
+            observed_at_ms: 1,
+        };
+        let session = store
+            .create_session(&account.id, model, &workspace, 1)
+            .unwrap();
+        for index in 0..17u64 {
+            let current = store.session(&session.id).unwrap().unwrap();
+            let run = store
+                .prepare_run(&session.id, current.revision, 2 + index)
+                .unwrap();
+            if index == 0 {
+                store
+                    .begin_tool(&run, "native-call", "workspace_native_exec", "digest")
+                    .unwrap();
+                store.settle_tool(&run, "native-call").unwrap();
+            }
+            store.settle(&run, State::Idle, 20 + index).unwrap();
+        }
+
+        let inspection = inspect_session(&store, &session.id).unwrap();
+        assert_eq!(inspection["receipts"]["runCount"], 17);
+        assert_eq!(inspection["receipts"]["runsTruncated"], true);
+        assert_eq!(inspection["receipts"]["effectCount"], 1);
+        assert_eq!(inspection["receipts"]["effectsTruncated"], true);
+        assert!(
+            inspection["receipts"]["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|run| run["toolEffects"].as_array().unwrap().is_empty())
+        );
     }
 
     #[test]
