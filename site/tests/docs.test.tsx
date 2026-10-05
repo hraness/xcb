@@ -243,6 +243,9 @@ describe("organized documentation", () => {
     // The homepage links /docs/route#sdk.
     expect(html).toContain('id="sdk"');
     expect(html).toContain('href="/docs/sdk"');
+    // /compare/claude-code links /docs/route#call-from-an-agent; the agent section previews first.
+    expect(html).toContain('id="call-from-an-agent"');
+    expect(textOf(html)).toContain('"dryRun": true');
   });
 
   test("installs the SDK from npm and imports only exported names", async () => {

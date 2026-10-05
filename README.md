@@ -219,11 +219,14 @@ command, setting, and exit code.
 
 `xcb usage` shows your token use across coding agents by day, agent, provider,
 and model. The numbers come from [aicharts](https://aicharts.io), which keeps a
-daily record on your computer and uploads nothing, so it needs the `aicharts`
-command installed ([get it](https://aicharts.io/usage)). `xcb usage enable`
-has aicharts collect four times a day, `xcb usage report --csv` exports the
-rows, and agents can read the same record through `aicharts mcp`. Quota left
-on each subscription stays in `xcb accounts`.
+daily record on your computer and uploads nothing. The installer above adds
+aicharts; after another install method, [get it](https://aicharts.io/usage).
+`xcb usage enable` has aicharts collect four times a day, and
+`xcb usage report --csv` exports the rows. `xcb usage connect` gives Claude and
+Codex tasks aicharts' read-only usage tools, so an agent you route can answer
+questions about your token use or chart it; run it again after updating
+aicharts. `xcb doctor` shows whether the record is collecting and the tools are
+connected. Quota left on each subscription stays in `xcb accounts`.
 
 ## Limits
 
