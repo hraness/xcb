@@ -336,25 +336,28 @@ pub(crate) fn authentication_cue(text: &str) -> bool {
     // Match the actual error line, not quoted advice in another failure.
     let subscription_refused = lower.lines().any(|line| {
         line.trim()
-            .strip_prefix("your organization has disabled claude subscription access for claude code")
+            .strip_prefix(
+                "your organization has disabled claude subscription access for claude code",
+            )
             .is_some_and(|rest| rest.is_empty() || rest.starts_with(" · "))
     });
-    subscription_refused || [
-        "not logged in",
-        "/login",
-        "invalid api key",
-        "authentication_error",
-        "authentication failed",
-        "invalid authentication",
-        "unauthorized",
-        "oauth token",
-        "expired token",
-        "token has expired",
-        "token expired",
-        "invalid token",
-    ]
-    .iter()
-    .any(|cue| lower.contains(cue))
+    subscription_refused
+        || [
+            "not logged in",
+            "/login",
+            "invalid api key",
+            "authentication_error",
+            "authentication failed",
+            "invalid authentication",
+            "unauthorized",
+            "oauth token",
+            "expired token",
+            "token has expired",
+            "token expired",
+            "invalid token",
+        ]
+        .iter()
+        .any(|cue| lower.contains(cue))
 }
 
 pub fn parse_event(bytes: &[u8]) -> Result<Event> {
@@ -868,10 +871,16 @@ mod tests {
             (refusal.to_owned(), false, None),
             (format!("> {refusal}"), true, None),
             (format!("A user quoted: {refusal}"), true, None),
-            ("Your organization has disabled an unrelated feature".into(), true, None),
+            (
+                "Your organization has disabled an unrelated feature".into(),
+                true,
+                None,
+            ),
         ] {
             let value = json!({"type":"result", "subtype":if is_error {"error_during_execution"} else {"success"}, "is_error":is_error, "errors":[text]});
-            let Event::Result { failure, .. } = parse_value(value).unwrap() else { panic!("expected result") };
+            let Event::Result { failure, .. } = parse_value(value).unwrap() else {
+                panic!("expected result")
+            };
             assert_eq!(failure, expected);
         }
     }
