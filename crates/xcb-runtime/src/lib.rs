@@ -23,6 +23,7 @@ pub mod device_login;
 #[path = "event_journal_v1.rs"]
 pub mod event_journal;
 // Only the workspace tools, which Windows builds refuse, take this lock.
+pub mod clef;
 #[cfg_attr(windows, allow(dead_code))]
 mod coordination;
 /// Legacy Devin protocol implementation retained only to decode and clean up

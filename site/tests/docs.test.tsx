@@ -188,7 +188,9 @@ describe("organized documentation", () => {
     expect(textOf(html)).toContain("xcb plugins disable auto-continue");
     expect(html).toContain("turn_timeout_ms");
     expect(html).toContain("1,000 to 3,600,000 milliseconds");
-    expect(textOf(html)).toContain("xcb judge token < /secure/path/to/judge-key");
+    expect(textOf(html)).toContain("xcb judge clef --model clef");
+    expect(textOf(html)).toContain("CLOUDFLARE_ACCOUNT_ID");
+    expect(textOf(html)).toContain("CLOUDFLARE_API_TOKEN");
   });
 
   test("documents offline command-runner setup and its limits without internal tools", async () => {
@@ -294,7 +296,7 @@ describe("organized documentation", () => {
 
   test("states what the optional judge sends", async () => {
     const html = await renderTopic("security");
-    for (const fact of ["api.typesafe.ai", "128 KiB", "8 KiB", "88 KiB", "port 443", "~/.local/share/xcb"]) expect(html).toContain(fact);
+    for (const fact of ["api.cloudflare.com", "128 KiB", "8 KiB", "88 KiB", "port 443", "~/.local/share/xcb"]) expect(html).toContain(fact);
     expect(html).toContain('id="judge"');
   });
 

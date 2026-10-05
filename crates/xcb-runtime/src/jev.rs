@@ -143,9 +143,18 @@ impl SystemOne {
             enabled: true,
             model,
             endpoint,
+            ..Default::default()
         })?;
+        if Endpoint::parse(&url)?.host == "api.cloudflare.com" {
+            return Err(
+                xcb_core::Error::Invalid("legacy judge endpoint cannot use Cloudflare").into(),
+            );
+        }
+        Self::transport(token, model.as_str().to_owned(), url)
+    }
+
+    pub(crate) fn transport(token: Zeroizing<String>, model: String, url: String) -> Result<Self> {
         let endpoint = Endpoint::parse(&url)?;
-        let model = model.as_str().to_owned();
         let mut roots = RootCertStore::empty();
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         let config = ClientConfig::builder()
@@ -187,7 +196,7 @@ impl Judge for SystemOne {
 }
 
 impl SystemOne {
-    async fn exchange(&self, body: &[u8]) -> Result<(u16, Vec<u8>)> {
+    pub(crate) async fn exchange(&self, body: &[u8]) -> Result<(u16, Vec<u8>)> {
         let server = ServerName::try_from(self.endpoint.host.clone())
             .map_err(|_| xcb_core::Error::Invalid("judge endpoint host"))?;
         let addresses =
@@ -236,6 +245,9 @@ pub(crate) async fn read_response<S: AsyncReadExt + Unpin>(
         }
         buffer.extend_from_slice(&chunk[..read]);
         if let Some(end) = find_header_end(&buffer) {
+            if end > MAX_HEADER_BYTES {
+                return Err(xcb_core::Error::Limit("judge response headers").into());
+            }
             break end;
         }
     };

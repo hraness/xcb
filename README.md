@@ -215,6 +215,24 @@ your projects (`--state` or `XCB_STATE` moves it). The
 [CLI and configuration reference](https://xcb.sh/docs/reference) lists every
 command, setting, and exit code.
 
+## Optional Cloudflare Clef judge
+
+The judge is off by default. Set `CLOUDFLARE_ACCOUNT_ID` (32 hexadecimal
+characters) and `CLOUDFLARE_API_TOKEN` in your trusted host environment, then
+run `xcb judge enable`. `CLOUDFLARE_AUTH_TOKEN` also works. Clef requests use
+your Cloudflare Workers AI account and have separate provider charges.
+
+`xcb judge clef --model clef-flash` selects the alternative model; the default
+is `clef`. `xcb judge status`, `xcb judge test`, and `xcb doctor` do not send
+inference requests. `xcb judge disable` stops judge use. The judge advises
+routing and can veto safe continuation or context elision; it cannot approve
+a task, grant tools, or override deterministic safety checks.
+
+SDK callers can supply embedded PNG, JPEG, or WebP evidence explicitly: up to
+four images, 4 MiB and 16 megapixels each, 8 MiB total, and a 13 MiB request.
+xcb never captures screenshots automatically. See the
+[judge API and legacy configuration](docs/compatibility.md#judged-routing-continuation-and-compaction-optional).
+
 ## See your token use
 
 `xcb usage` shows your token use across coding agents by day, agent, provider,

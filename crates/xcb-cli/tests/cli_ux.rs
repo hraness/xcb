@@ -103,6 +103,43 @@ fn plain(args: &[&str]) -> Output {
 }
 
 #[test]
+fn clef_judge_cli_checks_configuration_without_inference_or_token_output() {
+    let sandbox = Sandbox::new("clef-judge");
+    let account = "a".repeat(32);
+    let env = [
+        ("CLOUDFLARE_ACCOUNT_ID", account.as_str()),
+        ("CLOUDFLARE_API_TOKEN", "synthetic-clef-cli-token"),
+    ];
+    let initial = sandbox.run(&["--json", "judge", "status"], &[]);
+    assert!(initial.status.success(), "{initial:?}");
+    let status: serde_json::Value = serde_json::from_slice(&initial.stdout).unwrap();
+    assert_eq!(status["provider"], "clef");
+    assert_eq!(status["model"], "clef");
+    assert_eq!(status["key"], "none");
+    assert!(status["endpoint"].is_null());
+    assert!(
+        sandbox
+            .run(&["judge", "clef", "--model", "clef-flash"], &[])
+            .status
+            .success()
+    );
+    assert!(sandbox.run(&["judge", "enable"], &[]).status.success());
+    let checked = sandbox.run(&["judge", "test"], &env);
+    assert!(checked.status.success(), "{checked:?}");
+    assert!(text(&checked.stdout).contains("No inference request was sent"));
+    let status = sandbox.run(&["--json", "judge", "status"], &env);
+    assert!(status.status.success(), "{status:?}");
+    assert!(!text(&status.stdout).contains("synthetic-clef-cli-token"));
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["model"], "clef-flash");
+    assert_eq!(status["key"], "env");
+    let refused = sandbox.run_with_input(&["judge", "token"], b"legacy-key");
+    assert!(!refused.status.success());
+    assert!(text(&refused.stderr).contains("environment only"));
+    assert!(!sandbox.state().join("jev-api-token").exists());
+}
+
+#[test]
 fn version_prints_name_and_version() {
     let output = plain(&["--version"]);
     assert!(output.status.success());
