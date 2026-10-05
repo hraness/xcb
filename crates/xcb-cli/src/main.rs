@@ -793,7 +793,7 @@ enum JudgeCommand {
     Test,
     #[command(about = "Select Cloudflare Clef; credentials stay in CLOUDFLARE_API_TOKEN")]
     Clef {
-        #[arg(long)]
+        /// Clef model alias: clef or clef-flash.
         #[arg(long, default_value = "clef", value_parser = ["clef", "clef-flash"])]
         model: String,
     },
