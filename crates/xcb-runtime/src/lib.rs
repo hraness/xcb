@@ -54,6 +54,7 @@ pub mod panes;
 pub mod private;
 pub mod process;
 mod protocol;
+pub mod provider_methods;
 #[cfg(any(all(test, unix), target_os = "macos"))]
 mod public_ca;
 pub mod qualification;

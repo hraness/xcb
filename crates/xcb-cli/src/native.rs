@@ -22,11 +22,23 @@ pub(crate) enum Commands {
         session: Option<xcb_core::Id>,
     },
     #[command(
-        about = "Read Claude startup methods, models and account metadata without a model prompt"
+        about = "List the checked provider methods and their integration status without starting a provider"
+    )]
+    Methods {
+        #[arg(long, help = "Provider whose checked task-adapter methods to list")]
+        provider: Provider,
+    },
+    #[command(
+        about = "Read provider startup methods, models and account metadata without a model prompt"
     )]
     Describe {
-        #[arg(long, help = "Existing Claude account name or id to inspect")]
+        #[arg(long, help = "Existing Claude or Codex account name or id to inspect")]
         account: String,
+        #[arg(
+            long,
+            help = "Also inspect this Claude metadata connection's MCP status and summary context; not a running task"
+        )]
+        runtime_status: bool,
     },
     #[command(about = "Verify native command filesystem confinement and DNS/HTTPS access")]
     Qualify,
@@ -119,24 +131,59 @@ pub(crate) async fn execute(
                 println!("{} workspace grants", config.native_execution.scopes.len());
             }
         }
-        Commands::Describe { account } => {
+        Commands::Methods { provider } => {
+            crate::print_json(xcb_runtime::provider_methods::describe(provider)?)?;
+        }
+        Commands::Describe {
+            account,
+            runtime_status,
+        } => {
             let account = store.resolve_account(&account)?;
-            if account.provider != Provider::Claude {
+            let provider = account.provider;
+            if !Provider::SUPPORTED.contains(&provider)
+                || (runtime_status && provider != Provider::Claude)
+            {
                 return Err(xcb_runtime::Error::Unavailable(
-                    "startup description requires a Claude account",
+                    "runtime status requires Claude; startup inspection supports Claude and Codex",
                 ));
             }
-            let pin = Pin::load(store.root(), Provider::Claude)?;
-            let metadata = crate::stop::Stop::install()?
-                .settle(Box::pin(runner::probe_claude_metadata(
-                    store,
-                    &pin,
-                    Some(&account.id),
-                )))
-                .await?;
-            store.set_account_models(&account.id, &metadata.models)?;
+            let pin = Pin::load(store.root(), provider)?;
+            let mut stop = crate::stop::Stop::install()?;
+            let metadata = match provider {
+                Provider::Claude => {
+                    let metadata = if runtime_status {
+                        stop.settle(Box::pin(runner::probe_claude_diagnostics(
+                            store,
+                            &pin,
+                            &account.id,
+                        )))
+                        .await?
+                    } else {
+                        stop.settle(Box::pin(runner::probe_claude_metadata(
+                            store,
+                            &pin,
+                            Some(&account.id),
+                        )))
+                        .await?
+                    };
+                    store.set_account_models(&account.id, &metadata.models)?;
+                    serde_json::to_value(metadata)?
+                }
+                Provider::Codex => {
+                    let metadata = stop
+                        .settle(Box::pin(runner::probe_codex_metadata(
+                            store,
+                            &pin,
+                            &account.id,
+                        )))
+                        .await?;
+                    store.set_account_models(&account.id, &metadata.models)?;
+                    serde_json::to_value(metadata)?
+                }
+                Provider::Devin => unreachable!(),
+            };
             crate::print_json(
-                json!({"version":1,"provider":"claude","accountId":account.id,"providerVersion":pin.version,"providerSha256":pin.sha256,"modelPromptSubmitted":false,"nativeQualified":native_backend::require_provider_qualification(store.root(), Provider::Claude, false).is_ok(),"metadata":metadata,"methods":{"startup":["initializationResult","supportedModels","supportedCommands","supportedAgents","accountInfo"],"execution":["streamInput","interrupt","close"],"guarded":["setPermissionMode","applyFlagSettings","setMcpServers","rewindFiles","stopTask"],"notImplemented":["mcpServerStatus","getContextUsage","reinitialize","reconnectMcpServer","toggleMcpServer","providerResume","providerFork"],"hostOwned":["setModel","resume","cancel"]}}),
+                json!({"version":1,"provider":provider,"accountId":account.id,"providerVersion":pin.version,"providerSha256":pin.sha256,"modelPromptSubmitted":false,"resetCreditsConsumed":false,"inspectionScope":"metadataProbe","nativeQualified":native_backend::require_provider_qualification(store.root(), provider, false).is_ok(),"accountNativeAcceptanceEstablished":false,"metadata":metadata,"methods":xcb_runtime::provider_methods::describe(provider)?}),
             )?;
         }
         Commands::Qualify => {
@@ -259,6 +306,63 @@ mod tests {
     }
 
     #[test]
+    fn method_inventory_and_runtime_inspection_accept_no_mutation_or_prompt() {
+        for provider in ["claude", "codex"] {
+            let cli =
+                crate::Cli::try_parse_from(["xcb", "native", "methods", "--provider", provider])
+                    .unwrap();
+            assert!(matches!(
+                cli.command,
+                Some(crate::Commands::Native {
+                    command: Commands::Methods { .. }
+                })
+            ));
+            assert!(
+                crate::Cli::try_parse_from([
+                    "xcb",
+                    "native",
+                    "methods",
+                    "--provider",
+                    provider,
+                    "--method",
+                    "turn/start"
+                ])
+                .is_err()
+            );
+        }
+        let cli = crate::Cli::try_parse_from([
+            "xcb",
+            "native",
+            "describe",
+            "--account",
+            "new-account",
+            "--runtime-status",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(crate::Commands::Native {
+                command: Commands::Describe {
+                    runtime_status: true,
+                    ..
+                }
+            })
+        ));
+        assert!(
+            crate::Cli::try_parse_from([
+                "xcb",
+                "native",
+                "describe",
+                "--account",
+                "new-account",
+                "--detail",
+                "full"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
     fn startup_description_requires_an_account_and_accepts_no_prompt() {
         assert!(crate::Cli::try_parse_from(["xcb", "native", "describe"]).is_err());
         assert!(
@@ -277,7 +381,7 @@ mod tests {
             crate::Cli::try_parse_from(["xcb", "native", "describe", "--account", "new-account"])
                 .unwrap();
         assert!(
-            matches!(cli.command, Some(crate::Commands::Native { command: Commands::Describe { account } }) if account == "new-account")
+            matches!(cli.command, Some(crate::Commands::Native { command: Commands::Describe { account, runtime_status: false } }) if account == "new-account")
         );
     }
 }

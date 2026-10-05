@@ -63,6 +63,107 @@ fn native_review_notice(completed: bool, status: &str) -> Value {
     json!({"method": if completed { "item/autoApprovalReview/completed" } else { "item/autoApprovalReview/started" }, "params":params})
 }
 
+#[tokio::test]
+async fn unimplemented_client_controls_never_write_a_provider_request() {
+    let mut c = codec();
+    let mut process = StreamProcess::spawn(tokio::process::Command::new("/bin/cat")).unwrap();
+    for method in crate::provider_methods::codex_methods("ClientRequest")
+        .filter(|method| !crate::provider_methods::codex_rpc_supported(method))
+    {
+        assert!(
+            c.rpc(&mut process, method, json!({})).await.is_err(),
+            "{method}"
+        );
+    }
+    assert!(
+        c.rpc(&mut process, "unknown/newOperation", json!({}))
+            .await
+            .is_err()
+    );
+    assert_eq!(c.next_id, 0);
+    assert!(process.join().await);
+}
+
+#[tokio::test]
+async fn observational_quota_inspection_never_consumes_reset_credits() {
+    let mut c = codec();
+    c.initialized = true;
+    c.options.metadata_only = true;
+    let response = json!({"id":1,"result":{"rateLimits":{"primary":{"usedPercent":100,"resetsAt":now_ms()/1000+3600}},"ordinaryUsageAllowed":false,"rateLimitResetCredits":{"credits":[{"id":"synthetic-credit"}]}}});
+    let script = format!(
+        "IFS= read -r request; printf '%s\\n' '{}'; if IFS= read -r extra; then exit 43; fi",
+        response
+    );
+    let mut command = tokio::process::Command::new("/bin/sh");
+    command.arg("-c").arg(script);
+    let mut process = StreamProcess::spawn(command).unwrap();
+    let points = c
+        .read_quotas(&mut process, &Id::new("fixture-pool").unwrap(), false)
+        .await
+        .unwrap();
+    assert_eq!(points.len(), 1);
+    assert_eq!(points[0].used_percent, 100.0);
+    assert_eq!(c.next_id, 1);
+    assert!(process.join().await);
+}
+
+#[test]
+fn every_unadmitted_server_request_is_rejected_before_host_execution() {
+    for method in crate::provider_methods::codex_methods("ServerRequest")
+        .filter(|method| *method != "item/tool/call")
+    {
+        let mut c = started();
+        let result = c.accept(
+            json!({"id":80,"method":method,"params":{"threadId":"thread1","turnId":"turn1"}}),
+        );
+        if [
+            "item/commandExecution/requestApproval",
+            "item/fileChange/requestApproval",
+            "item/permissions/requestApproval",
+        ]
+        .contains(&method)
+        {
+            let (events, replies) = result.unwrap();
+            assert!(matches!(&events[..], [Event::Attention]), "{method}");
+            assert_eq!(replies[0]["error"]["code"], -32601);
+        } else {
+            assert!(result.is_err(), "{method}");
+        }
+        assert!(c.calls.is_empty() && c.native_calls.is_empty(), "{method}");
+    }
+}
+
+#[test]
+fn all_notification_methods_are_accounted_for_without_granting_new_tools() {
+    let catalog = crate::provider_methods::describe(Provider::Codex).unwrap();
+    for row in catalog["methods"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["direction"] == "ServerNotification")
+    {
+        let method = row["method"].as_str().unwrap();
+        let mut c = started();
+        let result = c.accept(json!({"method":method,"params":{}}));
+        match row["status"].as_str().unwrap() {
+            "rejected" => assert!(result.is_err(), "{method}"),
+            "ignoredDiagnosticOnly" => {
+                let (events, replies) = result.unwrap();
+                assert!(
+                    events
+                        .iter()
+                        .all(|event| matches!(event, Event::Diagnostic(_))),
+                    "{method}"
+                );
+                assert!(replies.is_empty(), "{method}");
+            }
+            "validatedObservation" => (),
+            status => panic!("unaccounted {method}: {status}"),
+        }
+        assert!(c.calls.is_empty() && c.native_calls.is_empty(), "{method}");
+    }
+}
+
 #[test]
 fn native_automatic_review_observations_never_manufacture_approval() {
     let mut c = started();
@@ -565,6 +666,7 @@ fn interruption_names_only_the_admitted_turn() {
     assert_eq!(frame["params"]["threadId"], "thread1");
     assert_eq!(frame["params"]["turnId"], "turn1");
     assert_eq!(frame["id"], json!(c.next_id));
+    assert!(c.interruption().is_none());
     // Once the turn has completed there is nothing left to interrupt.
     c.completed = true;
     assert!(c.interruption().is_none());

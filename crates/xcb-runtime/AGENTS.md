@@ -50,3 +50,16 @@
   It does not replace process-group join, tool-effect settlement or retained
   account custody. Session/MCP/settings mutators require separate host-owned
   contracts and inventory revalidation; never add raw SDK pass-throughs.
+- Provider method coverage is task-adapter accounting, not an activation grant.
+  Keep `provider-methods.json` matched to the generated, digest-checked Codex
+  schema and pinned Claude Query interface. Every unsupported Codex client
+  control must fail before sending a request; requests and sensitive notices
+  cannot turn an inventory entry into execution authority.
+- Codex `native describe` is observational: no thread, prompt, or reset-credit
+  consumption. Preserve the separate existing quota-refresh policy. Inspection
+  uses an exact-account probe lease and must prove process/bridge cleanup.
+- Claude `describe --runtime-status` targets its own metadata connection, not
+  another running task. Request only summary context; return counters and
+  bounded server status, never memory paths, server URLs/config/env/errors,
+  tool descriptions, or raw payloads. Correlate exact request IDs, reject
+  executable traffic, and retain custody on unproven cleanup.

@@ -236,6 +236,40 @@ It may publish only through the repository's normal gates and workload
 identity. A failed or uncertain push is held for evidence-based reconciliation;
 the controller never retries an ambiguous publication or creates a second tag.
 
+## Provider operating-layer stages
+
+The native-provider work follows the same P1–P3 command, journal, and
+assurance contracts for both Claude and Codex:
+
+1. **Discovery and accounting:** retain a checked method inventory and a
+   per-method disposition. The task build accounts for the complete checked
+   Codex wire schema and pinned Claude Query interface. `native methods`
+   starts no provider; exact-account `native describe` submits no prompt.
+2. **Read-only diagnostics:** Claude summary context and redacted MCP status
+   target the inspection connection and name its probe run. Codex inspection
+   creates no thread and consumes no reset credit. Active-task diagnostics
+   still need a revision-checked command to the owning worker; never attach a
+   second process to a held account to inspect it.
+3. **Owned session controls:** map provider resume/fork, compaction, live
+   steering, and task stop to expected revisions, original account/workspace
+   grants, context lineage, and durable effect identities. Define stale-target,
+   interrupted-call, duplicate-request, and restart tests before activation.
+   Provider transcript operations are not unchecked SDK pass-throughs.
+4. **Granted runtime controls:** model/effort changes must use observed account
+   choices; MCP changes must use registered host server grants and revalidate
+   the effective inventory before another turn. Settings, reloads, rewinds,
+   remote control, and provider-managed children remain unavailable until
+   their own ownership and recovery contracts are implemented and tested.
+5. **Live acceptance and rollout:** preserve supported-build, account/quota,
+   OS, approval, and workspace checks. Source or metadata success does not
+   activate a provider. Claude live native acceptance remains blocked by
+   subscription usage; existing Codex command evidence is not evidence for
+   untested provider controls or a replacement artifact.
+
+This staged method coverage is not completion of the operating layer. Keep
+implemented diagnostics, source-only checks, pending controls, and deployed
+behavior separate in every progress record.
+
 ## Definition of done
 
 The north star is delivered when an external agent can discover xcb, operate a

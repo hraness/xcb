@@ -1232,6 +1232,35 @@ pub fn provider_admitted(root: &Path, pin: &Pin) -> bool {
 }
 
 async fn probe_codex(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<Vec<ModelChoice>> {
+    probe_codex_metadata_inner(store, pin, account, true)
+        .await
+        .map(|metadata| metadata.models)
+}
+
+pub async fn probe_codex_metadata(
+    store: &Store,
+    pin: &Pin,
+    account: &Id,
+) -> Result<crate::codex::Metadata> {
+    probe_codex_metadata_inner(store, pin, Some(account), false).await
+}
+
+async fn probe_codex_metadata_inner(
+    store: &Store,
+    pin: &Pin,
+    account: Option<&Id>,
+    allow_reset: bool,
+) -> Result<crate::codex::Metadata> {
+    if pin.provider != Provider::Codex
+        || account
+            .map(|id| store.account(id))
+            .transpose()?
+            .is_some_and(|account| account.provider != Provider::Codex)
+    {
+        return Err(Error::Unavailable(
+            "Codex metadata requires a Codex account and build",
+        ));
+    }
     let model = ModelChoice {
         provider: Provider::Codex,
         id: Id::new(crate::codex::QUALIFIED_MODELS[0])?,
@@ -1271,23 +1300,34 @@ async fn probe_codex(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<V
         let models = protocol
             .initialize(&mut process, "Metadata only; do not create or run a task.")
             .await?;
+        let (email, plan) = protocol.account_identity();
+        let mut quotas = Vec::new();
         if let Some(account) = account {
-            let (email, plan) = protocol.account_identity();
             if email.is_some() || plan.is_some() {
-                store.set_account_identity(account, email, plan)?;
+                store.set_account_identity(account, email.clone(), plan.clone())?;
             }
-            for point in protocol
-                .read_quotas(&mut process, &store.account(account)?.quota_pool)
-                .await?
-            {
+            quotas = protocol
+                .read_quotas(
+                    &mut process,
+                    &store.account(account)?.quota_pool,
+                    allow_reset,
+                )
+                .await?;
+            for point in &quotas {
                 store.record_account_quota(
                     run.as_ref()
                         .ok_or(Error::Conflict("quota probe has no lease"))?,
-                    &point,
+                    point,
                 )?;
             }
         }
-        Ok(models)
+        Ok(crate::codex::Metadata {
+            observed_at_ms: now_ms(),
+            models,
+            email,
+            plan,
+            quotas,
+        })
     }
     .await;
     let process_joined = process.join().await;
@@ -2296,6 +2336,23 @@ pub async fn probe_claude_metadata(
     pin: &Pin,
     account: Option<&Id>,
 ) -> Result<claude::Metadata> {
+    probe_claude_metadata_inner(store, pin, account, false).await
+}
+
+pub async fn probe_claude_diagnostics(
+    store: &Store,
+    pin: &Pin,
+    account: &Id,
+) -> Result<claude::Metadata> {
+    probe_claude_metadata_inner(store, pin, Some(account), true).await
+}
+
+async fn probe_claude_metadata_inner(
+    store: &Store,
+    pin: &Pin,
+    account: Option<&Id>,
+    inspect_runtime: bool,
+) -> Result<claude::Metadata> {
     if pin.provider != Provider::Claude
         || account
             .map(|id| store.account(id))
@@ -2356,21 +2413,21 @@ pub async fn probe_claude_metadata(
     )
     .await?;
     let result = async {
-        if let Some(run) = &run { store.mark_spawned(run, process.pid())?; }
-        let metadata = handshake(&mut process, false, "Return no messages; this connection is for host metadata queries only.").await?;
+        if let Some(run) = &run {
+            store.mark_spawned(run, process.pid())?;
+        }
+        let mut metadata = handshake(
+            &mut process,
+            false,
+            "Return no messages; this connection is for host metadata queries only.",
+        )
+        .await?;
         if let Some(account) = account {
-            process.send(&json!({"type":"control_request","request_id":"xcb_usage","request":{"subtype":"get_usage","skip_behaviors":true}})).await?;
-            let response = tokio::time::timeout(Duration::from_secs(20), async {
-                for _ in 0..128 {
-                    let bytes = process.frame().await?.ok_or(Error::Protocol("usage connection ended"))?;
-                    if let Event::ControlResponse(value) = claude::parse_event(&bytes)?
-                        && value.pointer("/response/request_id").and_then(Value::as_str) == Some("xcb_usage") {
-                            if value.pointer("/response/subtype").and_then(Value::as_str) != Some("success") { return Err(Error::Protocol("quota query unavailable")); }
-                            return value.pointer("/response/response").cloned().ok_or(Error::Protocol("quota response"));
-                        }
-                }
-                Err(Error::Protocol("usage frame limit"))
-            }).await.map_err(|_| Error::Unavailable("usage query timed out"))??;
+            let response = crate::claude_protocol::metadata_query(
+                &mut process,
+                crate::claude_protocol::MetadataQuery::Usage,
+            )
+            .await?;
             let pool = store.account(account)?.quota_pool;
             let now = now_ms();
             let mut points = parse_quotas(&response, &pool, now)?;
@@ -2387,7 +2444,13 @@ pub async fn probe_claude_metadata(
                     )?;
                 }
             }
-            for point in points { store.record_account_quota(run.as_ref().ok_or(Error::Conflict("quota probe has no lease"))?, &point)?; }
+            for point in points {
+                store.record_account_quota(
+                    run.as_ref()
+                        .ok_or(Error::Conflict("quota probe has no lease"))?,
+                    &point,
+                )?;
+            }
             // subscription_type is the provider's own plan report; the profile
             // file inside our launch profile may carry the account email.
             let plan = response
@@ -2401,18 +2464,49 @@ pub async fn probe_claude_metadata(
                 })
                 .map(|value| format!("Claude {value}"));
             let base = launch.artifacts.path();
-            let email = metadata.account.email.clone().or_else(|| auth::claude_profile_email(&[
-                &base.join("scratch").join("config"),
-                &base.join("scratch").join("home"),
-                &base.join("profile"),
-            ]));
-            let plan = plan.or_else(|| metadata.account.subscription_type.as_ref().map(|plan| format!("Claude {plan}")));
+            let email = metadata.account.email.clone().or_else(|| {
+                auth::claude_profile_email(&[
+                    &base.join("scratch").join("config"),
+                    &base.join("scratch").join("home"),
+                    &base.join("profile"),
+                ])
+            });
+            let plan = plan.or_else(|| {
+                metadata
+                    .account
+                    .subscription_type
+                    .as_ref()
+                    .map(|plan| format!("Claude {plan}"))
+            });
             if email.is_some() || plan.is_some() {
                 store.set_account_identity(account, email, plan)?;
             }
         }
+        if inspect_runtime {
+            let mcp = crate::claude_protocol::metadata_query(
+                &mut process,
+                crate::claude_protocol::MetadataQuery::McpStatus,
+            )
+            .await?;
+            let context = crate::claude_protocol::metadata_query(
+                &mut process,
+                crate::claude_protocol::MetadataQuery::ContextSummary,
+            )
+            .await?;
+            metadata.runtime = Some(claude::RuntimeDiagnostics {
+                probe_run_id: run
+                    .as_ref()
+                    .ok_or(Error::Conflict("runtime inspection has no lease"))?
+                    .id
+                    .clone(),
+                observed_at_ms: now_ms(),
+                context: claude::ContextSummary::parse(&context)?,
+                mcp_servers: claude::parse_mcp_status(&mcp)?,
+            });
+        }
         Ok::<_, Error>(metadata)
-    }.await;
+    }
+    .await;
     let process_joined = process.join().await;
     let bridge_joined = close_bridge(bridge).await;
     let joined = process_joined && bridge_joined;

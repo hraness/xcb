@@ -79,6 +79,29 @@ The first transport is local stdio or a local Unix socket. A process embedding
 xcb must not need a network account. Remote transports are adapters over the
 same messages, never alternate state models.
 
+### Operating layer for existing subscriptions
+
+xcb should let an agent operate the user's Claude and Codex subscriptions
+through one durable interface: discover capabilities, choose an available
+account and model, inspect context and usage, submit work, steer or stop it,
+and read verified progress after a restart. It should add coordination and
+recovery around provider sessions without substituting API billing or
+weakening provider policy.
+
+Both adapters need explicit method accounting and tests for startup,
+streaming, tools, limits, denials, cancellation, and recovery. Every method
+in a checked provider protocol must be identified as implemented, handled
+by xcb, or unavailable. Account sign-in, model discovery, source tests,
+and live command acceptance are different observations. A broad catalog
+must not imply that disabled provider controls are callable.
+
+Session resume/fork, live steering, context management, MCP changes, and
+background work should use xcb's durable task and command contracts. They
+must retain account identity, workspace grants, context lineage, expected
+revision, process ownership, and effect records. Read-only diagnostics come
+first; mutations require their own tests and relevant live acceptance.
+Raw provider calls are not the agent-facing interface.
+
 ### State, events, commands, and projections
 
 The stable contract has four layers:
@@ -205,11 +228,18 @@ account-pinned Sonnet session, but Claude rejected its prompt at the weekly
 usage limit, with a reported reset of 2026-10-06 at 03:00 UTC. Its process
 exited with no tool effects, and xcb recorded the account's quota block.
 Haiku was unsuitable for this check because it does not support Auto mode.
-The [Claude integration stages](provider-permissions.md#claude-integration-methods)
-add account-pinned native verification, Auto-compatible executable catalogs,
-allowlisted startup/account introspection, and cooperative cancellation on
-the task branch. Session, MCP, settings, and rewind controls retain separate
-scope, inventory, and recovery gates. These additions do not qualify Claude
+The [provider method stages](provider-permissions.md#provider-method-coverage)
+add account-pinned native verification, startup/account inspection for both
+providers, Auto-compatible Claude catalogs, and one-shot cooperative
+cancellation. The task build accounts for all 262 methods in the checked
+Codex wire schema and all 29 pinned Claude SDK Query methods. Claude can
+request summary-only context and redacted MCP status for its metadata
+connection; this is not inspection of an active coding task. Codex metadata
+inspection creates no thread, submits no prompt, and consumes no reset
+credit. Offline tests check method drift and refusal before execution;
+method accounting does not establish exhaustive live acceptance. Session,
+MCP, settings, and rewind controls retain separate scope, inventory, and
+recovery gates. These additions do not qualify Claude
 while subscription usage is exhausted or replace the validated live daemon.
 Claude native execution remains unavailable until authorized subscription
 usage and live acceptance succeed. Devin remains retired. Existing project
