@@ -30,7 +30,7 @@ rustup toolchain install 1.97.1 --profile minimal
 ./scripts/install-native.sh`;
 
 const firstTask = `cd ~/path/to/your/project
-xcb`;
+xcb run -p "Fix the failing test in add.js"`;
 
 const routeExample = `echo '{"version":1,"workspace":"'"$PWD"'","task":"Fix the failing parser test","dryRun":true}' \\
   | xcb --json route`;
@@ -72,6 +72,7 @@ export default function Install() {
               <PlatformInstall platforms={installPlatforms(publishedRelease)} />
               <p>When it finishes, <code>xcb --version</code> prints the version. If your shell says it can’t find <code>xcb</code>, add this line to your shell profile (<code>~/.zshrc</code> on a Mac) and open a new terminal:</p>
               <CodeBlock code={pathCommand} />
+              <p>On a Mac with Apple silicon or on Linux x86_64, the installer also adds <a href="/blog/how-xcb-uses-aicharts">aicharts</a> and, on a first install, turns on its local usage history: daily token totals for your agents, kept on this computer and never uploaded. <code>xcb usage</code> shows them. Set <code>XCB_USAGE_HISTORY=no</code> to leave history off, or <code>XCB_AICHARTS=no</code> to skip aicharts.</p>
             </PageSection>
           )
           : null}
@@ -79,7 +80,7 @@ export default function Install() {
         <PageSection id="windows" title="On Windows">
           <p>Providers don’t run in the native Windows build. To use them, install <a href="https://learn.microsoft.com/windows/wsl/install">WSL2</a> with Ubuntu and run the Linux steps on this page inside it. There, as on any Linux machine, Claude is the supported provider.</p>
           {windowsReleased
-            ? <p>The native Windows x86_64 build runs everything else: the thread, doctor, accounts, remote control, and routing, which refuses provider work with the WSL2 steps. Install it from PowerShell with the Windows command in <a href="#install">step 1</a>. It puts <code>xcb.exe</code> in <code>%LOCALAPPDATA%\Programs\xcb\bin</code>. The binary is not code-signed yet, so Windows may show a SmartScreen prompt the first time it runs.</p>
+            ? <p>The native Windows x86_64 build runs local task inspection, <code>xcb doctor</code>, accounts, and <code>xcb route</code>, which refuses provider work with the WSL2 steps. Install it from PowerShell with the Windows command in <a href="#install">step 1</a>. It puts <code>xcb.exe</code> in <code>%LOCALAPPDATA%\Programs\xcb\bin</code>. The binary is not code-signed yet, so Windows may show a SmartScreen prompt the first time it runs.</p>
             : <p>A native Windows x86_64 build, which runs everything except the providers, ships with the next release.</p>}
         </PageSection>
 
@@ -90,7 +91,7 @@ export default function Install() {
 
         <PageSection id="first-task" title={released ? "3. Give it a task" : "Give it a task"}>
           <CodeBlock code={firstTask} />
-          <p>This opens your thread. Type a task, such as <em>fix the failing test in add.js</em>, and press Enter. xcb says which project folder it chose, picks an account and model that can take the task, and shows the answer when the task finishes. Close the terminal whenever you like: the task keeps running, and the next <code>xcb</code> shows the result. <code>/tasks</code> lists your work and <code>/help</code> lists every command.</p>
+          <p>xcb picks an account and model that can take the task, runs it in this project folder, and prints the answer when the task finishes. For work that should keep going after you close the terminal, add it to the project’s backlog with <code>xcb backlog add &lt;project-folder&gt; &quot;&lt;task&gt;&quot; --ready</code>; <code>xcb tasks</code> lists your work and <code>xcb --help</code> lists every command.</p>
           <p>The <a href="/docs/getting-started">getting started guide</a> walks through a first task step by step.</p>
         </PageSection>
 
