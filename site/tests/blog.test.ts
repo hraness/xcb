@@ -53,20 +53,35 @@ describe("xcb blog", () => {
     expect(jsonLd.publisher).toEqual(party);
   });
 
-  test("names the AI review as AI and never as human", () => {
+  test("names an AI review as AI and calls only a recorded human editor human", () => {
     for (const entry of blogPosts) {
+      const { review, humanReview } = entry.admission;
       const sentence = articleProvenanceSentence(articleProvenanceFromAdmission(entry.admission));
-      expect(sentence).not.toMatch(/human/iu);
-      expect(entry.admission.humanReview).toBeNull();
-      if (entry.admission.review === null) {
+      // A human review is always a person's, and only alongside a review on record.
+      if (humanReview !== null) {
+        expect(review).not.toBeNull();
+        expect(humanReview.reviewerType).not.toBe("ai" as never);
+      }
+      if (review === null) {
         // A post nobody has reviewed says so on the page and stays out of discovery.
         expect(sentence).toBe("Drafted with AI from the source code. It has not been reviewed yet.");
         expect(entry.admission.lifecycle).toBe("quarantined");
+      } else if (review.reviewerType === "human-editor") {
+        expect(sentence).toBe(`Drafted with AI from the source code and reviewed by ${review.reviewer}, a human editor.`);
+        expect(humanReview).toEqual(review);
       } else {
+        expect(review.reviewerType).toBe("ai");
         expect(sentence).toStartWith("Drafted with AI from the source code and reviewed by ");
-        expect(entry.admission.review.reviewerType).toBe("ai");
+        expect(sentence).not.toMatch(/human/iu);
       }
     }
+  });
+
+  test("refuses an AI review that claims to be human", () => {
+    const aiAsHuman = { drafting: "ai-from-source", review: { reviewer: "Codex human review", reviewerType: "ai" } } as const;
+    expect(() => articleProvenanceSentence(aiAsHuman)).toThrow(/human/u);
+    const aiHumanReview = { ...blogPosts[0]!.admission, humanReview: { reviewer: "Codex", reviewerType: "ai", reviewedOn: "2026-10-04" } };
+    expect(() => assertArticleAdmissions([aiHumanReview])).toThrow(/humanReview cannot record an AI reviewer/u);
   });
 
   test("redirects retired post URLs to posts in the registry", async () => {
