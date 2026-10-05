@@ -42,8 +42,10 @@ On macOS with Apple silicon and Linux x86_64 it also installs
 SHA-256 digest and, on macOS, its Developer ID signature. On a first install
 it turns on local usage history: daily token totals for your agents, kept on
 this computer and never uploaded. `aicharts history disable` turns it off.
-Set `XCB_USAGE_HISTORY=no` to leave it off, or `XCB_AICHARTS=no` to skip
-aicharts.
+It also turns on aicharts' daily self-update check, which installs a new
+release only after verifying it; `aicharts update disable` turns that off, or
+set `XCB_AICHARTS_UPDATE=no` before installing. Set `XCB_USAGE_HISTORY=no` to
+leave history off, or `XCB_AICHARTS=no` to skip aicharts.
 
 New release installs update automatically before an interactive `run` or
 `doctor` command, at most once a day and only when no other
