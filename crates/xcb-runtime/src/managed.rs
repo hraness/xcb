@@ -34,7 +34,7 @@ use xcb_core::{
 };
 
 const MAX_CONVERSATIONS: i64 = 4096;
-const MAX_TASKS: i64 = 4096;
+const MAX_TASKS: i64 = 65_536;
 const MAX_NONTERMINAL_TASKS: i64 = 128;
 const MAX_MESSAGES: i64 = 50_000;
 const MAX_TOTAL_MESSAGES: i64 = 200_000;
@@ -52,14 +52,23 @@ mod habitat;
 #[path = "managed_overview.rs"]
 mod overview;
 pub use habitat::{HabitatSchedule, ScheduleView, WorkMemory};
+#[path = "managed_completion.rs"]
+mod completion;
+#[path = "managed_completion_pr.rs"]
+mod completion_pr;
 #[path = "managed_project.rs"]
 mod project;
+pub use completion::CompletionReview;
 pub use project::{HerdStatus, MemoryBinding, ProjectPolicy, ProjectProposal};
 #[path = "managed_inbox.rs"]
 mod inbox;
 #[path = "managed_resources.rs"]
 mod resources;
 pub use inbox::{InboxEvent, InboxWatch};
+#[path = "managed_capacity.rs"]
+mod capacity;
+use capacity::capacity_target;
+
 #[path = "managed_program_state.rs"]
 mod program_state;
 pub use program_state::{ProgramChild, ProgramStatus};
@@ -260,6 +269,11 @@ pub struct ManagedTask {
     pub tried_routes: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed_accounts: Vec<Id>,
+    /// Durable provider recovery; independent of productive continuation attempts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<crate::retry::TaskRetry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_review: Option<CompletionReview>,
     pub state: TaskState,
     /// Deferred work is retained until explicitly released.
     #[serde(default)]
@@ -325,6 +339,38 @@ pub struct ManagedTask {
     pub updated_at_ms: u64,
 }
 impl ManagedTask {
+    fn recovery_exclusions(&self, now: u64) -> (BTreeSet<String>, BTreeSet<Id>) {
+        let temporary = self
+            .retry
+            .as_ref()
+            .map(|retry| retry.exclusions.as_slice())
+            .unwrap_or_default();
+        let routes = self
+            .tried_routes
+            .iter()
+            .filter(|route| {
+                temporary
+                    .iter()
+                    .find(|entry| entry.route == **route)
+                    .is_none_or(|entry| entry.until_ms > now)
+            })
+            .cloned()
+            .collect();
+        let accounts = self
+            .failed_accounts
+            .iter()
+            .filter(|account| {
+                let entries: Vec<_> = temporary
+                    .iter()
+                    .filter(|entry| entry.account.as_ref() == Some(*account))
+                    .collect();
+                entries.is_empty() || entries.iter().any(|entry| entry.until_ms > now)
+            })
+            .cloned()
+            .collect();
+        (routes, accounts)
+    }
+
     fn same_identity(&self, other: &Self) -> bool {
         self.id == other.id
             && self.operation == other.operation
@@ -387,6 +433,7 @@ impl ManagedTask {
             || self.failed_accounts.len() > 16
             || self.failed_accounts.iter().collect::<BTreeSet<_>>().len()
                 != self.failed_accounts.len()
+            || self.retry.as_ref().is_some_and(|retry| !retry.valid())
             || self.revision == 0
             || self.updated_at_ms < self.created_at_ms
             || !Path::new(&self.workspace).is_absolute()
@@ -448,6 +495,9 @@ impl ManagedTask {
         }
         if let Some(output) = &self.last_output {
             bounded_text(output, xcb_core::MAX_TEXT_BYTES)?;
+        }
+        if let Some(review) = &self.completion_review {
+            review.validate()?;
         }
         if let Some(binding) = &self.binding {
             binding.validate()?;
@@ -2604,6 +2654,7 @@ impl ManagedStore {
             required_model,
             tried_routes: vec![],
             failed_accounts: vec![],
+            retry: None, completion_review: None,
             state: if routing_question {TaskState::NeedsInput}else{TaskState::Queued},
             deferred: options.deferred,
             priority: options.priority,
@@ -2863,9 +2914,11 @@ impl ManagedStore {
             }
         }
         next.attempts = 0;
+        next.completion_review = None;
         next.inbox_continuation = false;
         next.input_at_ms = Some(now);
         next.last_output = None;
+        next.retry = None;
         next.failed_accounts.clear();
         next.tried_routes.clear();
         next.detail = "your answer is queued for the worker".into();
@@ -3679,10 +3732,46 @@ impl ManagedStore {
         let cancellation_settled =
             !unsettled && (dispatch_unstarted || session_state == Some(State::Cancelled));
         let config = Config::load(store.root())?.0;
+        let recovery_allowed = task
+            .retry
+            .as_ref()
+            .is_none_or(|retry| retry.permits(now_ms()));
+        let no_effect_refusal = !task.cancel_requested
+            && !unsettled
+            && recovery_allowed
+            && result.as_ref().is_ok_and(|outcome| {
+                outcome.facts.joined
+                    && outcome.facts.terminal == Terminal::Failed
+                    && outcome.facts.effects == EffectState::None
+                    && outcome.tool_calls == Some(0)
+                    && !outcome.facts.pending_attention
+                    && matches!(
+                        outcome.facts.failure,
+                        Some(
+                            Failure::ProviderUnavailable
+                                | Failure::AccountQuota
+                                | Failure::ModelQuota
+                        )
+                    )
+            });
+        let unstarted_retry = !task.cancel_requested
+            && dispatch_unstarted
+            && recovery_allowed
+            && result.as_ref().is_err_and(|error| {
+                matches!(
+                    error.failure(),
+                    Failure::Transport | Failure::ProviderUnavailable
+                )
+            });
+        let transient_retry = no_effect_refusal
+            && result
+                .as_ref()
+                .is_ok_and(|outcome| outcome.facts.failure == Some(Failure::ProviderUnavailable));
         let failover_route = config.auto_failover
+            && recovery_allowed
             && !task.cancel_requested
             && !unsettled
-            && task.attempts.saturating_add(1) < task.max_attempts
+            && (no_effect_refusal || task.attempts.saturating_add(1) < task.max_attempts)
             && result.as_ref().is_ok_and(|outcome| {
                 outcome.facts.joined
                     && matches!(outcome.state, State::Failed | State::Limited)
@@ -3712,10 +3801,12 @@ impl ManagedStore {
                             || d.as_str().contains(crate::runner::EMPTY_CATALOG)
                     })
             });
-        let failed_account = if failover_route
-            && result
-                .as_ref()
-                .is_ok_and(|outcome| outcome.facts.failure == Some(Failure::AccountQuota))
+        let recovery_reroute = transient_retry && config.auto_failover;
+        let failed_account = if recovery_reroute
+            || (failover_route
+                && result
+                    .as_ref()
+                    .is_ok_and(|outcome| outcome.facts.failure == Some(Failure::AccountQuota)))
         {
             match &task.session {
                 Some(session) => store.session(session)?.map(|session| session.account),
@@ -3774,7 +3865,30 @@ impl ManagedStore {
             _ => None,
         };
         let inbox_continue = inbox_requested && continuation.is_some();
-        let continue_task = continuation.is_some();
+        let authorized_project = self
+            .herd_policy_in(&task.workspace)?
+            .is_some_and(|policy| policy.enabled && policy.expires_at_ms > now_ms())
+            && self.project_dispatch_block(&task)?.is_none();
+        let completion_review = result
+            .as_ref()
+            .ok()
+            .filter(|_| !unsettled)
+            .and_then(|outcome| {
+                completion::review(
+                    &task,
+                    outcome,
+                    &config,
+                    settle.as_ref(),
+                    authorized_project,
+                    now_ms(),
+                )
+            });
+        let completion_continue = completion_review
+            .as_ref()
+            .is_some_and(|review| review.continue_task);
+        let continue_task = completion_review
+            .as_ref()
+            .map_or(continuation.is_some(), |review| review.continue_task);
         let acting_head = continuation.flatten();
         let budget_exhausted = match result {
             Ok(outcome) if !unsettled && !continue_task => {
@@ -3821,16 +3935,61 @@ impl ManagedStore {
                 .as_ref()
                 .map_or(next.user_inputs.len(), |batch| batch.input_count);
         }
-        if let Some(account) = failed_account
+        if let Some(account) = failed_account.clone()
             && !next.failed_accounts.contains(&account)
         {
             next.failed_accounts.push(account);
         }
-        next.attempts = next.attempts.saturating_add(1);
+        // Infrastructure refusals made no effects and do not consume work turns.
+        if !(unstarted_retry || transient_retry || (failover_route && no_effect_refusal)) {
+            next.attempts = next.attempts.saturating_add(1).min(next.max_attempts);
+        }
+        if unstarted_retry || transient_retry || failover_route {
+            let now = now_ms();
+            let mut retry =
+                crate::retry::TaskRetry::after(task.retry.as_ref(), task.id.as_str(), now);
+            if (failover_route || recovery_reroute)
+                && let (Some(route), Some(session_id)) = (&task.route, &task.session)
+                && let Some(session) = store.session(session_id)?
+            {
+                let until = if recovery_reroute {
+                    store
+                        .account_recovery(&session.account)?
+                        .map(|health| health.next_eligible_at_ms)
+                        .filter(|until| *until > now)
+                        .unwrap_or(retry.next_eligible_at_ms)
+                } else {
+                    store
+                        .quota_blocked_until(&session.account, now)?
+                        .unwrap_or_else(|| now.saturating_add(config.quota_limit_cooldown_ms))
+                };
+                retry.exclusions.retain(|entry| entry.route != *route);
+                retry.exclusions.push(crate::retry::RetryExclusion {
+                    route: route.clone(),
+                    account: failed_account.clone(),
+                    until_ms: until,
+                });
+            }
+            next.retry = Some(retry);
+        } else if result.as_ref().is_ok_and(settled_completion)
+            && let Some(retry) = next.retry.take()
+        {
+            next.tried_routes
+                .retain(|route| !retry.exclusions.iter().any(|entry| entry.route == *route));
+            next.failed_accounts.retain(|account| {
+                !retry
+                    .exclusions
+                    .iter()
+                    .any(|entry| entry.account.as_ref() == Some(account))
+            });
+        }
         next.revision += 1;
         next.updated_at_ms = now_ms();
         next.settle = settle.as_ref().map(|decision| decision.value.clone());
         next.acted = acting_head.map(str::to_owned);
+        next.completion_review = completion_review
+            .as_ref()
+            .map(|review| review.record.clone());
         let (state, detail, output) = match result {
             Ok(outcome)
                 if unsettled
@@ -3852,6 +4011,11 @@ impl ManagedStore {
                 "worker cancellation settled".into(),
                 Some(outcome.text.clone()),
             ),
+            Ok(outcome) if transient_retry => (
+                TaskState::Queued,
+                format!("provider temporarily unavailable; recovery retry at {} (deadline {})", next.retry.as_ref().unwrap().next_eligible_at_ms, next.retry.as_ref().unwrap().deadline_ms),
+                Some(outcome.text.clone()),
+            ),
             Ok(outcome) if failover_route => (
                 TaskState::Queued,
                 format!("Usage limit interrupted {}; selecting another eligible route", task.route.as_deref().unwrap_or("the previous route")),
@@ -3860,6 +4024,11 @@ impl ManagedStore {
             Ok(outcome) if stale_model => (
                 TaskState::Queued,
                 format!("{} was not in the provider's model list when the worker started, so the prompt was not sent; selecting another eligible route", task.route.as_deref().unwrap_or("the previous route")),
+                Some(outcome.text.clone()),
+            ),
+            Ok(outcome) if completion_review.is_some() => (
+                if completion_continue { TaskState::Queued } else { TaskState::NeedsInput },
+                if completion_continue { "required task work remains; bounded completion review queued" } else { "required task work remains; completion review paused by authority, progress, or budget limits" }.into(),
                 Some(outcome.text.clone()),
             ),
             Ok(outcome) if continue_task => (
@@ -3915,6 +4084,11 @@ impl ManagedStore {
             Err(error) if task.cancel_requested && cancellation_settled => (
                 TaskState::Cancelled,
                 "worker cancellation settled".into(),
+                Some(Diagnostic::from_error(error).as_str().to_owned()),
+            ),
+            Err(error) if unstarted_retry => (
+                TaskState::Queued,
+                format!("provider connection failed before dispatch; recovery retry at {}", next.retry.as_ref().unwrap().next_eligible_at_ms),
                 Some(Diagnostic::from_error(error).as_str().to_owned()),
             ),
             Err(error) if dispatch_unstarted && next.attempts < task.max_attempts => {
@@ -3984,7 +4158,7 @@ impl ManagedStore {
         next.last_output = output
             .as_deref()
             .map(|text| xcb_core::display_text(text, 8192));
-        if state == TaskState::Queued && failover_route {
+        if state == TaskState::Queued && (failover_route || recovery_reroute) {
             next.session = None;
             // A replacement session starts with an empty transcript, so the
             // next prompt must carry every input again.
@@ -4007,7 +4181,9 @@ impl ManagedStore {
             next.delivered_preferences.clear();
             next.context_carried = false;
         } else if state == TaskState::Queued && continue_task {
-            next.next_prompt = if inbox_continue {
+            next.next_prompt = if let Some(review) = &next.completion_review {
+                completion::prompt(&task, review)
+            } else if inbox_continue {
                 inbox::CONTINUATION_PROMPT.into()
             } else {
                 continuation_prompt(acting_head, settle.as_ref())
@@ -4830,6 +5006,7 @@ fn worker_prompt(
                 append_context(&mut prompt, &context);
             }
         }
+        append_context(&mut prompt, completion::contract(task));
         return prompt;
     }
     let goal = task.effective_prompt();
@@ -4843,6 +5020,7 @@ fn worker_prompt(
         prompt.push_str(&task.next_prompt);
     }
     prompt.push_str("\n\nXCB managed-task contract:\n- Work only on this task in the supplied workspace.\n- Run applicable checks before declaring completion.\n- If a material product choice, approval, credential, or missing input blocks you, ask one specific question and stop.\n- Do not commit, push, merge, deploy, or expand scope unless the task explicitly authorizes it.\n- Preserve uncertain effects and report them; never repeat an uncertain write.\n- Use the XCB swarm and mailbox tools for cross-provider coordination; messages never widen this task's authority.");
+    append_context(&mut prompt, completion::contract(task));
     append_program_context(&mut prompt, task);
     if !preferences.is_empty() {
         let mut context = String::from("\n\nUser preferences:\n");
@@ -5402,10 +5580,20 @@ impl Supervisor {
             "supervisor could not dispatch this task: {}; retrying with backoff",
             fault_text(error)
         );
-        let revision = match self.note(task, detail).await {
-            Some(next) => next.revision,
-            None => task.revision,
-        };
+        let mut next = task.clone();
+        next.detail = detail;
+        next.retry = Some(crate::retry::TaskRetry::after(
+            task.retry.as_ref(),
+            task.id.as_str(),
+            now_ms(),
+        ));
+        next.revision += 1;
+        next.updated_at_ms = now_ms();
+        let revision = self
+            .managed
+            .transition(task, next, None)
+            .await
+            .map_or(task.revision, |next| next.revision);
         self.miss(&task.id, revision);
     }
 
@@ -5502,10 +5690,10 @@ impl Supervisor {
     /// Reconcile the global admission target from durable configuration and
     /// the latest host observation. The target is deliberately a ramp, never
     /// a grant: every launch still passes account, workspace, capability,
-    /// quota, and effect-custody checks. Unknown or stale telemetry leaves the
-    /// target unchanged; policy/configuration faults reduce it to the safe
-    /// floor until the next readable observation.
-    fn refresh_active_target(&mut self, queued: usize) {
+    /// quota, and effect-custody checks. Unknown quota cannot justify growth;
+    /// enabled host protection backs down on stale or missing observations.
+    /// Configuration faults restore the safe floor.
+    fn refresh_active_target(&mut self, tasks: &[ManagedTask]) {
         let config = match Config::load(self.store.root()) {
             Ok((config, _)) => config,
             Err(error) => {
@@ -5518,29 +5706,54 @@ impl Supervisor {
         let ceiling = config.max_active_runs as usize;
         if !config.adaptive_parallelism {
             self.active_target = ceiling;
+            if self.active_target_changed.elapsed() >= CAPACITY_RAMP_INTERVAL {
+                self.active_target_changed = Instant::now();
+                if let Err(error) = self.save_capacity_status(&serde_json::json!({
+                    "atMs": now_ms(), "adaptive": false, "target": ceiling,
+                    "ceiling": ceiling, "active": self.active.len(), "reason": "configured-fixed-target",
+                })) {
+                    self.upkeep_fault("adaptive capacity status", &error);
+                }
+            }
             return;
         }
         self.active_target = self.active_target.clamp(DEFAULT_ACTIVE_TARGET, ceiling);
         if self.active_target_changed.elapsed() < CAPACITY_RAMP_INTERVAL {
             return;
         }
-        let pressure = self.resources.config_error
-            || self
-                .resources
+        let now = now_ms();
+        let assessment =
+            self.resources
                 .monitor
-                .assess(&self.resources.policy, self.store.root(), now_ms())
-                .blocked;
-        if pressure {
-            let next = (self.active_target / 2).max(DEFAULT_ACTIVE_TARGET);
-            if next != self.active_target {
-                self.active_target = next;
-                self.active_target_changed = Instant::now();
+                .assess(&self.resources.policy, self.store.root(), now);
+        let observation = self.capacity_observation(tasks, &config, now);
+        let (demand, capacity) = match observation {
+            Ok(observation) => observation,
+            Err(error) => {
+                self.upkeep_fault("adaptive capacity observation", &error);
+                (0, 0)
             }
-            return;
-        }
-        if queued > self.active.len() && self.active_target < ceiling {
-            self.active_target = (self.active_target.saturating_mul(2)).min(ceiling);
-            self.active_target_changed = Instant::now();
+        };
+        let (next, reason) = capacity_target(
+            self.active_target,
+            ceiling,
+            self.active.len(),
+            demand,
+            capacity,
+            self.resources.config_error || assessment.blocked,
+            !assessment.advisories.is_empty(),
+        );
+        self.active_target = next;
+        // Observe each window once, even when holding: a blocked queue must
+        // not repeat account/database scans on every 250 ms supervisor tick.
+        self.active_target_changed = Instant::now();
+        let status = serde_json::json!({
+            "atMs": now, "adaptive": true, "target": next, "ceiling": ceiling,
+            "active": self.active.len(), "readyWorkspaces": demand,
+            "availableSlotsUpperBound": capacity, "reason": reason,
+        });
+        if let Err(error) = self.save_capacity_status(&status) {
+            self.upkeep_fault("adaptive capacity status", &error);
         }
     }
 
@@ -5625,6 +5838,13 @@ impl Supervisor {
             self.upkeep_fault("daemon", &error);
         }
         if !draining {
+            if let Err(error) = self
+                .managed
+                .tick_completion_reviews(&self.store, now_ms())
+                .await
+            {
+                self.upkeep_fault("completion review", &error);
+            }
             if let Err(error) = self.managed.tick_projects(now_ms()).await {
                 self.upkeep_fault("project", &error);
             }
@@ -5646,7 +5866,7 @@ impl Supervisor {
         // Sampling never holds up joins or cancellation. Only one collection
         // may be in flight, even if a filesystem stops answering.
         self.refresh_resources(&tasks).await;
-        self.refresh_active_target(tasks.len());
+        self.refresh_active_target(&tasks);
         for task in &tasks {
             if !task.cancel_requested {
                 continue;
@@ -5763,6 +5983,41 @@ impl Supervisor {
     async fn launch(&mut self, task: &ManagedTask) -> Result<Dispatch> {
         let managed = self.managed.clone();
         let store = self.store.clone();
+        if let Some(review) = &task.completion_review {
+            let now = now_ms();
+            if !managed
+                .herd_policy_in(&task.workspace)?
+                .is_some_and(|policy| policy.enabled && policy.expires_at_ms > now)
+            {
+                return Ok(Dispatch::Deferred(
+                    "completion review waits for active project authority".into(),
+                ));
+            }
+            if review.pr.as_ref().is_some_and(|pr| pr.waiting) {
+                return Ok(Dispatch::Deferred(
+                    "read-only PR observer is waiting; no provider slot needed".into(),
+                ));
+            }
+            if review.next_review_at_ms > now {
+                return Ok(Dispatch::Deferred(format!(
+                    "completion review waits until {}",
+                    review.next_review_at_ms
+                )));
+            }
+        }
+        if let Some(retry) = &task.retry {
+            if !retry.permits(now_ms()) {
+                return match managed.fail_unstarted(task, "provider recovery budget exhausted; inspect the retained task and explicitly resume").await {
+                    Ok(_) | Err(Error::Conflict(_)) => Ok(Dispatch::Settled), Err(error) => Err(error),
+                };
+            }
+            if retry.next_eligible_at_ms > now_ms() {
+                return Ok(Dispatch::Deferred(format!(
+                    "provider recovery waits until {}",
+                    retry.next_eligible_at_ms
+                )));
+            }
+        }
         if let Some(reason) = managed.project_dispatch_block(task)? {
             return Ok(Dispatch::Deferred(reason.into()));
         }
@@ -5895,7 +6150,7 @@ impl Supervisor {
         });
         let (provider_preference, provider_required) = managed.effective_route_preferences(task)?;
         let required_provider = provider_required.then_some(provider_preference).flatten();
-        let created_session = task.session.is_none();
+        let mut created_session = task.session.is_none();
         let mut route_reason = task
             .route_reason
             .clone()
@@ -5923,20 +6178,7 @@ impl Supervisor {
                 }
             }
         } else {
-            if task.worker_sessions.len() >= 16 {
-                return match managed
-                    .fail_unstarted(
-                        task,
-                        "the worker-session limit was reached; start a new task from the last report",
-                    )
-                    .await
-                {
-                    Ok(_) | Err(Error::Conflict(_)) => Ok(Dispatch::Settled),
-                    Err(error) => Err(error),
-                };
-            }
-            let excluded_routes: BTreeSet<_> = task.tried_routes.iter().cloned().collect();
-            let excluded_accounts: BTreeSet<_> = task.failed_accounts.iter().cloned().collect();
+            let (excluded_routes, excluded_accounts) = task.recovery_exclusions(now_ms());
             let decision = match routing::smart_route(
                 &store,
                 &config,
@@ -5992,14 +6234,40 @@ impl Supervisor {
             }
             route_reason = decision.reason;
             let model_key = decision.model.key();
-            match kernel::new_session(
-                &store,
-                Path::new(&task.workspace),
-                &config,
-                Some(&decision.account),
-                Some(&model_key),
-                Some(&task.id),
-            ) {
+            // Reuse a retained settled session when a temporary exclusion expires.
+            // This preserves evidence without exhausting the lineage cap during an outage.
+            let reusable = if task.retry.is_some() {
+                task.worker_sessions
+                    .iter()
+                    .map(|id| store.session(id))
+                    .collect::<Result<Vec<_>>>()?
+                    .into_iter()
+                    .flatten()
+                    .find(|session| {
+                        session.account == decision.account && session.model.key() == model_key
+                    })
+            } else {
+                None
+            };
+            let prepared_session = if let Some(session) = reusable {
+                created_session = false;
+                Ok(session)
+            } else {
+                if task.worker_sessions.len() >= 16 {
+                    return match managed.fail_unstarted(task, "the worker-session limit was reached; start a new task from the last report").await {
+                        Ok(_) | Err(Error::Conflict(_)) => Ok(Dispatch::Settled), Err(error) => Err(error),
+                    };
+                }
+                kernel::new_session(
+                    &store,
+                    Path::new(&task.workspace),
+                    &config,
+                    Some(&decision.account),
+                    Some(&model_key),
+                    Some(&task.id),
+                )
+            };
+            match prepared_session {
                 Ok(session) => preserve_worker_route(
                     &store,
                     session,
@@ -6041,6 +6309,14 @@ impl Supervisor {
             .values()
             .filter(|account| *account == &session.account)
             .count() as u32;
+        if !store.account_recovery_available(&session.account, now_ms(), account_load)? {
+            if created_session {
+                store.remove_session(&session.id)?;
+            }
+            return Ok(Dispatch::Deferred(
+                "waiting for the account's provider recovery trial".into(),
+            ));
+        }
         if account_load >= config.max_runs_per_account {
             if created_session {
                 store.remove_session(&session.id)?;
@@ -8563,6 +8839,247 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_recovery_survives_restart_without_spending_productive_attempts() {
+        use xcb_core::models::{Mode, ModelChoice};
+        let state_root = root();
+        let workspace_root = root();
+        let state = private::directory(
+            &xcb_core::canonical(state_root.path())
+                .unwrap()
+                .join("state"),
+        )
+        .unwrap();
+        let workspace = xcb_core::canonical(workspace_root.path()).unwrap();
+        let managed = ManagedStore::open(&state).unwrap();
+        let xcb = Store::open(&state).unwrap();
+        let account = xcb.add_account(Provider::Codex, "Test", 1, None).unwrap();
+        let model = ModelChoice {
+            provider: Provider::Codex,
+            id: Id::new("gpt-5").unwrap(),
+            label: "GPT-5".into(),
+            mode: Mode::Fixed,
+            resolved: None,
+            effort: None,
+            observed_at_ms: 1,
+        };
+        let session = xcb
+            .create_session(&account.id, model.clone(), &workspace, 1)
+            .unwrap();
+        let chat = conversation(&managed, &workspace).await;
+        let task = managed
+            .create_task(
+                &chat,
+                message("m_provider_recovery"),
+                "finish work".into(),
+                vec![],
+                &workspace,
+            )
+            .await
+            .unwrap();
+        let route = format!("{} · {}", model.key(), account.id);
+        let mut task = task;
+        for failures in 1..=20 {
+            task = managed
+                .prepare(
+                    &task,
+                    session.id.clone(),
+                    route.clone(),
+                    "fixture".into(),
+                    0,
+                    String::new(),
+                )
+                .await
+                .unwrap();
+            task = managed
+                .finish(
+                    &xcb,
+                    &task.id,
+                    Ok(Outcome {
+                        tool_calls: Some(0),
+                        text_attention: false,
+                        diagnostic: None,
+                        text: "capacity unavailable".into(),
+                        facts: xcb_core::policy::TurnFacts {
+                            terminal: Terminal::Failed,
+                            joined: true,
+                            effects: EffectState::None,
+                            pending_attention: false,
+                            failure: Some(Failure::ProviderUnavailable),
+                        },
+                        state: State::Failed,
+                    }),
+                )
+                .await
+                .unwrap();
+            assert_eq!(task.state, TaskState::Queued);
+            assert_eq!(task.attempts, 0);
+            assert_eq!(task.worker_sessions.len(), 1);
+            let retry = task.retry.as_ref().unwrap();
+            assert_eq!(retry.failures, failures);
+            assert!(retry.next_eligible_at_ms > task.updated_at_ms);
+            let reopened = ManagedStore::open(&state).unwrap();
+            assert_eq!(
+                reopened
+                    .task(&task.id)
+                    .unwrap()
+                    .unwrap()
+                    .retry
+                    .unwrap()
+                    .next_eligible_at_ms,
+                retry.next_eligible_at_ms
+            );
+        }
+        for (index, (failure, joined, effects, attention, tools)) in [
+            (Failure::Transport, true, EffectState::None, false, Some(0)),
+            (
+                Failure::Authentication,
+                true,
+                EffectState::None,
+                false,
+                Some(0),
+            ),
+            (Failure::Policy, true, EffectState::None, false, Some(0)),
+            (
+                Failure::ProviderUnavailable,
+                false,
+                EffectState::None,
+                false,
+                Some(0),
+            ),
+            (
+                Failure::ProviderUnavailable,
+                true,
+                EffectState::Uncertain,
+                false,
+                Some(0),
+            ),
+            (
+                Failure::ProviderUnavailable,
+                true,
+                EffectState::Settled,
+                false,
+                Some(1),
+            ),
+            (
+                Failure::ProviderUnavailable,
+                true,
+                EffectState::None,
+                true,
+                Some(0),
+            ),
+            (
+                Failure::ProviderUnavailable,
+                true,
+                EffectState::None,
+                false,
+                None,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let another = managed
+                .create_task(
+                    &chat,
+                    message(&format!("m_unsafe_recovery_{index}")),
+                    "finish work".into(),
+                    vec![],
+                    &workspace,
+                )
+                .await
+                .unwrap();
+            let another = managed
+                .prepare(
+                    &another,
+                    session.id.clone(),
+                    route.clone(),
+                    "fixture".into(),
+                    0,
+                    String::new(),
+                )
+                .await
+                .unwrap();
+            let outcome = Outcome {
+                tool_calls: tools,
+                text_attention: false,
+                diagnostic: None,
+                text: "stopped".into(),
+                facts: xcb_core::policy::TurnFacts {
+                    terminal: Terminal::Failed,
+                    joined,
+                    effects,
+                    pending_attention: attention,
+                    failure: Some(failure),
+                },
+                state: State::Failed,
+            };
+            let stopped = managed
+                .finish(&xcb, &another.id, Ok(outcome))
+                .await
+                .unwrap();
+            assert_ne!(stopped.state, TaskState::Queued, "{failure:?}/{effects:?}");
+            assert!(stopped.retry.is_none());
+        }
+        // The independent retry horizon never becomes an unlimited task budget.
+        let mut expired = task.clone();
+        let retry = expired.retry.as_mut().unwrap();
+        retry.started_at_ms = 1;
+        retry.deadline_ms = 1 + crate::retry::RECOVERY_HORIZON_MS;
+        retry.next_eligible_at_ms = retry.deadline_ms;
+        expired.revision += 1;
+        task = managed.transition(&task, expired, None).await.unwrap();
+        task = managed
+            .prepare(&task, session.id, route, "fixture".into(), 0, String::new())
+            .await
+            .unwrap();
+        let stopped = managed
+            .finish(
+                &xcb,
+                &task.id,
+                Ok(Outcome {
+                    tool_calls: Some(0),
+                    text_attention: false,
+                    diagnostic: None,
+                    text: "capacity unavailable".into(),
+                    facts: xcb_core::policy::TurnFacts {
+                        terminal: Terminal::Failed,
+                        joined: true,
+                        effects: EffectState::None,
+                        pending_attention: false,
+                        failure: Some(Failure::ProviderUnavailable),
+                    },
+                    state: State::Failed,
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stopped.state, TaskState::Failed);
+    }
+
+    #[test]
+    fn provider_recovery_exclusions_expire_without_clearing_permanent_history() {
+        let workspace = root();
+        let mut task = bare_task(Id::new("chat").unwrap(), workspace.path());
+        task.tried_routes = vec!["temporary".into(), "permanent".into()];
+        let account = Id::new("account").unwrap();
+        task.failed_accounts = vec![account.clone()];
+        let mut retry = crate::retry::TaskRetry::after(None, "task", 100);
+        retry.exclusions.push(crate::retry::RetryExclusion {
+            route: "temporary".into(),
+            account: Some(account),
+            until_ms: 1000,
+        });
+        task.retry = Some(retry);
+        assert_eq!(task.recovery_exclusions(999).0.len(), 2);
+        assert_eq!(task.recovery_exclusions(999).1.len(), 1);
+        assert_eq!(
+            task.recovery_exclusions(1000).0,
+            BTreeSet::from(["permanent".into()])
+        );
+        assert!(task.recovery_exclusions(1000).1.is_empty());
+    }
+
+    #[tokio::test]
     async fn stale_model_refusal_requeues_on_a_new_route() {
         use xcb_core::models::{Mode, ModelChoice};
         let state_root = root();
@@ -8882,6 +9399,8 @@ mod tests {
             required_model: None,
             tried_routes: vec![],
             failed_accounts: vec![],
+            retry: None,
+            completion_review: None,
             state: TaskState::Queued,
             deferred: false,
             priority: 0,
@@ -9476,6 +9995,23 @@ mod tests {
         supervisor.tick(false).await.unwrap();
         let broken = managed.task(&broken.id).unwrap().unwrap();
         assert_eq!(broken.state, TaskState::Queued);
+        let retry_at = broken
+            .retry
+            .as_ref()
+            .expect("dispatch fault must persist backoff")
+            .next_eligible_at_ms;
+        assert!(retry_at > broken.updated_at_ms);
+        assert_eq!(
+            ManagedStore::open(&state)
+                .unwrap()
+                .task(&broken.id)
+                .unwrap()
+                .unwrap()
+                .retry
+                .unwrap()
+                .next_eligible_at_ms,
+            retry_at
+        );
         assert!(
             broken.detail.contains("supervisor could not dispatch"),
             "{}",

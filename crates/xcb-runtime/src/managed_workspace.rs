@@ -923,6 +923,51 @@ pub(super) fn repo_identity(path: &Path) -> Option<String> {
     None
 }
 
+/// Exact GitHub origin for read-only remote status. Unlike the display-only
+/// repository identity, this rejects other hosts, URL credentials and paths.
+pub(super) fn github_origin(path: &Path) -> Option<String> {
+    let common = repo_common(path)?;
+    let config = bounded_read(&common.join("config"), MAX_GIT_FILE_BYTES)?;
+    let mut in_origin = false;
+    let mut origin = None;
+    for line in config.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_origin = line == "[remote \"origin\"]";
+            continue;
+        }
+        if in_origin
+            && let Some((key, value)) = line.split_once('=')
+            && key.trim() == "url"
+        {
+            if origin.is_some() {
+                return None;
+            }
+            let value = value.trim();
+            let repo = value
+                .strip_prefix("https://github.com/")
+                .or_else(|| value.strip_prefix("git@github.com:"))?
+                .trim_end_matches(".git");
+            let parts: Vec<_> = repo.split('/').collect();
+            if parts.len() != 2
+                || parts.iter().any(|part| {
+                    part.is_empty()
+                        || *part == "."
+                        || *part == ".."
+                        || part.len() > 100
+                        || !part
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+                })
+            {
+                return None;
+            }
+            origin = Some(repo.to_owned());
+        }
+    }
+    origin
+}
+
 /// Bounds for one `git status` probe: a hung filesystem or lock-holding
 /// peer must not stall an audit, and a giant dirty tree must not grow the
 /// report without limit. Counts past the cap mark the probe `partial`.

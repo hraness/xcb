@@ -844,13 +844,13 @@ fn failed_turns_preserve_fixed_diagnostics_and_terminal_classification() {
         (
             "flexUnavailable",
             Terminal::Failed,
-            Some(Failure::Transport),
+            Some(Failure::ProviderUnavailable),
             "provider capacity temporarily unavailable",
         ),
         (
             "serverOverloaded",
             Terminal::Failed,
-            Some(Failure::Transport),
+            Some(Failure::ProviderUnavailable),
             "provider capacity temporarily unavailable",
         ),
         (

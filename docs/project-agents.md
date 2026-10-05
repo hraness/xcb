@@ -133,7 +133,7 @@ says `name the project: /project grant <name|dir> …`.
 `workspace`, `name`, and `status`, and `conversation` names the latest project
 view over that directory, or is null. CLI replacement grants
 require the current revision. A grant contains a user-authored goal, an expiry
-from one hour to 30 days, and a budget of 1–100 automatic follow-up tasks. An
+from one hour to 30 days, and a budget of 1–10,000 automatic follow-up tasks. An
 optional CLI `--provider` is a hard constraint inherited by automatic work.
 Configuring a grant does not invent an initial task: submit the first prompt,
 release a backlog item, or add a schedule to begin the project work.
@@ -146,6 +146,50 @@ account, and directory rules still apply. `xcb projects scale` changes the
 dials under the same revision check as every grant change, and
 `xcb projects status` shows live workers, open and unfinished work, starts in
 the current hour, and the schedules feeding the project.
+
+The global `max_active_runs` setting is a ceiling of 1–64 tasks;
+`max_runs_per_account` caps each subscription at 1–32 simultaneous runs.
+With `adaptive_parallelism` enabled, the supervisor starts at one and reviews
+capacity every 30 seconds. It adds at most one slot when the current target is
+occupied, another independent workspace has ready work, and local account data
+shows spare capacity with positive remaining quota. Paused, deferred, held,
+recovering and waiting-for-input work does not justify growth. Account access,
+provider/model support and workspace checks still run for each launch.
+
+Host pressure halves the target. Host warnings prevent growth, and a shortage
+of account capacity or ready work reduces it. Reducing the target lets running
+work finish. Resource protection must be enabled and reporting successfully to
+observe host pressure; when disabled, it supplies no host-health evidence.
+Unknown quota cannot justify adding slots, though the normal router may still
+attempt work at the current target. A restart begins at one again. The latest
+local decision, timestamp, demand and reason are saved in
+`managed/adaptive-capacity.json` under the state directory. This is an
+observation, so check its timestamp when the supervisor is stopped.
+
+These controls limit concurrency and starts, not tokens or dollars. Managed
+accounts currently have no token-runway estimate. Priority then age determines
+which ready task gets a slot; projects have caps, without weighted fair shares.
+A sequential program stays sequential even if its project's cap increases.
+
+For a month of unattended work, budget every child and leave recovery headroom.
+An hourly program with five agent cells needs about 3,600 child tasks over 30
+days, plus about 720 parent records. The explicit 10,000-task grant maximum
+supports that budget; existing grants keep their original limits. Expiry stays
+at most 30 days and is never renewed automatically. The shared store keeps up
+to 65,536 task records, with separate limits of 128 unfinished tasks, 128
+schedules, 200,000 messages and a 4 GiB database. Large outputs or many projects
+can reach another bound first. Status and preflight estimates should inform the
+budget; a large grant does not promise a month of available subscription usage.
+Retention keeps its existing 30-day horizon and protects unresolved work and
+dependencies. Increasing capacity does not delete history.
+
+Routing and continuation rules can learn from local labeled outcomes, compare
+candidates against fresh labels, and keep versioned parameters for rollback.
+This does not yet optimize project progress per token or automatically roll
+back a policy after a production regression. A month-long deployment still
+needs an external, tested recovery copy and reviewable records of goals,
+validation results and blockers. No schedule or grant is created by changing
+these limits.
 
 A grant authorizes automatic work in its own directory. It covers every
 task bound there, from the thread, a project view, or a remote dispatch, and no
@@ -356,3 +400,6 @@ How the upgrade treats existing settings:
   its open conflicts. A notice in the terminal stays up while any remain.
 - A project view rooted at your home directory or a hidden directory inside it
   can no longer start tasks; use a project directory instead.
+
+See [unattended operation](unattended-operations.md) for recovery, account health,
+completion checks, and the limits of month-long operation.

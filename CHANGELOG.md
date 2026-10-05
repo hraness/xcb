@@ -10,6 +10,28 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.19.0 - 2026-10-05
+
+xcb adds project herding controls and persistent recovery for unattended work,
+with local evidence for account health, execution, and delivery.
+
+- Add project concurrency and task-rate controls, schedule inspection, and
+  offline checkout preflight with revision, input, and budget checks.
+- Enforce hourly limits for automatic program and daemon children without
+  losing queued work or charging budgets twice.
+- Recover from temporary quota limits and explicit settled provider outages
+  with persistent backoff, account cooldowns, and one recovery trial at a time.
+- Scale concurrency from runnable work and available account capacity, with
+  bounded growth and reductions under host pressure.
+- Preserve required follow-up work and routine project-authorized continuation
+  across worker responses rather than treating every final response as delivery.
+- Add optional xAI, Vercel AI Gateway, and compatible-endpoint judges with
+  provider-specific credentials; direct xAI uses Grok 4.7 by default.
+- Add native execution grants, read-only status and custody inspection, exact
+  tested-artifact qualification, and explicit workspace grant revocation.
+- Retain scope, account, process-cleanup, and uncertain-effect checks. Provider
+  access and month-long live operation require separate validation.
+
 ## 0.18.0 - 2026-10-04
 
 xcb's current source build is agent-first: use the headless CLI, JSON route,

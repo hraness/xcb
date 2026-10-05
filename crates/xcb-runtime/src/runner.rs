@@ -2649,6 +2649,18 @@ pub async fn run(
     cancel: watch::Receiver<bool>,
     observer: Observer,
 ) -> Result<Outcome> {
+    run_with_pin(store, input, cancel, observer, None).await
+}
+
+/// Qualification supplies the exact verified artifact to launch. Never reload
+/// the provider pin after observing a successful fixture and attest new bytes.
+pub(crate) async fn run_with_pin(
+    store: Arc<Store>,
+    input: RunInput,
+    cancel: watch::Receiver<bool>,
+    observer: Observer,
+    expected_pin: Option<Pin>,
+) -> Result<Outcome> {
     let session = &input.session;
     if *cancel.borrow() {
         return Err(Error::Unavailable("cancelled before launch"));
@@ -2690,8 +2702,17 @@ pub async fn run(
         }
     }
     let workspace = Workspace::open(Path::new(&session.workspace))?;
+    let pin = match expected_pin {
+        Some(pin) => {
+            if pin.provider != session.model.provider {
+                return Err(Error::Unavailable("qualification provider pin mismatch"));
+            }
+            pin.verify()?;
+            pin
+        }
+        None => Pin::load(store.root(), session.model.provider)?,
+    };
     if session.model.provider == Provider::Codex {
-        let pin = Pin::load(store.root(), Provider::Codex)?;
         crate::codex::runtime_admitted_with_catalog(store.root(), &pin)?;
         let run = store.prepare_run(&session.id, session.revision, now_ms())?;
         #[cfg(target_os = "macos")]
@@ -2784,7 +2805,6 @@ pub async fn run(
             "native execution for this provider is not yet qualified",
         ));
     }
-    let pin = Pin::load(store.root(), Provider::Claude)?;
     let run = store.prepare_run(&session.id, session.revision, now_ms())?;
     let tools = !input.pane_generation;
     let mut custody = PreparationCustody {

@@ -178,6 +178,10 @@ pub(crate) enum Commands {
         )]
         github: bool,
     },
+    #[command(
+        about = "Remove this exact workspace's native execution grant; running commands must still finish safely"
+    )]
+    Revoke,
     #[command(about = "Grant native execution to this exact workspace and selected providers")]
     Grant {
         #[arg(
@@ -490,6 +494,27 @@ pub(crate) async fn execute(
                 println!("{provider} native shell, DNS/HTTPS and Git checks passed.");
             }
         }
+        Commands::Revoke => {
+            let workspace = xcb_core::canonical(workspace)?;
+            let (mut config, revision) = Config::load(store.root())?;
+            let previous = config.native_execution.scopes.len();
+            config
+                .native_execution
+                .scopes
+                .retain(|scope| scope.workspace != workspace);
+            let revoked = previous != config.native_execution.scopes.len();
+            if revoked {
+                config.save(store.root(), revision.as_deref())?;
+            }
+            if as_json {
+                crate::print_json(json!({"version":1,"workspace":workspace,"revoked":revoked}))?;
+            } else {
+                println!(
+                    "Native execution grant removed for {}. Already-running commands retain custody until they stop safely.",
+                    workspace.display()
+                );
+            }
+        }
         Commands::Grant {
             providers,
             github,
@@ -550,6 +575,46 @@ pub(crate) async fn execute(
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[tokio::test]
+    async fn native_revoke_is_exact_idempotent_and_needs_no_qualification() {
+        let directory =
+            std::env::temp_dir().join(format!("xcb-native-revoke-{}", xcb_runtime::new_id("test")));
+        std::fs::create_dir(&directory).unwrap();
+        let root = xcb_core::canonical(&directory).unwrap();
+        let workspace = root.join("project");
+        let other = root.join("other");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        let store = std::sync::Arc::new(Store::open(&root.join("state")).unwrap());
+        let (mut config, revision) = Config::load(store.root()).unwrap();
+        for workspace in [&workspace, &other] {
+            config.native_execution.scopes.push(NativeScope {
+                workspace: workspace.clone(),
+                providers: vec![Provider::Codex],
+                github_credentials: false,
+                read_only_roots: vec![],
+                git_metadata: vec![],
+            });
+        }
+        config.save(store.root(), revision.as_deref()).unwrap();
+        for _ in 0..2 {
+            execute(&store, &workspace, Commands::Revoke, true)
+                .await
+                .unwrap();
+            let scopes = Config::load(store.root())
+                .unwrap()
+                .0
+                .native_execution
+                .scopes;
+            assert_eq!(scopes.len(), 1);
+            assert_eq!(scopes[0].workspace, other);
+        }
+        assert!(store.unsettled_runs().unwrap().is_empty());
+        assert!(crate::Cli::try_parse_from(["xcb", "native", "revoke"]).is_ok());
+        drop(store);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn native_status_parses_exact_filters_and_jsonl_section() {

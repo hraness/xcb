@@ -60,6 +60,7 @@ pub mod provider_methods;
 mod public_ca;
 pub mod qualification;
 pub mod reflex;
+pub mod retry;
 pub mod route;
 pub mod routing;
 pub mod routing_stack;

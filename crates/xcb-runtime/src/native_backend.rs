@@ -624,6 +624,52 @@ fn managed_status(root: &Path, query: &StatusQuery) -> serde_json::Value {
     }
 }
 
+/// Independent health dimensions; recent success never clears auth, quota or custody.
+fn account_health(
+    record: &crate::store::StatusAccount,
+    credentials_present: bool,
+    recovery: Option<&crate::retry::AccountRecovery>,
+    now: u64,
+) -> serde_json::Value {
+    let last_success = recovery.and_then(|r| r.last_success_at_ms);
+    let recent_success = last_success.is_some_and(|at| at <= now && now - at <= 86_400_000);
+    let availability = match recovery {
+        Some(r) if r.consecutive_failures > 0 && r.next_eligible_at_ms > now => "provider_backoff",
+        Some(r) if r.consecutive_failures > 0 => "recovery_trial_due",
+        _ if recent_success => "recent_success",
+        _ => "unknown",
+    };
+    let quota_wait = record.quota_blocked_until_ms.is_some_and(|at| at > now);
+    let state = if !record.account.enabled {
+        "disabled"
+    } else if record.authentication_required || !credentials_present {
+        "reauth_required"
+    } else if record.lease_held && record.active_runs == 0 {
+        "custody_held"
+    } else if quota_wait {
+        "quota_wait"
+    } else if availability == "provider_backoff" || availability == "recovery_trial_due" {
+        availability
+    } else if record.active_runs > 0 {
+        "busy"
+    } else if recent_success {
+        "healthy"
+    } else {
+        "unknown"
+    };
+    serde_json::json!({
+        "state": state,
+        "availability": availability,
+        "consecutiveTransientFailures": recovery.map_or(0, |r| r.consecutive_failures),
+        "observedAtMs": recovery.map(|r| r.observed_at_ms),
+        "retryAtMs": recovery.filter(|r| r.consecutive_failures > 0).map(|r| r.next_eligible_at_ms),
+        "lastSettledSuccessAtMs": last_success,
+        "successFreshForMs": 86_400_000u64,
+        "quotaKnown": record.remaining_percent.is_some(),
+        "inferenceAvailable": "not established by inspection",
+    })
+}
+
 /// Local records for agent status checks. This projection never starts or
 /// attaches to a provider, submits no prompt, and does not refresh quota or
 /// credentials. It is a bounded snapshot, not a recovery decision.
@@ -694,6 +740,8 @@ pub fn status_snapshot(store: &Store, query: StatusQuery) -> Result<serde_json::
 
     let accounts = status_section(&snapshot.accounts, |record| {
         let account = &record.account;
+        let credentials_present = crate::auth::has_credentials(store, &account.id).unwrap_or(false);
+        let recovery = store.account_recovery(&account.id)?;
         Ok(serde_json::json!({
             "id": &account.id,
             "provider": account.provider,
@@ -702,7 +750,8 @@ pub fn status_snapshot(store: &Store, query: StatusQuery) -> Result<serde_json::
             "subscription": &account.subscription,
             "enabled": account.enabled,
             "authenticationRequired": record.authentication_required,
-            "credentialsPresent": crate::auth::has_credentials(store, &account.id).unwrap_or(false),
+            "credentialsPresent": credentials_present,
+            "health": account_health(record, credentials_present, recovery.as_ref(), now),
             "busy": record.active_runs > 0,
             "activeRuns": record.active_runs,
             "leaseHeld": record.lease_held,
@@ -994,6 +1043,72 @@ pub fn require_execution(config: &Config, requirements: TaskRequirements) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_health_keeps_auth_quota_custody_and_stale_success_separate() {
+        let directory = tempfile::tempdir().unwrap();
+        let store =
+            Store::open(&xcb_core::canonical(directory.path()).unwrap().join("state")).unwrap();
+        let account = store
+            .add_account(Provider::Codex, "Health fixture", 1000, None)
+            .unwrap();
+        let mut record = crate::store::StatusAccount {
+            account,
+            active_runs: 0,
+            lease_held: false,
+            authentication_required: false,
+            remaining_percent: Some(80.0),
+            resets_at_ms: None,
+            quota_blocked_until_ms: None,
+        };
+        let mut recovery = crate::retry::AccountRecovery {
+            consecutive_failures: 0,
+            observed_at_ms: 1000,
+            next_eligible_at_ms: 0,
+            last_success_at_ms: Some(1000),
+        };
+        assert_eq!(
+            account_health(&record, true, None, 2000)["state"],
+            "unknown"
+        );
+        assert_eq!(
+            account_health(&record, true, Some(&recovery), 2000)["state"],
+            "healthy"
+        );
+        assert_eq!(
+            account_health(&record, true, Some(&recovery), 90_000_000)["state"],
+            "unknown"
+        );
+        recovery.consecutive_failures = 2;
+        recovery.next_eligible_at_ms = 3000;
+        assert_eq!(
+            account_health(&record, true, Some(&recovery), 2000)["state"],
+            "provider_backoff"
+        );
+        assert_eq!(
+            account_health(&record, true, Some(&recovery), 3000)["state"],
+            "recovery_trial_due"
+        );
+        record.quota_blocked_until_ms = Some(4000);
+        assert_eq!(
+            account_health(&record, true, Some(&recovery), 2000)["state"],
+            "quota_wait"
+        );
+        record.lease_held = true;
+        assert_eq!(
+            account_health(&record, true, Some(&recovery), 2000)["state"],
+            "custody_held"
+        );
+        record.authentication_required = true;
+        assert_eq!(
+            account_health(&record, true, Some(&recovery), 2000)["state"],
+            "reauth_required"
+        );
+        assert_eq!(
+            account_health(&record, false, Some(&recovery), 2000)["availability"],
+            "provider_backoff"
+        );
+    }
 
     #[test]
     fn native_grants_are_closed_exact_and_absent_from_legacy_config() {

@@ -797,10 +797,18 @@ enum PluginCommand {
 }
 #[derive(Subcommand)]
 enum JudgeCommand {
-    /// Store an explicitly selected legacy System One key from stdin; Clef uses environment tokens.
-    Token,
-    /// Remove the vaulted judge key.
-    Logout,
+    /// Store a selected provider key from stdin; Clef uses environment tokens.
+    Token {
+        /// Credential scope; defaults to the selected judge provider.
+        #[arg(long, value_parser = ["xai", "vercel", "system-one"])]
+        provider: Option<String>,
+    },
+    /// Remove a provider-scoped vaulted judge key.
+    Logout {
+        /// Remove this provider's key; defaults to the selected provider.
+        #[arg(long, value_parser = ["xai", "vercel", "system-one"])]
+        provider: Option<String>,
+    },
     /// Report judge configuration without revealing the key.
     Status,
     /// Allow judged routing, safe continuation advice, and Gobstopper vetoes.
@@ -808,7 +816,26 @@ enum JudgeCommand {
     /// Disable judge use; routing, continuation, and compaction stay deterministic.
     Disable,
     /// Check judge configuration locally without sending an inference request.
-    Test,
+    Test {
+        /// Send one small synthetic inference request; no project context.
+        #[arg(long)]
+        live: bool,
+    },
+    /// Select an optional chat-completions judge; credentials stay outside project configuration.
+    Select {
+        /// API provider for judgment requests.
+        #[arg(value_parser = ["xai", "vercel", "openai-compatible"])]
+        provider: String,
+        /// Model identifier; canonical providers have a default.
+        #[arg(long)]
+        model: Option<String>,
+        /// Full HTTPS chat-completions endpoint; required for a custom provider.
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// Environment variable name, never an API key value.
+        #[arg(long)]
+        key_env: Option<String>,
+    },
     #[command(about = "Select Cloudflare Clef; credentials stay in CLOUDFLARE_API_TOKEN")]
     Clef {
         /// Clef model alias: clef or clef-flash.
@@ -3294,10 +3321,13 @@ async fn dispatch_inner(
         }
         Some(Commands::Judge { command }) => {
             match command {
-                Some(JudgeCommand::Token) => {
-                    if config.extensions.judge.is_clef() {
+                Some(JudgeCommand::Token { provider }) => {
+                    let provider = provider
+                        .as_deref()
+                        .unwrap_or(config.extensions.judge.provider_name());
+                    if !matches!(provider, "xai" | "vercel" | "system-one") {
                         return Err(Error::Unavailable(
-                            "Clef reads CLOUDFLARE_API_TOKEN from the environment only; judge token is for explicitly configured legacy System One",
+                            "this judge reads its explicitly named key from the environment only",
                         ));
                     }
                     if io::stdin().is_terminal() {
@@ -3305,15 +3335,77 @@ async fn dispatch_inner(
                             "key input is accepted only through a pipe, never an argument or terminal echo",
                         ));
                     }
-                    judge::store_judge_token(store.root(), &stdin(2048)?)?;
-                    println!("Judge key stored.");
-                }
-                Some(JudgeCommand::Logout) => {
-                    if judge::remove_judge_token(store.root())? {
-                        println!("Judge key removed.");
-                    } else {
-                        println!("No vaulted judge key.");
+                    let bytes = zeroize::Zeroizing::new(stdin(2048)?);
+                    match provider {
+                        "xai" => judge::chat::store_token(
+                            store.root(),
+                            xcb_runtime::config::JudgeProvider::Xai,
+                            &bytes,
+                        )?,
+                        "vercel" => judge::chat::store_token(
+                            store.root(),
+                            xcb_runtime::config::JudgeProvider::Vercel,
+                            &bytes,
+                        )?,
+                        _ => judge::store_judge_token(store.root(), &bytes)?,
                     }
+                    println!("Judge key stored for {provider}.");
+                }
+                Some(JudgeCommand::Logout { provider }) => {
+                    let provider = provider
+                        .as_deref()
+                        .unwrap_or(config.extensions.judge.provider_name());
+                    let removed = match provider {
+                        "xai" => judge::chat::remove_token(
+                            store.root(),
+                            xcb_runtime::config::JudgeProvider::Xai,
+                        )?,
+                        "vercel" => judge::chat::remove_token(
+                            store.root(),
+                            xcb_runtime::config::JudgeProvider::Vercel,
+                        )?,
+                        "system-one" => judge::remove_judge_token(store.root())?,
+                        _ => {
+                            return Err(Error::Unavailable(
+                                "this judge uses an environment key; unset its variable at the host",
+                            ));
+                        }
+                    };
+                    println!(
+                        "{}",
+                        if removed {
+                            "Judge key removed."
+                        } else {
+                            "No vaulted judge key."
+                        }
+                    );
+                }
+                Some(JudgeCommand::Select {
+                    provider,
+                    model,
+                    endpoint,
+                    key_env,
+                }) => {
+                    let (mut fresh, revision) = Config::load(store.root())?;
+                    fresh.extensions.judge = xcb_runtime::config::JudgeConfig {
+                        provider: Some(match provider.as_str() {
+                            "xai" => xcb_runtime::config::JudgeProvider::Xai,
+                            "vercel" => xcb_runtime::config::JudgeProvider::Vercel,
+                            _ => xcb_runtime::config::JudgeProvider::OpenaiCompatible,
+                        }),
+                        chat_model: model,
+                        endpoint,
+                        credential_env: key_env,
+                        ..Default::default()
+                    };
+                    let target = judge::chat::target(&fresh.extensions.judge)?;
+                    fresh.extensions.judge.chat_model = Some(target.model);
+                    fresh.extensions.judge.endpoint = Some(target.endpoint);
+                    fresh.extensions.judge.credential_env = Some(target.credential_env);
+                    fresh.save(store.root(), revision.as_deref())?;
+                    println!(
+                        "{provider} judge selected; test it with xcb judge test, then enable with xcb judge enable."
+                    );
                 }
                 Some(JudgeCommand::Clef { model }) => {
                     let (mut fresh, revision) = Config::load(store.root())?;
@@ -3321,6 +3413,8 @@ async fn dispatch_inner(
                         Some(xcb_runtime::config::JudgeProvider::Clef);
                     fresh.extensions.judge.model = Some(Id::new(model)?);
                     fresh.extensions.judge.endpoint = None;
+                    fresh.extensions.judge.chat_model = None;
+                    fresh.extensions.judge.credential_env = None;
                     fresh.save(store.root(), revision.as_deref())?;
                     println!("Cloudflare Clef selected; enable it with xcb judge enable.");
                 }
@@ -3336,11 +3430,54 @@ async fn dispatch_inner(
                     fresh.save(store.root(), revision.as_deref())?;
                     println!("Judge disabled.");
                 }
-                Some(JudgeCommand::Test) => {
-                    judge::resolve(store.root(), &config.extensions.judge)?.ok_or(
-                        Error::Unavailable("judge not configured: set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN, then xcb judge enable"),
+                Some(JudgeCommand::Test { live }) => {
+                    let mut test_config = config.extensions.judge.clone();
+                    test_config.enabled = true;
+                    let backend = judge::resolve(store.root(), &test_config)?.ok_or(
+                        Error::Unavailable("judge key unavailable; configure the selected provider's environment key or scoped vault key"),
                     )?;
-                    println!("Judge configuration valid. No inference request was sent.");
+                    if live {
+                        let questions = [(
+                            "arithmetic".to_owned(),
+                            judge::JudgeQuestion::Choice {
+                                instructions: "What is 2 + 2? Select the correct answer.".into(),
+                                criteria: [
+                                    ("three".into(), Some("3".into())),
+                                    ("four".into(), Some("4".into())),
+                                    ("five".into(), Some("5".into())),
+                                ]
+                                .into_iter()
+                                .collect(),
+                            },
+                        )]
+                        .into_iter()
+                        .collect();
+                        let answers = backend
+                            .ask(
+                                &json!({"purpose":"xcb synthetic judge validation","a":2,"b":2}),
+                                &questions,
+                            )
+                            .await?;
+                        let (answer, confidence) = answers
+                            .answers
+                            .get("arithmetic")
+                            .and_then(judge::JudgeAnswer::choice)
+                            .filter(|(choice, _)| *choice == "four")
+                            .ok_or(Error::Unavailable(
+                                "synthetic judge answer failed validation",
+                            ))?;
+                        if cli.json {
+                            print_json(
+                                json!({"ok":true,"live":true,"model":answers.model,"answer":answer,"confidence":confidence}),
+                            )?;
+                        } else {
+                            println!("Synthetic judge request passed.");
+                        }
+                    } else if cli.json {
+                        print_json(json!({"ok":true,"live":false}))?;
+                    } else {
+                        println!("Judge configuration valid. No inference request was sent.");
+                    }
                 }
                 None | Some(JudgeCommand::Status) => {
                     let source = judge::configured_key(store.root(), &config.extensions.judge)?;
@@ -3350,7 +3487,9 @@ async fn dispatch_inner(
                         print_json(json!({
                             "version": 1,
                             "enabled": config.extensions.judge.enabled,
-                            "provider": if config.extensions.judge.is_clef() { "clef" } else { "system-one" },
+                            "provider": config.extensions.judge.provider_name(),
+                            "credentialEnv": config.extensions.judge.credential_env,
+                            "vaultSurvivesRestart": source == Some(judge::JudgeKeySource::Vault),
                             "key": match source {
                                 Some(judge::JudgeKeySource::Env) => "env",
                                 Some(judge::JudgeKeySource::Vault) => "vault",
@@ -4894,7 +5033,7 @@ mod tests {
             ])
             .is_ok()
         );
-        for invalid in ["0", "101"] {
+        for invalid in ["0", "10001"] {
             assert!(
                 super::Cli::try_parse_from([
                     "xcb",

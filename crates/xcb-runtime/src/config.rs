@@ -38,6 +38,12 @@ pub struct JudgeConfig {
     pub endpoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<JudgeProvider>,
+    /// Chat model IDs may include provider prefixes such as spacexai/grok-4.7.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat_model: Option<String>,
+    /// Environment variable name only; the secret is never part of config.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_env: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,13 +51,31 @@ pub struct JudgeConfig {
 pub enum JudgeProvider {
     Clef,
     SystemOne,
+    Xai,
+    Vercel,
+    OpenaiCompatible,
 }
 
 impl JudgeConfig {
+    pub fn is_chat(&self) -> bool {
+        matches!(
+            self.provider,
+            Some(JudgeProvider::Xai | JudgeProvider::Vercel | JudgeProvider::OpenaiCompatible)
+        )
+    }
+    pub fn provider_name(&self) -> &'static str {
+        match self.provider {
+            Some(JudgeProvider::Xai) => "xai",
+            Some(JudgeProvider::Vercel) => "vercel",
+            Some(JudgeProvider::OpenaiCompatible) => "openai-compatible",
+            _ if self.is_clef() => "clef",
+            _ => "system-one",
+        }
+    }
     pub fn is_clef(&self) -> bool {
         match self.provider {
             Some(JudgeProvider::Clef) => true,
-            Some(JudgeProvider::SystemOne) => false,
+            Some(_) => false,
             None => {
                 self.endpoint.is_none()
                     && self
@@ -63,6 +87,15 @@ impl JudgeConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if self.is_chat() {
+            crate::judge::chat::target(self)?;
+            return Ok(());
+        }
+        if self.chat_model.is_some() || self.credential_env.is_some() {
+            return Err(
+                xcb_core::Error::Invalid("chat judge fields require a chat provider").into(),
+            );
+        }
         if self.is_clef() {
             let model = self.model.as_ref().map_or("clef", Id::as_str);
             if !matches!(model, "clef" | "clef-flash") {

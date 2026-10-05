@@ -47,7 +47,7 @@ impl ProjectPolicy {
         }
         if !Path::new(&self.workspace).is_absolute()
             || self.max_tasks == 0
-            || self.max_tasks > 100
+            || self.max_tasks > 10_000
             || self.admitted_tasks > self.max_tasks
             || self.max_active > 64
             || self.max_per_hour > 512

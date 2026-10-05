@@ -623,7 +623,7 @@ async fn project_policy_bounds_and_corruption_are_isolated() {
     let f = fixture().await;
     for (tasks, expires) in [
         (0, now_ms() + 7_200_000),
-        (101, now_ms() + 7_200_000),
+        (10_001, now_ms() + 7_200_000),
         (1, now_ms() + 10_000),
         (1, now_ms() + 31 * 24 * 60 * 60 * 1000),
     ] {
@@ -1530,4 +1530,37 @@ async fn legacy_policy_and_proposal_payloads_decode_with_empty_dials() {
     }))
     .unwrap();
     assert_eq!(proposal.admitted_at_ms, None);
+}
+
+#[tokio::test]
+async fn month_long_grant_accepts_explicit_child_budget_and_preserves_spend() {
+    let f = fixture().await;
+    let policy = f
+        .managed
+        .configure_project_policy(
+            &f.conversation,
+            None,
+            "Run a measured monthly project".into(),
+            3_600,
+            now_ms() + 30 * 24 * 60 * 60 * 1000,
+            None,
+        )
+        .unwrap();
+    assert_eq!(policy.max_tasks, 3_600);
+    assert_eq!(policy.admitted_tasks, 0);
+    assert_eq!(
+        f.managed
+            .project_policy(&f.conversation)
+            .unwrap()
+            .unwrap()
+            .max_tasks,
+        3_600
+    );
+    assert!(policy.enabled);
+    assert!(
+        f.managed
+            .active_tasks(MAX_NONTERMINAL_TASKS as usize)
+            .unwrap()
+            .is_empty()
+    );
 }

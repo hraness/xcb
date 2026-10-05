@@ -1224,7 +1224,7 @@ impl ManagedStore {
             delivered_preferences: String::new(), input_at_ms: None, attachments: vec![], session: None, worker_sessions: vec![],
             route: policy.required_provider.or(preference).map(|p| p.to_string()), route_reason: None,
             provider_preference: policy.required_provider.or(preference), provider_required: policy.required_provider.is_some() || required, required_model: None,
-            tried_routes: vec![], failed_accounts: vec![], state: if routing_question { TaskState::NeedsInput } else { TaskState::Queued },
+            tried_routes: vec![], failed_accounts: vec![], retry: None, completion_review: None, state: if routing_question { TaskState::NeedsInput } else { TaskState::Queued },
             deferred: false, priority: 0, attention: routing_question.then_some(State::NeedsAnswer), backlog_prompt: None,
             project_proposal: None, routing_question, program: None, program_generation: None, program_receipt: None, program_waiting: false,
             program_child: None, daemon_child: Some(DaemonChild { process: meta.process.clone(), request_digest: call.request_digest.clone(), generation: policy.generation.clone(), required_provider: policy.required_provider }),

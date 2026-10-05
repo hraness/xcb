@@ -243,8 +243,8 @@ pub enum ProjectCommand {
         /// The project goal that follow-up work serves.
         goal: String,
         /// Most tasks the project may start on its own under this grant
-        /// (1 to 100).
-        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=100))]
+        /// (1 to 10,000).
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=10_000))]
         tasks: u32,
         /// Grant lifetime, 1 hour to 30 days. A new grant replaces the old grant.
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..=720))]

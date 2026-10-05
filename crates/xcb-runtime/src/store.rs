@@ -98,6 +98,9 @@ pub(crate) const AUTHENTICATION_REQUIRED: &str =
 
 #[path = "store_overview.rs"]
 mod overview;
+#[path = "store_recovery.rs"]
+mod recovery;
+pub use crate::retry::AccountRecovery;
 
 #[path = "store_claude_recovery.rs"]
 mod claude_recovery;
@@ -958,6 +961,8 @@ impl Store {
             payload TEXT NOT NULL,
             PRIMARY KEY(account, id));",
         )?;
+        connection.execute_batch("CREATE TABLE IF NOT EXISTS run_recovery_generation(run TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE, generation TEXT);")?;
+        connection.execute_batch("CREATE TABLE IF NOT EXISTS account_recovery(account TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE, generation TEXT, payload TEXT NOT NULL);")?;
         // Additive: cooldowns for usage limits the provider refused without
         // a reset time (see `QUOTA_LIMITS`). Older readers ignore it and
         // simply do not see the cooldown.
@@ -1642,6 +1647,11 @@ impl Store {
         if authentication_required_from(&tx, &account.id)? {
             return Err(Error::Unavailable(AUTHENTICATION_REQUIRED));
         }
+        if !self.account_recovery_available_from(&tx, &account.id, now, held)? {
+            return Err(Error::Unavailable(
+                "account provider recovery is waiting for its next trial",
+            ));
+        }
         if blocked_until_from(&tx, &self.root, &account, now)?.is_some() {
             return Err(Error::Unavailable(
                 "account quota exhausted until its reported reset; inspect xcb accounts list or refresh account metadata",
@@ -1677,6 +1687,7 @@ impl Store {
                 serde_json::to_string(&run)?
             ],
         )?;
+        self.capture_recovery_generation(&tx, &run)?;
         tx.execute(
             "INSERT INTO leases(run,account) VALUES(?1,?2)",
             params![run.id.as_str(), session.account.as_str()],
@@ -1714,6 +1725,13 @@ impl Store {
         if held {
             return Err(Error::Conflict("account has an unsettled run"));
         }
+        // Model-bearing probes perform inference/application work and share
+        // the same recovery circuit. Metadata and sign-in stay observational.
+        if model.is_some() && !self.account_recovery_available_from(&tx, account, now, 0)? {
+            return Err(Error::Unavailable(
+                "account provider recovery is waiting for its next trial",
+            ));
+        }
         let run = RunRecord {
             custody_version: 1,
             id: new_id("probe"),
@@ -1736,6 +1754,7 @@ impl Store {
                 serde_json::to_string(&run)?
             ],
         )?;
+        self.capture_recovery_generation(&tx, &run)?;
         tx.execute(
             "INSERT INTO leases(run,account) VALUES(?1,?2)",
             params![run.id.as_str(), account.as_str()],
@@ -2033,6 +2052,7 @@ impl Store {
             .map(|(_, outcome, _)| &outcome.facts)
             .or(application)
         {
+            self.record_account_recovery(&tx, &current, facts, now)?;
             use xcb_core::policy::{Failure, Terminal};
             if facts.terminal == Terminal::Failed && facts.failure == Some(Failure::Authentication)
             {

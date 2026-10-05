@@ -1679,7 +1679,9 @@ impl CodexProtocol {
                             | "tooManyDenials" => Some(Failure::Policy),
                             // Capacity shortages are transient and provider-wide:
                             // they neither exhaust this account nor fail over.
-                            "flexUnavailable" | "serverOverloaded" => Some(Failure::Transport),
+                            "flexUnavailable" | "serverOverloaded" => {
+                                Some(Failure::ProviderUnavailable)
+                            }
                             "contextWindowExceeded" => None,
                             _ => Some(Failure::Unknown),
                         };

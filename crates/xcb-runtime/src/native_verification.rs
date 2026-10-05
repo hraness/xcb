@@ -129,7 +129,8 @@ pub async fn verify_for_account(
     config.capabilities = Default::default();
     config.auto_failover = false;
     config.turn_timeout_ms = 240000;
-    let outcome = runner::run(
+    let pin = process::Pin::load(store.root(), provider)?;
+    let outcome = runner::run_with_pin(
         store.clone(),
         runner::RunInput {
             session: session.clone(),
@@ -139,6 +140,7 @@ pub async fn verify_for_account(
         },
         cancel,
         Arc::new(|_| {}),
+        Some(pin.clone()),
     )
     .await;
     let observed = store.messages(&session.id, 64)?.into_iter().any(|message| {
@@ -189,7 +191,8 @@ pub async fn verify_for_account(
             )),
         });
     }
-    let pin = process::Pin::load(store.root(), provider)?;
+    let current_pin = process::Pin::load(store.root(), provider)?;
+    require_same_artifact(&pin, &current_pin)?;
     let receipt = ProviderQualification {
         version: 1,
         host_sha256: process::host_identity()?.1,
@@ -215,9 +218,50 @@ pub async fn verify_for_account(
     Ok(receipt)
 }
 
+fn require_same_artifact(executed: &process::Pin, current: &process::Pin) -> Result<()> {
+    if executed.provider != current.provider
+        || executed.sha256 != current.sha256
+        || executed.host_sha256 != current.host_sha256
+    {
+        return Err(Error::Unavailable(
+            "provider changed during native verification; repeat qualification for the current build",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qualification_rejects_provider_or_host_artifact_drift() {
+        let executed = process::Pin {
+            provider: Provider::Codex,
+            executable: PathBuf::from("/synthetic/immutable-provider"),
+            sha256: "a".repeat(64),
+            version: "synthetic".into(),
+            host_sha256: "b".repeat(64),
+            observed_at_ms: 1,
+        };
+        require_same_artifact(&executed, &executed).unwrap();
+        for changed in [
+            process::Pin {
+                sha256: "c".repeat(64),
+                ..executed.clone()
+            },
+            process::Pin {
+                host_sha256: "d".repeat(64),
+                ..executed.clone()
+            },
+            process::Pin {
+                provider: Provider::Claude,
+                ..executed.clone()
+            },
+        ] {
+            assert!(require_same_artifact(&executed, &changed).is_err());
+        }
+    }
 
     #[tokio::test]
     async fn explicit_verification_account_cannot_cross_provider_boundaries() {

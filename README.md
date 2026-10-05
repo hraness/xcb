@@ -215,7 +215,7 @@ your projects (`--state` or `XCB_STATE` moves it). The
 [CLI and configuration reference](https://xcb.sh/docs/reference) lists every
 command, setting, and exit code.
 
-## Optional Cloudflare Clef judge
+## Optional judges
 
 The judge is off by default. Set `CLOUDFLARE_ACCOUNT_ID` (32 hexadecimal
 characters) and `CLOUDFLARE_API_TOKEN` in your trusted host environment, then
@@ -227,6 +227,15 @@ is `clef`. `xcb judge status`, `xcb judge test`, and `xcb doctor` do not send
 inference requests. `xcb judge disable` stops judge use. The judge advises
 routing and can veto safe continuation or context elision; it cannot approve
 a task, grant tools, or override deterministic safety checks.
+
+The native CLI also supports xAI, Vercel AI Gateway, and custom compatible
+endpoints. `xcb judge select xai` selects Grok 4.7; credentials stay separate
+from coding accounts. See [API judge setup](docs/chat-judge.md) for private
+key storage and an explicit synthetic connection test.
+
+[Project controls](docs/project-agents.md) cover scoped unattended work.
+The [operations guide](docs/unattended-operations.md) explains retry, account
+health, completion checks, and recovery limits.
 
 SDK callers can supply embedded PNG, JPEG, or WebP evidence explicitly: up to
 four images, 4 MiB and 16 megapixels each, 8 MiB total, and a 13 MiB request.
@@ -248,8 +257,8 @@ connected. Quota left on each subscription stays in `xcb accounts`.
 
 ## Limits
 
-- **Tools:** providers use xcb's workspace tools and registered host MCP servers. Native shells and unrelated provider plugins remain unavailable; see [browser and shared tools](docs/tools.md).
-- **Tests and builds:** the [command runner](docs/command-runner.md) is an offline Linux VM on macOS ARM64; Git is read-only there, and native macOS builds can't run.
+- **Tools:** providers use xcb's workspace tools and registered host MCP servers. Native commands require separate provider qualification and workspace grants; unrelated provider plugins remain unavailable. See [provider permissions](docs/provider-permissions.md) and [browser and shared tools](docs/tools.md).
+- **Tests and builds:** the [offline command runner](docs/command-runner.md) uses a Linux VM on macOS ARM64 with read-only Git. Separately granted native execution can run host builds and delivery commands; it never substitutes for a failed offline replay.
 - **Concurrency:** each account runs one provider turn at a time by default; `max_runs_per_account` in `config.json` (1–32) raises how many tasks may share an account, while sign-in and account checks still take the account alone. Tasks in the same project folder take turns.
 - **Remote devices:** the hosted remote commands are removed. Valhalla integration is planned, not shipped ([north star](docs/vision.md)).
 - **Managed harness:** the self-tuning harness is in development; the current build does not run self-modifying routing policies ([design](docs/managed-harness.md)).
@@ -259,7 +268,7 @@ connected. Quota left on each subscription stays in `xcb accounts`.
 - **Claude Code or Codex alone:** enough when one subscription covers your work, and you keep all of the tool's built-in tools, MCP servers, and plugins. xcb supplies workspace tools, its offline command runner on macOS, and registered host tool servers across providers.
 - **Account switchers such as [claude-swap](https://github.com/realiti4/claude-swap):** change which login Claude Code uses. xcb picks an account for each task across Claude and Codex, and sandboxes each run.
 - **[Claude Code Router](https://xcb.sh/compare/claude-code-router) and [OpenRouter](https://xcb.sh/compare/openrouter):** send each API request to a provider or model you choose, usually paid per token. xcb never touches API traffic; it routes whole tasks to subscriptions you already pay for.
-- **[Conductor](https://xcb.sh/compare/conductor) and Claude Squad:** give each agent a Git worktree and a merge flow. xcb has no worktree or pull request flow.
+- **[Conductor](https://xcb.sh/compare/conductor) and Claude Squad:** give each agent a Git worktree and a merge flow. xcb uses project grants and worker commands for delivery, with read-only PR observation for pending checks.
 
 [All comparisons](https://xcb.sh/compare)
 

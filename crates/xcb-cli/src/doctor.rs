@@ -429,7 +429,7 @@ pub async fn run(
     let (judge_model, judge_endpoint) = judge::effective_target(&config.extensions.judge)?;
     let judge_status = json!({
         "enabled": config.extensions.judge.enabled,
-        "provider": if config.extensions.judge.is_clef() { "clef" } else { "system-one" },
+        "provider": config.extensions.judge.provider_name(),
         "key": judge_key_name,
         "model": judge_model,
         "endpoint": judge_endpoint,
