@@ -1471,3 +1471,260 @@ async fn program_registered_in_a_cannot_publish_children_in_b() {
         0
     );
 }
+
+async fn next_child(f: &Fixture, parent: &ManagedTask, report: &str) -> (ManagedTask, ManagedTask) {
+    let status = f.managed.program_status(&parent.id).unwrap().unwrap();
+    let child = f.managed.task(&status.child.unwrap()).unwrap().unwrap();
+    settle_child(f, &child, report).await;
+    f.managed.tick_programs(&f.store, true).await.unwrap();
+    let parent = f.managed.task(&parent.id).unwrap().unwrap();
+    let (running, slice) = run_slice(f, &parent).await;
+    let parent = f
+        .managed
+        .finish_program_slice(&running.id, running.revision, &Ok(slice))
+        .await
+        .unwrap();
+    let id = f
+        .managed
+        .program_status(&parent.id)
+        .unwrap()
+        .unwrap()
+        .child
+        .unwrap();
+    (parent, f.managed.task(&id).unwrap().unwrap())
+}
+
+fn history_query(view: &str) -> Value {
+    json!({"op":"history","history":{"contract":"xcb.program-history.v1","view":view}})
+}
+
+#[tokio::test]
+async fn program_history_keeps_call_identity_state_and_declared_report_scope() {
+    let f = fixture().await;
+    let (parent, _first) = waiting(&f, 4).await;
+    let (parent, _second) = next_child(&f, &parent, "worker0 report SEALED-0 🐚").await;
+    let (parent, _third) = next_child(&f, &parent, "worker1 report SEALED-1").await;
+    let (_parent, fourth) = next_child(&f, &parent, "worker2 report SEALED-2").await;
+    let fourth = context_worker(&f, &fourth).await;
+
+    // The running fourth child (worker3) declares only worker2's report.
+    // Earlier calls keep identity and state but expose no report body.
+    let overview = f
+        .managed
+        .program_context_query(
+            &fourth,
+            &json!({"op":"history","history":{"contract":"xcb.program-history.v1","view":"overview","recentLeaves":0}}),
+        )
+        .unwrap();
+    assert_eq!(overview["schema"], "algal.context-history-view.v1");
+    assert_eq!(overview["status"], "incomplete");
+    assert_eq!(overview["reason"], "missing-summary");
+    let items = overview["items"].as_array().unwrap();
+    assert_eq!(items.len(), 3);
+    assert_eq!(items[0]["kind"], "pending");
+    assert_eq!(items[0]["start"], json!(0));
+    assert_eq!(items[0]["end"], json!(2));
+    for item in &items[1..] {
+        assert_eq!(item["kind"], "exact");
+    }
+    assert!(items[1]["text"].as_str().unwrap().contains("SEALED-2"));
+    assert!(
+        items[1]["text"]
+            .as_str()
+            .unwrap()
+            .contains("\"state\":\"completed\"")
+    );
+    assert!(!items[1]["text"].as_str().unwrap().contains("SEALED-1"));
+    let own = items[2]["text"].as_str().unwrap();
+    assert!(own.contains(&fourth.id.as_str().to_string()));
+    assert!(own.contains("\"cellId\":\"worker3\""));
+    assert!(own.contains("\"state\":\"running\""));
+
+    // Expansion recovers the pending range's exact metadata leaves.
+    let expanded = f
+        .managed
+        .program_context_query(
+            &fourth,
+            &json!({"op":"history","history":{"contract":"xcb.program-history.v1","view":"expand","node":items[0]["node"]}}),
+        )
+        .unwrap();
+    assert_eq!(expanded["status"], "complete");
+    let children = expanded["items"].as_array().unwrap();
+    assert_eq!(children.len(), 2);
+    for (position, child) in children.iter().enumerate() {
+        assert_eq!(child["kind"], "exact");
+        let text = child["text"].as_str().unwrap();
+        assert!(text.contains(&format!("\"call\":{}", position + 1)));
+        assert!(!text.contains("\"result\""), "hidden report leaked");
+    }
+
+    // Exact reads carry the original task and state without report bodies.
+    for (index, sealed) in [(0usize, "SEALED-0"), (1, "SEALED-1")] {
+        let read = f
+            .managed
+            .program_context_query(
+                &fourth,
+                &json!({"op":"history","history":{"contract":"xcb.program-history.v1","view":"read","sourceIndex":index}}),
+            )
+            .unwrap();
+        let text = read["text"].as_str().unwrap();
+        assert!(text.contains(&format!("\"call\":{}", index + 1)));
+        assert!(text.contains("\"state\":\"completed\""));
+        assert!(!text.contains(sealed), "hidden sibling report leaked");
+    }
+    let read = f
+        .managed
+        .program_context_query(
+            &fourth,
+            &json!({"op":"history","history":{"contract":"xcb.program-history.v1","view":"read","sourceIndex":2}}),
+        )
+        .unwrap();
+    assert!(read["text"].as_str().unwrap().contains("SEALED-2"));
+
+    // Literal search covers only what this audience may read.
+    let found = f
+        .managed
+        .program_context_query(
+            &fourth,
+            &json!({"op":"history","history":{"contract":"xcb.program-history.v1","view":"search","query":"SEALED-2"}}),
+        )
+        .unwrap();
+    assert_eq!(
+        found["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["sourceIndex"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![2]
+    );
+    for sealed in ["SEALED-0", "SEALED-1"] {
+        let missed = f
+            .managed
+            .program_context_query(
+                &fourth,
+                &json!({"op":"history","history":{"contract":"xcb.program-history.v1","view":"search","query":sealed}}),
+            )
+            .unwrap();
+        assert!(
+            missed["matches"].as_array().unwrap().is_empty(),
+            "search reached a report outside the declared view"
+        );
+    }
+}
+
+#[tokio::test]
+async fn program_history_accepts_valid_derivatives_and_rejects_tampering() {
+    let f = fixture().await;
+    let (parent, _first) = waiting(&f, 4).await;
+    let (parent, _second) = next_child(&f, &parent, "worker0 report").await;
+    let (parent, _third) = next_child(&f, &parent, "worker1 report").await;
+    let (_parent, fourth) = next_child(&f, &parent, "worker2 report").await;
+    let fourth = context_worker(&f, &fourth).await;
+
+    let inspected = f
+        .managed
+        .program_context_query(&fourth, &history_query("inspect"))
+        .unwrap();
+    let history = inspected["history"].clone();
+    let history_id = algal::canonical::digest(&history).unwrap();
+    let node = algal::context_history_contract::context_history_node(&history, 0, 2).unwrap();
+    let node_value = serde_json::to_value(&node).unwrap();
+    let node_id = algal::canonical::digest(&node_value).unwrap();
+    let prompt = algal::canonical::digest(&json!("xcb.test.summary-prompt")).unwrap();
+    let policy = algal::canonical::digest(&json!("xcb.test.summary-policy")).unwrap();
+    let summarizer = algal::canonical::digest(&json!("xcb.test.summarizer")).unwrap();
+    let summary = json!({
+        "schema": "algal.context-history-summary.v1",
+        "history": history_id,
+        "node": node_id,
+        "sources": node.sources,
+        "children": [],
+        "prompt": prompt,
+        "policy": policy,
+        "summarizer": summarizer,
+        "body": "Calls 1 and 2 settled before this audience existed.",
+    });
+    let summary_id = algal::canonical::digest(&summary).unwrap();
+    let generation = json!({
+        "schema": "algal.context-history-generation.v1",
+        "history": history_id,
+        "generation": 1,
+        "prompt": prompt,
+        "policy": policy,
+        "summarizer": summarizer,
+        "summaries": [{"node": node_id, "summary": summary_id}],
+    });
+    let derivatives = json!({
+        "generation": generation,
+        "nodes": [node_value],
+        "summaries": [summary],
+    });
+    let overview = f
+        .managed
+        .program_context_query(
+            &fourth,
+            &json!({"op":"history","history":{"contract":"xcb.program-history.v1","view":"overview","recentLeaves":0,"derivatives":derivatives}}),
+        )
+        .unwrap();
+    assert_eq!(overview["status"], "complete");
+    assert_eq!(overview["items"][0]["kind"], "summary");
+    assert_eq!(
+        overview["items"][0]["text"],
+        "Calls 1 and 2 settled before this audience existed."
+    );
+
+    // A summary bound to a different range or history cannot substitute.
+    let foreign = algal::context_history_contract::context_history_node(&history, 2, 4).unwrap();
+    let foreign_value = serde_json::to_value(&foreign).unwrap();
+    let mut bad = summary.clone();
+    bad["node"] = json!(algal::canonical::digest(&foreign_value).unwrap());
+    bad["sources"] = json!(foreign.sources);
+    let bad_id = algal::canonical::digest(&bad).unwrap();
+    let bad_generation = json!({
+        "schema": "algal.context-history-generation.v1",
+        "history": history_id,
+        "generation": 1,
+        "prompt": prompt,
+        "policy": policy,
+        "summarizer": summarizer,
+        "summaries": [{"node": node_id, "summary": bad_id}],
+    });
+    assert!(
+        f.managed
+            .program_context_query(
+                &fourth,
+                &json!({"op":"history","history":{"contract":"xcb.program-history.v1","view":"overview","derivatives":{
+                    "generation": bad_generation,
+                    "nodes": [node_value, foreign_value],
+                    "summaries": [bad],
+                }}}),
+            )
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn program_history_rejects_unknown_versions_and_fields() {
+    let f = fixture().await;
+    let (_parent, first) = waiting(&f, 2).await;
+    let first = context_worker(&f, &first).await;
+    for input in [
+        json!({"op":"history","history":{"contract":"xcb.program-history.v2","view":"overview"}}),
+        json!({"op":"history","history":{"contract":"xcb.program-history.v1","view":"publish"}}),
+        json!({"op":"history","history":{"contract":"xcb.program-history.v1","view":"overview","taskId":"other"}}),
+        json!({"op":"history"}),
+        json!({"op":"history","history":{"contract":"xcb.program-history.v1"}}),
+    ] {
+        assert!(
+            f.managed.program_context_query(&first, &input).is_err(),
+            "unexpectedly accepted {input}"
+        );
+    }
+    // The tool is not bound to non-children, and history cannot name a task.
+    assert!(
+        f.managed
+            .program_context_query(&first, &json!({"op":"history","history":{"contract":"xcb.program-history.v1","view":"read"}}))
+            .is_err()
+    );
+}

@@ -134,8 +134,10 @@ workspace task summaries, and an explicitly configured Wordcell binding can
 keep longer-lived notes. These have different source, permission, and retention
 rules; they are not one permanent machine-wide memory.
 
-The proposed addition is a multiresolution view: recent original records plus
-expandable summaries of older ranges, with exact search underneath.
+The progressive view now exists as the `history` operation of
+`xcb_context_query` (`xcb.program-history.v1`): recent calls in exact detail,
+older ranges as expandable nodes, and exact read/search underneath, rebuilt
+from the verified call records on each query.
 [OptMem's pinned implementation](https://github.com/VictorTaelin/OptMem/blob/1fb164cf39028047781f72ac3bb1e5a691c1dcb0/memo)
 is a design reference for that reading pattern. Its structural tests use a fake
 compressor, so a smaller overview is not evidence of better worker performance.
