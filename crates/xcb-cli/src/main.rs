@@ -287,6 +287,18 @@ enum Commands {
         /// Filter schedules by persistent conversation; otherwise show all.
         #[arg(long)]
         conversation: Option<Id>,
+        /// Only schedules running in this project directory.
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        /// Only enabled schedules.
+        #[arg(long, conflicts_with = "disabled")]
+        enabled: bool,
+        /// Only paused schedules.
+        #[arg(long)]
+        disabled: bool,
+        /// Only schedules whose next wake-up is now or overdue.
+        #[arg(long)]
+        due: bool,
     },
     /// Manage named durable ALGAL daemons in project conversations.
     Daemons {
@@ -2891,12 +2903,32 @@ async fn dispatch_inner(
         Some(Commands::Schedules {
             command,
             conversation,
+            workspace,
+            enabled,
+            disabled,
+            due,
         }) => {
             habitat::schedules(
                 store.root(),
                 &cli.cwd,
                 command,
                 conversation.as_ref(),
+                habitat::ScheduleFilters {
+                    workspace: workspace
+                        .map(|dir| {
+                            xcb_core::canonical(cli.cwd.join(dir))
+                                .map(|path| path.display().to_string())
+                        })
+                        .transpose()?,
+                    enabled: if enabled {
+                        Some(true)
+                    } else if disabled {
+                        Some(false)
+                    } else {
+                        None
+                    },
+                    due,
+                },
                 cli.json,
             )
             .await

@@ -51,10 +51,10 @@ const POLICY: &str = include_str!("../managed-transition.algal.json");
 mod habitat;
 #[path = "managed_overview.rs"]
 mod overview;
-pub use habitat::{HabitatSchedule, WorkMemory};
+pub use habitat::{HabitatSchedule, ScheduleView, WorkMemory};
 #[path = "managed_project.rs"]
 mod project;
-pub use project::{MemoryBinding, ProjectPolicy, ProjectProposal};
+pub use project::{HerdStatus, MemoryBinding, ProjectPolicy, ProjectProposal};
 #[path = "managed_inbox.rs"]
 mod inbox;
 #[path = "managed_resources.rs"]
@@ -1120,6 +1120,13 @@ impl ManagedStore {
 
     pub fn conversation(&self, id: &Id) -> Result<Option<ManagedConversation>> {
         let db = self.db()?;
+        self.conversation_in(&db, id)
+    }
+    pub(super) fn conversation_in(
+        &self,
+        db: &Connection,
+        id: &Id,
+    ) -> Result<Option<ManagedConversation>> {
         let row: Option<(String, i64)> = db
             .query_row(
                 "SELECT payload,updated_at FROM conversations WHERE id=?1",
@@ -5728,6 +5735,31 @@ impl Supervisor {
         Ok(())
     }
 
+    /// Defer automatic work while its herd's lane cap is spent. Only
+    /// automatic admissions are held; an operator's own task always passes,
+    /// though it still counts toward the lanes the herd may not exceed.
+    /// Uncertain tasks hold custody but no live lane, and their own
+    /// workspace is already serialized by the unsettled-run checks.
+    fn herd_capacity_block(&self, task: &ManagedTask) -> Result<Option<String>> {
+        if !project::herd_automatic(task) {
+            return Ok(None);
+        }
+        let Some(policy) = self.managed.herd_policy_in(&task.workspace)? else {
+            return Ok(None);
+        };
+        if policy.max_active == 0 {
+            return Ok(None);
+        }
+        let lanes = self.managed.herd_lanes_in(&policy)?.len();
+        if lanes < policy.max_active as usize {
+            return Ok(None);
+        }
+        Ok(Some(format!(
+            "waiting for an eligible worker: the project has {lanes} of {} lanes in use",
+            policy.max_active
+        )))
+    }
+
     async fn launch(&mut self, task: &ManagedTask) -> Result<Dispatch> {
         let managed = self.managed.clone();
         let store = self.store.clone();
@@ -5738,6 +5770,9 @@ impl Supervisor {
             return Ok(Dispatch::Deferred(
                 "waiting for an eligible worker: the workspace has an active turn".into(),
             ));
+        }
+        if let Some(reason) = self.herd_capacity_block(task)? {
+            return Ok(Dispatch::Deferred(reason));
         }
         if !Path::new(&task.workspace).is_dir() {
             let mut failed = task.clone();

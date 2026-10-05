@@ -126,6 +126,8 @@ fn grant(managed: &ManagedStore, workspace: &Path) -> ProjectPolicy {
             4,
             now_ms() + 7_200_000,
             None,
+            0,
+            0,
         )
         .unwrap()
 }
@@ -378,12 +380,16 @@ fn downgrade(state: &Path) {
         .unwrap();
 }
 
-/// A v7 value in its 0.8.x shape: keyed on a conversation, not a directory.
+/// A v7 value in its 0.8.x shape: keyed on a conversation, not a directory,
+/// and without the fields the herd dials added after v6.
 #[cfg_attr(windows, allow(dead_code))]
 fn legacy(value: impl Serialize, conversation: &Id) -> String {
     let mut value = serde_json::to_value(value).unwrap();
     let object = value.as_object_mut().unwrap();
     object.remove("workspace");
+    object.remove("repo");
+    object.remove("max_active");
+    object.remove("max_per_hour");
     object.insert("conversation".into(), json!(conversation.as_str()));
     value.to_string()
 }
@@ -401,6 +407,9 @@ fn insert_legacy(db: &Connection, table: &str, key: &Id, revision: u64, payload:
 fn policy(workspace: &Path, revision: u64) -> ProjectPolicy {
     ProjectPolicy {
         workspace: text(workspace).into(),
+        repo: None,
+        max_active: 0,
+        max_per_hour: 0,
         generation: new_id("grant"),
         goal: "Maintain the project".into(),
         enabled: true,

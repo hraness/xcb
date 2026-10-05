@@ -1681,7 +1681,7 @@ mod tests {
         // Only B holds a grant; a daemon in A never borrows it.
         fixture
             .managed
-            .configure_project_policy_in(&b, None, "B".into(), 8, now_ms() + 3_600_000, None)
+            .configure_project_policy_in(&b, None, "B".into(), 8, now_ms() + 3_600_000, None, 0, 0)
             .unwrap();
         let status = fixture
             .managed
@@ -1705,7 +1705,7 @@ mod tests {
         // A's own grant publishes the child in A.
         fixture
             .managed
-            .configure_project_policy_in(&a, None, "A".into(), 8, now_ms() + 3_600_000, None)
+            .configure_project_policy_in(&a, None, "A".into(), 8, now_ms() + 3_600_000, None, 0, 0)
             .unwrap();
         fixture
             .managed

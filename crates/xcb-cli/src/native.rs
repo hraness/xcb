@@ -17,6 +17,8 @@ pub(crate) enum StatusSection {
     Sessions,
     Runs,
     Effects,
+    Schedules,
+    Projects,
 }
 
 impl StatusSection {
@@ -26,6 +28,8 @@ impl StatusSection {
             Self::Sessions => "sessions",
             Self::Runs => "runs",
             Self::Effects => "effects",
+            Self::Schedules => "schedules",
+            Self::Projects => "projects",
         }
     }
     fn record_type(self) -> &'static str {
@@ -34,6 +38,8 @@ impl StatusSection {
             Self::Sessions => "session",
             Self::Runs => "run",
             Self::Effects => "effect",
+            Self::Schedules => "schedule",
+            Self::Projects => "project",
         }
     }
 }
@@ -84,6 +90,8 @@ pub(crate) enum Commands {
         session: Option<xcb_core::Id>,
         #[arg(long, value_enum, help = "Only records for this session state")]
         session_state: Option<StatusState>,
+        #[arg(long, help = "Only records for this exact project directory")]
+        workspace: Option<PathBuf>,
         #[arg(long, help = "Only records holding an account slot")]
         has_lease: bool,
         #[arg(
@@ -257,6 +265,14 @@ fn print_status_summary(status: &serde_json::Value) {
     if unlinked > 0 {
         println!("Unlinked tool records without a stored run: {unlinked}");
     }
+    let managed = &status["managed"];
+    if managed["available"].as_bool().unwrap_or(false) {
+        let (schedules, shown_schedules) = section("schedules");
+        let (projects, shown_projects) = section("projects");
+        println!(
+            "Schedules and projects: {schedules} schedules ({shown_schedules} shown), {projects} projects ({shown_projects} shown)"
+        );
+    }
     let service = &status["service"];
     if service["available"].as_bool().unwrap_or(false) {
         println!(
@@ -295,6 +311,7 @@ pub(crate) async fn execute(
             account,
             session,
             session_state,
+            workspace: workspace_dir,
             has_lease,
             unsettled_effects,
             pending_command_custody,
@@ -306,6 +323,11 @@ pub(crate) async fn execute(
             let account = account
                 .map(|name| store.resolve_account(&name).map(|account| account.id))
                 .transpose()?;
+            let workspace = workspace_dir
+                .map(|dir| {
+                    xcb_core::canonical(workspace.join(dir)).map(|path| path.display().to_string())
+                })
+                .transpose()?;
             let status = native_backend::status_snapshot(
                 store,
                 StatusQuery {
@@ -313,6 +335,7 @@ pub(crate) async fn execute(
                     account,
                     session,
                     state: session_state.map(State::from),
+                    workspace,
                     has_lease,
                     unsettled_effects,
                     pending_command_custody,
@@ -545,6 +568,8 @@ mod tests {
             "--has-lease",
             "--unfinished-effects",
             "--pending-command-proof",
+            "--workspace",
+            "/tmp/project",
             "--limit",
             "25",
             "--cursor",
@@ -555,7 +580,7 @@ mod tests {
         ])
         .unwrap();
         assert!(
-            matches!(cli.command, Some(crate::Commands::Native { command: Commands::Status { provider: Some(Provider::Codex), account: Some(account), session: Some(session), session_state: Some(StatusState::NeedsAnswer), has_lease: true, unsettled_effects: true, pending_command_custody: true, limit: 25, cursor: Some(2), jsonl: true, section: Some(StatusSection::Sessions) } }) if account == "fixture-account" && session.as_str() == "s_fixture")
+            matches!(cli.command, Some(crate::Commands::Native { command: Commands::Status { provider: Some(Provider::Codex), account: Some(account), session: Some(session), session_state: Some(StatusState::NeedsAnswer), has_lease: true, unsettled_effects: true, pending_command_custody: true, workspace: Some(workspace), limit: 25, cursor: Some(2), jsonl: true, section: Some(StatusSection::Sessions) } }) if account == "fixture-account" && session.as_str() == "s_fixture" && workspace == Path::new("/tmp/project"))
         );
         let aliases = crate::Cli::try_parse_from([
             "xcb",

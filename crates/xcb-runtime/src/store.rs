@@ -559,6 +559,9 @@ pub(crate) struct StatusFilter {
     pub account: Option<Id>,
     pub session: Option<Id>,
     pub state: Option<State>,
+    /// Exact canonical workspace path; linked-worktree families are a herd
+    /// concern, not a record filter.
+    pub workspace: Option<String>,
     pub has_lease: bool,
     pub unsettled_effects: bool,
     pub pending_command_custody: bool,
@@ -2345,6 +2348,7 @@ impl Store {
             .as_ref()
             .map(|session| session.as_str().to_owned());
         let state = filter.state.map(state_value);
+        let workspace = filter.workspace.clone();
 
         const ACCOUNT_FILTER: &str = "
             AND (?1 IS NULL OR CASE WHEN json_valid(a.payload) THEN json_extract(a.payload,'$.provider') END = ?1)
@@ -2353,7 +2357,8 @@ impl Store {
             AND (?4 IS NULL OR EXISTS(SELECT 1 FROM sessions sx WHERE sx.account=a.id AND CASE WHEN json_valid(sx.payload) THEN json_extract(sx.payload,'$.state') END = ?4))
             AND (?5=0 OR EXISTS(SELECT 1 FROM leases l WHERE l.account=a.id))
             AND (?6=0 OR EXISTS(SELECT 1 FROM runs rx JOIN tool_effects tx ON tx.run=rx.id WHERE rx.account=a.id AND tx.settled=0))
-            AND (?7=0 OR EXISTS(SELECT 1 FROM runs rx WHERE rx.account=a.id AND CASE WHEN json_valid(rx.payload) THEN json_extract(rx.payload,'$.command_custody') IS NOT NULL ELSE 0 END))";
+            AND (?7=0 OR EXISTS(SELECT 1 FROM runs rx WHERE rx.account=a.id AND CASE WHEN json_valid(rx.payload) THEN json_extract(rx.payload,'$.command_custody') IS NOT NULL ELSE 0 END))
+            AND (?8 IS NULL OR EXISTS(SELECT 1 FROM sessions sx WHERE sx.account=a.id AND CASE WHEN json_valid(sx.payload) THEN json_extract(sx.payload,'$.workspace') END = ?8))";
         const SESSION_FILTER: &str = "
             AND (?1 IS NULL OR CASE WHEN json_valid(s.payload) THEN json_extract(s.payload,'$.model.provider') END = ?1)
             AND (?2 IS NULL OR s.account = ?2)
@@ -2361,7 +2366,8 @@ impl Store {
             AND (?4 IS NULL OR CASE WHEN json_valid(s.payload) THEN json_extract(s.payload,'$.state') END = ?4)
             AND (?5=0 OR EXISTS(SELECT 1 FROM runs rx JOIN leases l ON l.run=rx.id AND l.account=rx.account WHERE rx.session=s.id))
             AND (?6=0 OR EXISTS(SELECT 1 FROM runs rx JOIN tool_effects tx ON tx.run=rx.id WHERE rx.session=s.id AND tx.settled=0))
-            AND (?7=0 OR EXISTS(SELECT 1 FROM runs rx WHERE rx.session=s.id AND CASE WHEN json_valid(rx.payload) THEN json_extract(rx.payload,'$.command_custody') IS NOT NULL ELSE 0 END))";
+            AND (?7=0 OR EXISTS(SELECT 1 FROM runs rx WHERE rx.session=s.id AND CASE WHEN json_valid(rx.payload) THEN json_extract(rx.payload,'$.command_custody') IS NOT NULL ELSE 0 END))
+            AND (?8 IS NULL OR CASE WHEN json_valid(s.payload) THEN json_extract(s.payload,'$.workspace') END = ?8)";
         const RUN_FILTER: &str = "
             AND (?1 IS NULL OR COALESCE(
                 CASE WHEN json_valid(s.payload) THEN json_extract(s.payload,'$.model.provider') END,
@@ -2371,7 +2377,8 @@ impl Store {
             AND (?4 IS NULL OR CASE WHEN json_valid(s.payload) THEN json_extract(s.payload,'$.state') END = ?4)
             AND (?5=0 OR EXISTS(SELECT 1 FROM leases l WHERE l.run=r.id AND l.account=r.account))
             AND (?6=0 OR EXISTS(SELECT 1 FROM tool_effects tx WHERE tx.run=r.id AND tx.settled=0))
-            AND (?7=0 OR CASE WHEN json_valid(r.payload) THEN json_extract(r.payload,'$.command_custody') IS NOT NULL ELSE 0 END)";
+            AND (?7=0 OR CASE WHEN json_valid(r.payload) THEN json_extract(r.payload,'$.command_custody') IS NOT NULL ELSE 0 END)
+            AND (?8 IS NULL OR CASE WHEN json_valid(s.payload) THEN json_extract(s.payload,'$.workspace') END = ?8)";
         const EFFECT_FILTER: &str = "
             AND (?1 IS NULL OR COALESCE(
                 CASE WHEN json_valid(s.payload) THEN json_extract(s.payload,'$.model.provider') END,
@@ -2381,7 +2388,8 @@ impl Store {
             AND (?4 IS NULL OR CASE WHEN json_valid(s.payload) THEN json_extract(s.payload,'$.state') END = ?4)
             AND (?5=0 OR EXISTS(SELECT 1 FROM leases l WHERE l.run=r.id AND l.account=r.account))
             AND (?6=0 OR t.settled=0)
-            AND (?7=0 OR CASE WHEN json_valid(r.payload) THEN json_extract(r.payload,'$.command_custody') IS NOT NULL ELSE 0 END)";
+            AND (?7=0 OR CASE WHEN json_valid(r.payload) THEN json_extract(r.payload,'$.command_custody') IS NOT NULL ELSE 0 END)
+            AND (?8 IS NULL OR CASE WHEN json_valid(s.payload) THEN json_extract(s.payload,'$.workspace') END = ?8)";
 
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Deferred)?;
@@ -2389,7 +2397,7 @@ impl Store {
             let count: i64 = tx.query_row(query, params, |row| row.get(0))?;
             u64::try_from(count).map_err(|_| xcb_core::Error::Invalid("status count").into())
         };
-        let filter_params: [&dyn rusqlite::ToSql; 7] = [
+        let filter_params: [&dyn rusqlite::ToSql; 8] = [
             &provider,
             &account,
             &session,
@@ -2397,6 +2405,7 @@ impl Store {
             &filter.has_lease,
             &filter.unsettled_effects,
             &filter.pending_command_custody,
+            &workspace,
         ];
         let totals = StatusTotals {
             accounts: count("SELECT count(*) FROM accounts", &[])?,
@@ -2429,7 +2438,7 @@ impl Store {
                         (SELECT count(*) FROM runs rx WHERE rx.account=a.id AND rx.phase!='settled'),
                         EXISTS(SELECT 1 FROM leases l WHERE l.account=a.id)
                     FROM accounts a WHERE 1=1 {ACCOUNT_FILTER}
-                    ORDER BY a.id LIMIT ?8 OFFSET ?9"
+                    ORDER BY a.id LIMIT ?9 OFFSET ?10"
                 ))?;
                 let rows = query.query_map(
                     params![
@@ -2440,6 +2449,7 @@ impl Store {
                         filter.has_lease,
                         filter.unsettled_effects,
                         filter.pending_command_custody,
+                        workspace,
                         limit,
                         offset
                     ],
@@ -2515,7 +2525,7 @@ impl Store {
                         EXISTS(SELECT 1 FROM runs rx WHERE rx.session=s.id AND CASE WHEN json_valid(rx.payload) THEN json_extract(rx.payload,'$.command_custody') IS NOT NULL ELSE 0 END),
                         (SELECT count(*) FROM runs rx JOIN json_each(rx.payload,'$.capability_processes') capability ON json_valid(rx.payload) AND json_type(rx.payload,'$.capability_processes')='object' WHERE rx.session=s.id)
                     FROM sessions s WHERE 1=1 {SESSION_FILTER}
-                    ORDER BY s.last_active DESC,s.id LIMIT ?8 OFFSET ?9"
+                    ORDER BY s.last_active DESC,s.id LIMIT ?9 OFFSET ?10"
                 ))?;
                 let rows = query.query_map(
                     params![
@@ -2526,6 +2536,7 @@ impl Store {
                         filter.has_lease,
                         filter.unsettled_effects,
                         filter.pending_command_custody,
+                        workspace,
                         limit,
                         offset
                     ],
@@ -2611,7 +2622,7 @@ impl Store {
                         (SELECT count(*) FROM tool_effects tx WHERE tx.run=r.id AND tx.settled=0)
                     FROM runs r LEFT JOIN sessions s ON s.id=r.session
                     WHERE 1=1 {RUN_FILTER}
-                    ORDER BY r.rowid DESC LIMIT ?8 OFFSET ?9"
+                    ORDER BY r.rowid DESC LIMIT ?9 OFFSET ?10"
                 ))?;
                 let rows = query.query_map(
                     params![
@@ -2622,6 +2633,7 @@ impl Store {
                         filter.has_lease,
                         filter.unsettled_effects,
                         filter.pending_command_custody,
+                        workspace,
                         limit,
                         offset
                     ],
@@ -2677,7 +2689,7 @@ impl Store {
                     LEFT JOIN runs r ON r.id=t.run
                     LEFT JOIN sessions s ON s.id=r.session
                     WHERE 1=1 {EFFECT_FILTER}
-                    ORDER BY r.rowid DESC,t.call LIMIT ?8 OFFSET ?9"
+                    ORDER BY r.rowid DESC,t.call LIMIT ?9 OFFSET ?10"
                 ))?;
                 let rows = query.query_map(
                     params![
@@ -2688,6 +2700,7 @@ impl Store {
                         filter.has_lease,
                         filter.unsettled_effects,
                         filter.pending_command_custody,
+                        workspace,
                         limit,
                         offset
                     ],

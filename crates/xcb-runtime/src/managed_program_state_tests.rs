@@ -1394,7 +1394,16 @@ async fn program_registered_in_a_cannot_publish_children_in_b() {
     // although A holds one.
     assert!(enqueue_in(b.clone()).await.is_err());
     f.managed
-        .configure_project_policy_in(&b, None, "Maintain B".into(), 8, now_ms() + 7_200_000, None)
+        .configure_project_policy_in(
+            &b,
+            None,
+            "Maintain B".into(),
+            8,
+            now_ms() + 7_200_000,
+            None,
+            0,
+            0,
+        )
         .unwrap();
     // Registered in A, it publishes only under A's grant: pausing A holds it
     // even though B's grant is active.

@@ -204,15 +204,29 @@ xcb schedules program /Users/bg/Documents/xcb \
   --title "xcb north-star herder"
 ```
 
+The grant also carries throughput dials so token spend on a long-running
+hill-climb can be scaled up or down without touching the controller:
+`xcb projects configure --parallel N --per-hour N` sets them at grant time
+and `xcb projects scale` changes them later; `--parallel` caps concurrent
+provider-bound lanes across the whole repository family (linked worktrees
+share one project), and `--per-hour` caps automatic admissions in the
+trailing hour. `0` means the project adds no cap of its own. Operator-started
+work always runs — it consumes a lane but never an admission — while paused
+or expired projects hold automatic work rather than dropping it, and
+schedules report their blocker instead of silently skipping wake-ups. Inspect
+with `xcb projects status` or the `schedules`/`projects` sections of
+`xcb native status --json`.
+
 The managed config exposes `max_active_runs` (1–64) and
 `adaptive_parallelism`. Adaptive mode starts at one active task and doubles
 every 30 seconds while queued work, account routes, and host telemetry remain
 healthy. It halves on resource pressure or a configuration fault. Account
-limits, workspace locks, uncertain effects, and capability checks remain hard
-gates, so increasing the ceiling cannot bypass custody. Maintenance and
-recovery work use the same ledger with their own class and priority; a
-maintenance failure is isolated from build work, while recovery retains the
-reservation of an uncertain provider effect until evidence settles it.
+limits, workspace locks, uncertain effects, capability checks, and project
+throughput dials remain hard gates, so increasing the ceiling cannot bypass
+custody. Maintenance and recovery work use the same ledger with their own
+class and priority; a maintenance failure is isolated from build work, while
+recovery retains the reservation of an uncertain provider effect until
+evidence settles it.
 
 The controller must inspect the current tree, grant, backlog, receipts, and
 validation state before selecting work. It should keep at most one integration

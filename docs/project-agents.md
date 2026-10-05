@@ -111,9 +111,12 @@ demonstrate and how to compare it without assuming token or cost savings.
 
 ```sh
 xcb projects configure <dir|name> "Maintain and improve the parser" --tasks 10 --hours 24
+xcb projects configure <dir|name> "Climb the migration" --tasks 100 --hours 720 --parallel 4 --per-hour 12
+xcb projects scale <dir|name> --parallel 1 --per-hour 4 --revision 3
+xcb projects status <dir|name>
 xcb projects --json
-xcb projects pause <dir|name> --revision 1
-xcb projects resume <dir|name> --revision 2
+xcb projects pause <dir|name> --revision 4
+xcb projects resume <dir|name> --revision 5
 ```
 
 In the TUI, use `/project grant 10 24 Maintain and improve the parser`, `/project`,
@@ -135,12 +138,25 @@ optional CLI `--provider` is a hard constraint inherited by automatic work.
 Configuring a grant does not invent an initial task: submit the first prompt,
 release a backlog item, or add a schedule to begin the project work.
 
-A grant authorizes automatic work in its own directory only. It covers every
+Two throughput dials scale token spend on a long-running project without
+editing it: `--parallel` (0–64) caps how many provider-bound tasks the project
+may run at once, and `--per-hour` (0–512) caps how many automatic tasks it may
+start per hour. `0` leaves the project's own limit unset; global capacity,
+account, and directory rules still apply. `xcb projects scale` changes the
+dials under the same revision check as every grant change, and
+`xcb projects status` shows live workers, open and unfinished work, starts in
+the current hour, and the schedules feeding the project.
+
+A grant authorizes automatic work in its own directory. It covers every
 task bound there, from the thread, a project view, or a remote dispatch, and no
 task in any other directory, even one in the same thread. An explicit binding to
 a subdirectory such as `/repo/sub` is a different project from `/repo`; prompts
 that mention a path inside a repository bind to the repository root, so the
-root's grant applies to them.
+root's grant applies to them. Linked worktrees of the same repository are the
+one exception: they share the checkout's pause and throughput limits, so
+automatic work across the whole family slows together rather than racing on
+sibling checkouts. Your own prompts never wait for the dials — they count as
+live work but are not rate-limited as automatic starts.
 
 Workers propose deferred follow-ups with `xcb_backlog_add`. xcb admits one only
 when its parent completed conclusively, the proposal belongs to the current
@@ -161,9 +177,14 @@ ordinary per-task attempt/time limits; pause them separately when ending them.
 ## Schedules and startup
 
 ```sh
+xcb schedules
 xcb schedules add <dir|name> "Inspect the project and report the next useful step" --every 3600
-xcb schedules pause <schedule-id> --revision 1
-xcb schedules resume <schedule-id> --revision 2
+xcb schedules show <schedule-id>
+xcb schedules edit <schedule-id> --revision 2 --every 7200 --next-in 300
+xcb schedules pause <schedule-id> --revision 3
+xcb schedules resume <schedule-id> --revision 4
+xcb schedules delete <schedule-id> --revision 5
+xcb schedules --workspace ~/src/app --enabled --due
 ```
 
 Use `/schedule`, `/schedule all`, `/schedule every 3600 <prompt>`, and
@@ -176,6 +197,13 @@ project view, and the thread's ID needs `--workspace <dir>`. The host owns the c
 scheduler is involved. Downtime coalesces missed intervals into one occurrence.
 Durable occurrence identities prevent duplicate enqueue, and outstanding work,
 questions or uncertainty block overlapping project occurrences.
+
+Every mutation takes the schedule's current revision, so an edit and a wake-up
+can never interleave into a half-applied change. The list view reports why a
+due schedule is not running — a paused project, open work, an unfinished
+previous run, or the project's hourly start limit — and its wake-up stays put
+until the blocker clears instead of being silently skipped. `xcb native
+status --json` carries the same schedule and project sections for agents.
 
 The supervisor remains alive while enabled schedules exist. Closing the terminal
 detaches; reopening xcb resumes persisted state. Opt-in [macOS login

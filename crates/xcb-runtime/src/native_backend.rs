@@ -427,6 +427,9 @@ pub struct StatusQuery {
     pub account: Option<xcb_core::Id>,
     pub session: Option<xcb_core::Id>,
     pub state: Option<State>,
+    /// Exact canonical workspace path for sessions, runs and effects, and
+    /// for the managed schedules and projects sections.
+    pub workspace: Option<String>,
     pub has_lease: bool,
     pub unsettled_effects: bool,
     pub pending_command_custody: bool,
@@ -443,6 +446,7 @@ impl Default for StatusQuery {
             account: None,
             session: None,
             state: None,
+            workspace: None,
             has_lease: false,
             unsettled_effects: false,
             pending_command_custody: false,
@@ -474,6 +478,151 @@ fn status_section<T>(
     }))
 }
 
+/// Slice an in-memory list into the same page envelope the store sections
+/// use; managed tables are small and fully materialized by design.
+fn managed_page<T>(
+    records: Vec<T>,
+    cursor: u64,
+    limit: u64,
+    render: impl Fn(&T) -> serde_json::Value,
+) -> Result<serde_json::Value> {
+    let matched =
+        u64::try_from(records.len()).map_err(|_| xcb_core::Error::Invalid("status count"))?;
+    let start = usize::try_from(cursor)
+        .unwrap_or(usize::MAX)
+        .min(records.len());
+    let end = start
+        .saturating_add(usize::try_from(limit).unwrap_or(usize::MAX))
+        .min(records.len());
+    let rendered: Vec<_> = records[start..end].iter().map(&render).collect();
+    let returned =
+        u64::try_from(rendered.len()).map_err(|_| xcb_core::Error::Invalid("status count"))?;
+    let next = cursor.saturating_add(returned);
+    Ok(serde_json::json!({
+        "matched": matched,
+        "cursor": cursor,
+        "returned": returned,
+        "truncated": next < matched,
+        "nextCursor": (next < matched).then_some(next),
+        "records": rendered,
+    }))
+}
+
+/// Schedule and project-herd records for the same read-only projection,
+/// through the managed store's read-only handle. Prompt text and program
+/// manifests stay out — this is an agent-facing inventory. Degrades to an
+/// availability marker when managed state is absent or from another schema
+/// version rather than failing the whole snapshot.
+fn managed_status(root: &Path, query: &StatusQuery) -> serde_json::Value {
+    let database = root.join("managed").join("managed.sqlite");
+    if !database.is_file() {
+        return serde_json::json!({"available": false, "diagnostic": "no managed state yet"});
+    }
+    let managed = match crate::managed::ManagedStore::open_read_only(root) {
+        Ok(Some(store)) => store,
+        Ok(None) => {
+            return serde_json::json!({"available": false, "diagnostic": "no managed state yet"});
+        }
+        Err(error) => {
+            return serde_json::json!({
+                "available": false,
+                "diagnostic": xcb_core::display_text(&error.to_string(), 256),
+            });
+        }
+    };
+    let now = crate::now_ms();
+    let schedules = managed.schedule_views(None).and_then(|views| {
+        let views: Vec<_> = views
+            .into_iter()
+            .filter(|view| {
+                query
+                    .workspace
+                    .as_deref()
+                    .is_none_or(|workspace| view.workspace.as_deref() == Some(workspace))
+            })
+            .collect();
+        managed_page(views, query.cursor, query.limit, |view| {
+            let schedule = &view.schedule;
+            serde_json::json!({
+                "id": &schedule.id,
+                "conversation": &schedule.conversation,
+                "workspace": &view.workspace,
+                "kind": if schedule.program.is_some() { "program" } else { "prompt" },
+                "enabled": schedule.enabled,
+                "intervalMs": schedule.interval_ms,
+                "nextDueMs": schedule.next_due_ms,
+                "dueNow": schedule.enabled && schedule.next_due_ms <= now,
+                "blocker": &view.blocker,
+                "lastTask": &schedule.last_task,
+                "lastTaskState": view.last_task_state.map(|state| state.as_str()),
+                "lastTaskDetail": view.last_task_detail.as_deref().map(|detail| xcb_core::display_text(detail, 256)),
+                "revision": schedule.revision,
+                "createdAtMs": schedule.created_at_ms,
+                "updatedAtMs": schedule.updated_at_ms,
+            })
+        })
+    });
+    let projects = managed.project_policies().and_then(|policies| {
+        // A workspace filter also selects the herd that covers it, so a
+        // linked worktree shows its checkout's project. Resolve once.
+        let herd_workspace = query
+            .workspace
+            .as_deref()
+            .map(|workspace| managed.herd_policy_in(workspace))
+            .transpose()?
+            .flatten()
+            .map(|herd| herd.workspace);
+        let policies: Vec<_> = policies
+            .into_iter()
+            .filter(|policy| {
+                herd_workspace
+                    .as_deref()
+                    .is_none_or(|workspace| policy.workspace == workspace)
+            })
+            .collect();
+        let mut herds = Vec::with_capacity(policies.len());
+        for policy in policies {
+            let herd = managed
+                .herd_status_in(&policy.workspace)?
+                .ok_or(xcb_core::Error::Invalid("project status"))?;
+            herds.push((policy, herd));
+        }
+        managed_page(herds, query.cursor, query.limit, |(policy, herd)| {
+            serde_json::json!({
+                "workspace": &policy.workspace,
+                "name": managed.workspace_name(&policy.workspace).ok(),
+                "status": managed.project_status(policy).unwrap_or("unknown"),
+                "enabled": policy.enabled,
+                "repo": &policy.repo,
+                "generation": &policy.generation,
+                "maxActive": policy.max_active,
+                "maxPerHour": policy.max_per_hour,
+                "lanes": herd.lanes.len(),
+                "openTasks": herd.open,
+                "uncertainTasks": herd.uncertain,
+                "admissionsLastHour": herd.admissions_last_hour,
+                "maxTasks": policy.max_tasks,
+                "admittedTasks": policy.admitted_tasks,
+                "expiresAtMs": policy.expires_at_ms,
+                "requiredProvider": policy.required_provider,
+                "schedules": herd.schedules.len(),
+                "revision": policy.revision,
+            })
+        })
+    });
+    match (schedules, projects) {
+        (Ok(schedules), Ok(projects)) => serde_json::json!({
+            "available": true,
+            "schedules": schedules,
+            "projects": projects,
+        }),
+        (Err(error), _) | (_, Err(error)) => serde_json::json!({
+            "available": false,
+            "diagnostic": xcb_core::display_text(&error.to_string(), 256),
+        }),
+    }
+}
+
 /// Local records for agent status checks. This projection never starts or
 /// attaches to a provider, submits no prompt, and does not refresh quota or
 /// credentials. It is a bounded snapshot, not a recovery decision.
@@ -488,6 +637,7 @@ pub fn status_snapshot(store: &Store, query: StatusQuery) -> Result<serde_json::
             account: query.account.clone(),
             session: query.session.clone(),
             state: query.state,
+            workspace: query.workspace.clone(),
             has_lease: query.has_lease,
             unsettled_effects: query.unsettled_effects,
             pending_command_custody: query.pending_command_custody,
@@ -628,6 +778,25 @@ pub fn status_snapshot(store: &Store, query: StatusQuery) -> Result<serde_json::
             "settled": record.settled,
         }))
     })?;
+    let mut managed = managed_status(store.root(), &query);
+    let empty_section = || {
+        serde_json::json!({
+            "matched": 0,
+            "cursor": query.cursor,
+            "returned": 0,
+            "truncated": false,
+            "nextCursor": null,
+            "records": [],
+        })
+    };
+    let schedules = managed
+        .as_object_mut()
+        .and_then(|value| value.remove("schedules"))
+        .unwrap_or_else(empty_section);
+    let projects = managed
+        .as_object_mut()
+        .and_then(|value| value.remove("projects"))
+        .unwrap_or_else(empty_section);
 
     Ok(serde_json::json!({
         "version": 1,
@@ -665,6 +834,7 @@ pub fn status_snapshot(store: &Store, query: StatusQuery) -> Result<serde_json::
             "account": query.account,
             "session": query.session,
             "state": query.state,
+            "workspace": query.workspace,
             "hasLease": query.has_lease,
             "unsettledEffects": query.unsettled_effects,
             "pendingCommandCustody": query.pending_command_custody,
@@ -675,6 +845,9 @@ pub fn status_snapshot(store: &Store, query: StatusQuery) -> Result<serde_json::
             "cursorKind": "offset",
             "stableOrder": true,
         },
+        "managed": managed,
+        "schedules": schedules,
+        "projects": projects,
         "accounts": accounts,
         "sessions": sessions,
         "runs": runs,
@@ -1341,6 +1514,81 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn native_status_reports_managed_schedules_and_projects_without_a_provider() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        let state = root.join("state");
+        let workspace = crate::private::directory(&root.join("work")).unwrap();
+        let managed = crate::managed::ManagedStore::open(&state).unwrap();
+        let store = Store::open(&state).unwrap();
+        let conversation = managed.create_conversation(&workspace).await.unwrap();
+        let now = crate::now_ms();
+        let schedule = managed
+            .create_schedule(&conversation.id, "sweep".into(), 60_000, now)
+            .await
+            .unwrap();
+        let policy = managed
+            .configure_project_policy_in(
+                &workspace,
+                None,
+                "Maintain the project".into(),
+                8,
+                now + 7_200_000,
+                Some(Provider::Codex),
+                2,
+                4,
+            )
+            .unwrap();
+
+        let status = status_snapshot(&store, StatusQuery::default()).unwrap();
+        assert_eq!(status["inspection"]["providerProcessesStarted"], 0);
+        assert_eq!(status["managed"]["available"], true);
+        assert!(status["managed"].get("schedules").is_none());
+        assert!(status["managed"].get("projects").is_none());
+        assert_eq!(status["schedules"]["matched"], 1);
+        let record = &status["schedules"]["records"][0];
+        assert_eq!(record["id"], schedule.id.as_str());
+        assert_eq!(record["kind"], "prompt");
+        assert_eq!(record["enabled"], true);
+        assert_eq!(record["dueNow"], true);
+        assert_eq!(record["workspace"], policy.workspace);
+        assert_eq!(record["blocker"], serde_json::Value::Null);
+        assert!(record.get("prompt").is_none());
+        assert_eq!(status["projects"]["matched"], 1);
+        let project = &status["projects"]["records"][0];
+        assert_eq!(project["workspace"], policy.workspace);
+        assert_eq!(project["maxActive"], 2);
+        assert_eq!(project["maxPerHour"], 4);
+        assert_eq!(project["lanes"], 0);
+        assert_eq!(project["schedules"], 1);
+        assert_eq!(project["admissionsLastHour"], 0);
+        assert_eq!(project["requiredProvider"], "codex");
+
+        // The exact workspace filter keeps the herd and its schedules.
+        let filtered = status_snapshot(
+            &store,
+            StatusQuery {
+                workspace: Some(policy.workspace.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(filtered["schedules"]["matched"], 1);
+        assert_eq!(filtered["projects"]["matched"], 1);
+        let elsewhere = crate::private::directory(&root.join("other")).unwrap();
+        let filtered = status_snapshot(
+            &store,
+            StatusQuery {
+                workspace: Some(elsewhere.to_str().unwrap().to_owned()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(filtered["schedules"]["matched"], 0);
+        assert_eq!(filtered["projects"]["matched"], 0);
     }
 
     #[test]
