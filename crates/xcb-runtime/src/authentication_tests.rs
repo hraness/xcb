@@ -302,3 +302,49 @@ fn authentication_health_codex_rejects_account_and_user_switches_before_publicat
         assert!(store.unsettled_runs().unwrap().is_empty());
     }
 }
+
+#[test]
+fn claude_subscription_refusal_blocks_routing_across_restart_until_explicit_reauth() {
+    let root = tempfile::tempdir().unwrap();
+    let base = xcb_core::canonical(root.path()).unwrap();
+    let state = base.join("state");
+    let store = Store::open(&state).unwrap();
+    let blocked = account(&store, Provider::Claude);
+    let available = account(&store, Provider::Claude);
+    let work = private::directory(&base.join("work")).unwrap();
+    let choice = model(Provider::Claude);
+    store.set_models(Provider::Claude, &[choice.clone()]).unwrap();
+    let now = crate::now_ms();
+    let session = store.create_session(&blocked, choice.clone(), &work, now).unwrap();
+    let message = Message { id: crate::new_id("m"), role: Role::User, text: "Synthetic acceptance fixture".into(), at_ms: now, attachments: vec![], provenance: None };
+    let current = store.append_message(&session.id, session.revision, &message).unwrap();
+    let run = store.prepare_run(&session.id, current.revision, now).unwrap();
+    let text = "Your organization has disabled Claude subscription access for Claude Code · Use an Anthropic API key instead, or ask your admin to enable access";
+    let crate::claude::Event::Result { terminal, failure, .. } = crate::claude::parse_value(json!({"type":"result","subtype":"error_during_execution","is_error":true,"result":text})).unwrap() else { panic!("expected provider result") };
+    let outcome = Outcome { tool_calls: Some(0), text_attention: false, text: text.into(), diagnostic: None, state: State::NeedsAction, facts: TurnFacts { terminal, joined: true, effects: EffectState::None, pending_attention: true, failure } };
+    assert_eq!(outcome.facts.failure, Some(Failure::Authentication));
+    store.settle_outcome(&run, &message.id, &outcome, now).unwrap();
+    drop(store);
+    let store = Store::open(&state).unwrap();
+    assert!(store.authentication_required(&blocked).unwrap());
+    assert!(store.account_recovery(&blocked).unwrap().is_none(), "not a transient provider outage");
+    assert!(store.unsettled_runs().unwrap().is_empty());
+    let current = store.session(&session.id).unwrap().unwrap();
+    assert!(store.prepare_run(&session.id, current.revision, now + 35 * 24 * 60 * 60 * 1000).is_err(), "elapsed outage horizon must not unblock an entitlement refusal");
+    let mut config = Config::default();
+    config.default_account = Some(blocked.clone());
+    let selected = crate::kernel::new_session(&store, &work, &config, None, Some("claude/synthetic-model"), None).unwrap();
+    assert_eq!(selected.account, available, "automatic selection excludes the refused default account");
+    assert!(crate::kernel::new_session(&store, &work, &config, Some(&blocked), Some("claude/synthetic-model"), None).is_err());
+    let view = crate::native_backend::status_snapshot(&store, crate::native_backend::StatusQuery { account: Some(blocked.clone()), ..Default::default() }).unwrap();
+    assert_eq!(view["accounts"]["records"][0]["authenticationRequired"], true);
+    assert_eq!(view["accounts"]["records"][0]["health"]["state"], "reauth_required");
+    let probe = store.prepare_probe(&blocked, None, now).unwrap();
+    crate::application_qualification::rotate_generation(&store, &probe).unwrap();
+    store.set_models(Provider::Claude, &[choice]).unwrap();
+    store.settle(&probe, State::Idle, now).unwrap();
+    auth::store_token(&store, &blocked, b"sk-ant-oat01-synthetic_not_a_real_token").unwrap();
+    assert!(store.authentication_required(&blocked).unwrap(), "metadata, generation rotation and unchanged import do not restore entitlement");
+    auth::store_token(&store, &blocked, b"sk-ant-oat01-synthetic_changed_not_a_real_token").unwrap();
+    assert!(!store.authentication_required(&blocked).unwrap(), "explicit changed credentials may authorize a new account-access check");
+}

@@ -10,6 +10,17 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.19.1 - 2026-10-05
+
+xcb stops selecting Claude accounts after an explicit organization refusal of
+Claude Code subscription access.
+
+- Record this provider error as an account-access failure that survives restart,
+  so unattended work can use another available account.
+- Keep generic errors and quoted refusal text from blocking an account.
+- Keep the affected account unavailable until access is repaired. Signing in
+  again may be insufficient when an organization administrator must enable access.
+
 ## 0.19.0 - 2026-10-05
 
 xcb adds project herding controls and persistent recovery for unattended work,

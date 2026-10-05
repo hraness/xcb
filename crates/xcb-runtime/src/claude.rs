@@ -330,7 +330,16 @@ fn counters(value: &Value) -> Result<Counters> {
 /// classify a failure but never fail a turn on its own.
 pub(crate) fn authentication_cue(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
-    [
+    // The pinned CLI reports this account-wide entitlement refusal after
+    // accepting the prompt. Treat it like other persistent account-access
+    // failures, never a retryable outage or a per-tool permission denial.
+    // Match the actual error line, not quoted advice in another failure.
+    let subscription_refused = lower.lines().any(|line| {
+        line.trim()
+            .strip_prefix("your organization has disabled claude subscription access for claude code")
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(" · "))
+    });
+    subscription_refused || [
         "not logged in",
         "/login",
         "invalid api key",
@@ -849,6 +858,22 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn claude_subscription_refusal_requires_exact_provider_error_line() {
+        let refusal = "Your organization has disabled Claude subscription access for Claude Code · Use an Anthropic API key instead, or ask your admin to enable access";
+        for (text, is_error, expected) in [
+            (refusal.to_owned(), true, Some(Failure::Authentication)),
+            (refusal.to_owned(), false, None),
+            (format!("> {refusal}"), true, None),
+            (format!("A user quoted: {refusal}"), true, None),
+            ("Your organization has disabled an unrelated feature".into(), true, None),
+        ] {
+            let value = json!({"type":"result", "subtype":if is_error {"error_during_execution"} else {"success"}, "is_error":is_error, "errors":[text]});
+            let Event::Result { failure, .. } = parse_value(value).unwrap() else { panic!("expected result") };
+            assert_eq!(failure, expected);
+        }
     }
 
     #[test]

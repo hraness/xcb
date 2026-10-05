@@ -94,7 +94,7 @@ impl ModelCatalog {
 const MAX_SESSIONS: i64 = 10_000;
 const MAX_MESSAGES: i64 = 10_000;
 pub(crate) const AUTHENTICATION_REQUIRED: &str =
-    "account authentication failed; reconnect this account before running tasks";
+    "account authentication or subscription access failed; restore account access (administrator action may be needed), then reconnect before running tasks";
 
 #[path = "store_overview.rs"]
 mod overview;
