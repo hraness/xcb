@@ -84,8 +84,7 @@ impl NativeConfig {
 }
 
 pub(crate) fn protected_paths(state: &Path) -> Result<Vec<PathBuf>> {
-    let home = PathBuf::from(std::env::var_os("HOME").ok_or(Error::PrivateState)?);
-    let home = xcb_core::canonical(home)?;
+    let home = xcb_core::canonical(xcb_core::home_dir().ok_or(Error::PrivateState)?)?;
     let mut paths = vec![state.to_owned()];
     paths.extend(
         [
@@ -118,9 +117,7 @@ pub fn validate_grant(scope: &NativeScope, state: &Path) -> Result<()> {
 }
 
 pub(crate) fn validate_scope(scope: &NativeScope, state: &Path) -> Result<()> {
-    let home = xcb_core::canonical(PathBuf::from(
-        std::env::var_os("HOME").ok_or(Error::PrivateState)?,
-    ))?;
+    let home = xcb_core::canonical(xcb_core::home_dir().ok_or(Error::PrivateState)?)?;
     let mut protected = protected_paths(state)?;
     protected.push(crate::command_tool::default_root()?);
     protected.push(crate::coordination::default_root()?);
@@ -1114,8 +1111,10 @@ mod tests {
     fn native_grants_are_closed_exact_and_absent_from_legacy_config() {
         let legacy = serde_json::to_value(Config::default()).unwrap();
         assert!(legacy.get("native_execution").is_none());
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = xcb_core::canonical(directory.path()).unwrap();
         let scope = NativeScope {
-            workspace: PathBuf::from("/tmp/project"),
+            workspace: workspace.clone(),
             providers: vec![Provider::Claude, Provider::Codex],
             github_credentials: false,
             read_only_roots: vec![],
@@ -1125,28 +1124,16 @@ mod tests {
             scopes: vec![scope.clone()],
         };
         config.validate().unwrap();
-        assert!(
-            config
-                .scope(Path::new("/tmp/project"), Provider::Claude)
-                .is_some()
-        );
-        assert!(
-            config
-                .scope(Path::new("/tmp/project"), Provider::Codex)
-                .is_some()
-        );
-        assert!(
-            config
-                .scope(Path::new("/tmp/project"), Provider::Devin)
-                .is_none()
-        );
+        assert!(config.scope(&workspace, Provider::Claude).is_some());
+        assert!(config.scope(&workspace, Provider::Codex).is_some());
+        assert!(config.scope(&workspace, Provider::Devin).is_none());
         let mut retired = config.clone();
         retired.scopes[0].providers = vec![Provider::Devin];
         assert!(retired.validate().is_err());
         assert!(!status(Provider::Devin).implemented);
         assert!(
             config
-                .scope(Path::new("/tmp/project/nested"), Provider::Claude)
+                .scope(&workspace.join("nested"), Provider::Claude)
                 .is_none()
         );
         let mut foreign = serde_json::to_value(&scope).unwrap();
@@ -1163,6 +1150,27 @@ mod tests {
         let mut relative = config;
         relative.scopes[0].workspace = PathBuf::from("project");
         assert!(relative.validate().is_err());
+    }
+
+    #[test]
+    fn native_private_roots_follow_the_platform_home_without_fallback() {
+        #[cfg(unix)]
+        let variable = "HOME";
+        #[cfg(windows)]
+        let variable = "USERPROFILE";
+        let named_home = PathBuf::from(std::env::var_os(variable).unwrap());
+        let home = xcb_core::canonical(&named_home).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let state = xcb_core::canonical(directory.path()).unwrap();
+        let protected = protected_paths(&state).unwrap();
+        assert!(protected.contains(&state));
+        for secret in [".ssh", ".aws", ".config/gh", ".codex", ".claude"] {
+            assert!(protected.contains(&home.join(secret)), "{secret}");
+        }
+        assert_eq!(
+            crate::command_tool::default_root().unwrap(),
+            named_home.join(".local/share/xcb-command")
+        );
     }
 
     #[test]

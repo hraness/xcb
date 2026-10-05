@@ -446,8 +446,15 @@ mod tests {
     fn native_confinement_quotes_paths_without_expanding_path_contents() {
         let directory = tempfile::tempdir().unwrap();
         let base = xcb_core::canonical(directory.path()).unwrap();
-        let workspace =
-            crate::private::directory(&base.join("workspace_@home@_\"quoted\"")).unwrap();
+        // Windows forbids double quotes in file names. Its canonical path
+        // supplies backslashes to exercise JSON escaping; both platforms
+        // retain the template token and literal quotation characters.
+        let name = if cfg!(windows) {
+            "workspace_@home@_'quoted'"
+        } else {
+            "workspace_@home@_\"quoted\""
+        };
+        let workspace = crate::private::directory(&base.join(name)).unwrap();
         let home = crate::private::directory(&base.join("home")).unwrap();
         let state = crate::private::directory(&base.join("state")).unwrap();
         let scope = NativeScope {

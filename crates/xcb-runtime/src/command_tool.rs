@@ -70,8 +70,8 @@ pub(crate) struct CommandTools {
 }
 
 pub fn default_root() -> Result<PathBuf> {
-    let home = std::env::var_os("HOME").ok_or(Error::PrivateState)?;
-    Ok(PathBuf::from(home).join(".local/share/xcb-command"))
+    let home = xcb_core::home_dir().ok_or(Error::PrivateState)?;
+    Ok(home.join(".local/share/xcb-command"))
 }
 
 fn prepare(
