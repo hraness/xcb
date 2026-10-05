@@ -313,7 +313,7 @@ fn claude_subscription_refusal_blocks_routing_across_restart_until_explicit_reau
     let available = account(&store, Provider::Claude);
     let work = private::directory(&base.join("work")).unwrap();
     let choice = model(Provider::Claude);
-    store.set_models(Provider::Claude, &[choice.clone()]).unwrap();
+    store.set_models(Provider::Claude, std::slice::from_ref(&choice)).unwrap();
     let now = crate::now_ms();
     let session = store.create_session(&blocked, choice.clone(), &work, now).unwrap();
     let message = Message { id: crate::new_id("m"), role: Role::User, text: "Synthetic acceptance fixture".into(), at_ms: now, attachments: vec![], provenance: None };
@@ -331,8 +331,10 @@ fn claude_subscription_refusal_blocks_routing_across_restart_until_explicit_reau
     assert!(store.unsettled_runs().unwrap().is_empty());
     let current = store.session(&session.id).unwrap().unwrap();
     assert!(store.prepare_run(&session.id, current.revision, now + 35 * 24 * 60 * 60 * 1000).is_err(), "elapsed outage horizon must not unblock an entitlement refusal");
-    let mut config = Config::default();
-    config.default_account = Some(blocked.clone());
+    let config = Config {
+        default_account: Some(blocked.clone()),
+        ..Default::default()
+    };
     let selected = crate::kernel::new_session(&store, &work, &config, None, Some("claude/synthetic-model"), None).unwrap();
     assert_eq!(selected.account, available, "automatic selection excludes the refused default account");
     assert!(crate::kernel::new_session(&store, &work, &config, Some(&blocked), Some("claude/synthetic-model"), None).is_err());
