@@ -50,8 +50,9 @@ describe("xcb launch facts", () => {
     const post = findBlogPost(launchPostSlug);
     expect(post?.format).toBe("beats");
     // A recorded AI or human-editor review admits the post; the author cannot admit it.
-    expect(post?.admission.review?.reviewer.trim().length).toBeGreaterThan(0);
-    expect(["ai", "human-editor"]).toContain(post?.admission.review?.reviewerType);
+    const review = post?.admission.review;
+    expect(review?.reviewer.trim().length).toBeGreaterThan(0);
+    expect(review?.reviewerType === "ai" || review?.reviewerType === "human-editor").toBe(true);
     expect(post?.admission.lifecycle).toBe("indexable");
     const scores: number[] = Object.values(post?.admission.scores ?? {});
     expect(scores.every((score) => score > 0)).toBe(true);

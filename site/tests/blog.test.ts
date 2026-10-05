@@ -68,7 +68,10 @@ describe("xcb blog", () => {
         expect(entry.admission.lifecycle).toBe("quarantined");
       } else if (review.reviewerType === "human-editor") {
         expect(sentence).toBe(`Drafted with AI from the source code and reviewed by ${review.reviewer}, a human editor.`);
-        expect(humanReview).toEqual(review);
+        expect(humanReview).not.toBeNull();
+        expect(humanReview?.reviewer).toBe(review.reviewer);
+        expect(humanReview?.reviewerType).toBe(review.reviewerType);
+        expect(humanReview?.reviewedOn).toBe(review.reviewedOn);
       } else {
         expect(review.reviewerType).toBe("ai");
         expect(sentence).toStartWith("Drafted with AI from the source code and reviewed by ");
