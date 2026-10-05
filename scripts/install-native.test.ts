@@ -16,6 +16,11 @@ setDefaultTimeout(30_000);
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+// The aicharts release the installer pins, read from the script so a pin
+// refresh cannot drift this harness away from what the installer fetches.
+const installScript = readFileSync(new URL("./install.sh", import.meta.url), "utf8");
+const aichartsVersion = installScript.match(/^AICHARTS_VERSION=(\d+\.\d+\.\d+)$/m)?.[1];
+if (!aichartsVersion) throw new Error("install.sh lacks an AICHARTS_VERSION pin");
 const hash = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 const binary = (version: string, label = "candidate") => `#!/bin/sh\n[ -z "\${FIXTURE_EXECUTION_LOG:-}" ] || printf 'executed\\n' >> "$FIXTURE_EXECUTION_LOG"\n[ "$#" = 1 ] && [ "$1" = --version ] || exit 17\nprintf 'xcb ${version}\\n'\n# ${label}\n`;
 
@@ -570,11 +575,11 @@ printf '#!/bin/sh\\n# Install native xcb stand-in\\nprintf "%%s\\\\n" "$XCB_VERS
 function aichartsArchive(target = "x86_64-unknown-linux-gnu"): { path: string; sha256: string } {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "xcb-aicharts-")));
   roots.push(root);
-  const directory = `aicharts-0.3.1-${target}`;
+  const directory = `aicharts-${aichartsVersion}-${target}`;
   mkdirSync(join(root, directory, "bin"), { recursive: true });
   writeFileSync(join(root, directory, "bin/aicharts"), `#!/bin/sh
 case "$*" in
-  --version) echo ran >> "$FIXTURE_HISTORY_LOG.ran"; echo 'aicharts 0.3.1 (0123456789ab)' ;;
+  --version) echo ran >> "$FIXTURE_HISTORY_LOG.ran"; echo 'aicharts ${aichartsVersion} (0123456789ab)' ;;
   'history status --json') echo '{"data":{"collecting":"off"},"ok":true}' ;;
   'history enable') echo enabled >> "$FIXTURE_HISTORY_LOG" ;;
   'update status --json') [ -n "$FIXTURE_UPDATE_STATUS" ] || exit 2; printf '%s\\n' "$FIXTURE_UPDATE_STATUS" ;;
@@ -598,7 +603,7 @@ function aichartsEnv(overrides: Record<string, string> = {}, target?: string) {
 test("bootstrap adds the checked aicharts and turns on local usage history on a first install", () => {
   const { result, curl, history, update, root } = bootstrap("Linux", "x86_64", "200", aichartsEnv());
   expect(result.status).toBe(0);
-  expect(curl?.trim().split("\n").at(-1)).toBe("no http://127.0.0.1:9/aicharts-0.3.1-x86_64-unknown-linux-gnu.tar.gz");
+  expect(curl?.trim().split("\n").at(-1)).toBe(`no http://127.0.0.1:9/aicharts-${aichartsVersion}-x86_64-unknown-linux-gnu.tar.gz`);
   expect(existsSync(join(root, "prefix/bin/aicharts"))).toBe(true);
   expect(result.stdout).toContain("Local usage history is on");
   expect(result.stdout).toContain("aicharts history disable");
@@ -656,7 +661,7 @@ test("bootstrap aicharts opt-outs and failures leave the xcb install alone", () 
   expect(off.history).toBeNull();
   const mismatch = bootstrap("Linux", "x86_64", "200", aichartsEnv({ XCB_AICHARTS_SHA256: "0".repeat(64) }));
   expect(mismatch.result.status).toBe(0);
-  expect(mismatch.result.stderr).toContain("checksum mismatch for aicharts-0.3.1-x86_64-unknown-linux-gnu.tar.gz");
+  expect(mismatch.result.stderr).toContain(`checksum mismatch for aicharts-${aichartsVersion}-x86_64-unknown-linux-gnu.tar.gz`);
   expect(existsSync(join(mismatch.root, "prefix/bin/aicharts"))).toBe(false);
   expect(mismatch.history).toBeNull();
   const remote = bootstrap("Linux", "x86_64", "200", aichartsEnv({ XCB_AICHARTS_BASE_URL: "https://example.com" }));
