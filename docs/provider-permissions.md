@@ -195,6 +195,17 @@ verification submits a model prompt and needs subscription usage. The
 provider process still must stop cleanly and its command effects must be
 recorded before any account can be released.
 
+The pinned Claude error that an organization has disabled Claude Code
+subscription access is a persistent account-access refusal. It uses the
+existing `authenticationRequired` / `reauth_required` account gate, so automatic
+routing and outage retries do not keep selecting that account. This state can
+require administrator action to restore subscription access; reconnecting
+alone does not establish entitlement. Metadata refresh, passage of time, and
+unchanged credential imports do not clear the gate. Explicit credential
+replacement or supervised reauthentication can permit a new check. xcb does
+not switch to API-key billing. Earlier `unknown` failures are not retrospectively
+reclassified because their credential-generation authority is not established.
+
 | Claude SDK operation | xcb integration stage |
 | --- | --- |
 | `initializationResult`, `supportedModels`, `accountInfo` | Startup projection and account-specific model/identity refresh. Haiku and models reporting `supportsAutoMode: false` are excluded from executable catalogs; effective Auto mode is checked again at launch. |
