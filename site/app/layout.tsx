@@ -71,7 +71,7 @@ export default function RootLayout({
         {/* eslint-disable-next-line @next/next/no-sync-scripts */}
         <script src="/theme-bootstrap.js" />
       </head>
-      <body>
+      <body data-hraness-landscape="page">
         <SiteAnalytics />
         <DesignPaletteProvider defaultPreference={siteDefaultPalette}>
           <ThemeColorSync />
