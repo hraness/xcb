@@ -1480,3 +1480,78 @@ async fn program_registered_in_a_cannot_publish_children_in_b() {
         0
     );
 }
+
+#[tokio::test]
+async fn hourly_limit_holds_program_child_without_charging_and_resumes_once() {
+    let f = fixture().await;
+    let policy = f.managed.project_policy(&f.conversation).unwrap().unwrap();
+    f.managed
+        .update_project_throughput_in(&policy.workspace, policy.revision, 0, 1)
+        .unwrap();
+    let (parent, child) = waiting(&f, 2).await;
+    settle_child(&f, &child, "Retained first report").await;
+    f.managed.tick_programs(&f.store, true).await.unwrap();
+    let ready = f.managed.task(&parent.id).unwrap().unwrap();
+    let (running, slice) = run_slice(&f, &ready).await;
+    let held = f
+        .managed
+        .finish_program_slice(&parent.id, running.revision, &Ok(slice))
+        .await
+        .unwrap();
+    assert_eq!(held.state, TaskState::Queued);
+    assert!(!held.program_waiting);
+    assert_eq!(held.detail, "project hourly start limit reached");
+    assert_eq!(
+        f.managed.project_dispatch_block(&held).unwrap(),
+        Some("project hourly start limit reached")
+    );
+    assert_eq!(
+        f.managed.program_status(&parent.id).unwrap().unwrap().calls,
+        1
+    );
+    let policy = f.managed.project_policy(&f.conversation).unwrap().unwrap();
+    assert_eq!(policy.admitted_tasks, 1);
+    assert_eq!(
+        f.managed.backlog(Some(&f.conversation), 64).unwrap().len(),
+        2
+    );
+    {
+        let db = f.managed.db().unwrap();
+        assert!(
+            project::check_admission_window(&db, &policy, child.created_at_ms + 3_600_000 - 1)
+                .is_err()
+        );
+        assert!(
+            project::check_admission_window(&db, &policy, child.created_at_ms + 3_600_000).is_ok()
+        );
+    }
+    f.managed
+        .update_project_throughput_in(&policy.workspace, policy.revision, 0, 2)
+        .unwrap();
+    assert!(f.managed.project_dispatch_block(&held).unwrap().is_none());
+    let (running, slice) = run_slice(&f, &held).await;
+    f.managed
+        .finish_program_slice(&parent.id, running.revision, &Ok(slice.clone()))
+        .await
+        .unwrap();
+    f.managed
+        .finish_program_slice(&parent.id, running.revision, &Ok(slice))
+        .await
+        .unwrap();
+    let status = f.managed.program_status(&parent.id).unwrap().unwrap();
+    assert_eq!(status.calls, 2);
+    let second = f
+        .managed
+        .task(status.child.as_ref().unwrap())
+        .unwrap()
+        .unwrap();
+    assert!(second.goal.contains("Retained first report"));
+    assert_eq!(
+        f.managed
+            .project_policy(&f.conversation)
+            .unwrap()
+            .unwrap()
+            .admitted_tasks,
+        2
+    );
+}

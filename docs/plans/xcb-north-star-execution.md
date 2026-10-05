@@ -189,23 +189,47 @@ availability.
 
 ## xcb scheduler setup
 
-The project grant is named `xcb`, lasts 30 days, and permits up to 100 bounded
-follow-up tasks. A pinned controller runs hourly with eight managed calls:
-inspection, implementation, verification, reporting, delivery, recovery,
-maintenance, and capacity review. Managed calls are an offer of work, not a
-parallelism grant: the resident supervisor admits them through the adaptive
-capacity target and durable reservations.
+Start each project from an inactive configuration. Review its exact checkout and
+run offline preflight before creating a grant or schedule. For example, from the
+selected checkout:
 
 ```sh
-xcb projects --json
-xcb schedules program /Users/bg/Documents/xcb \
-  examples/xcb-north-star-controller.algal.json \
-  --workspace /Users/bg/Documents/xcb --managed-calls 8 --every 3600 \
-  --title "xcb north-star herder"
+xcb projects preflight . examples/xcb-north-star-controller.algal.json \
+  --managed-calls 8 --require-file docs/plans/xcb-north-star-execution.md \
+  --expect-revision "$(git rev-parse HEAD)" --task-budget 100
 ```
 
-The grant also carries throughput dials so token spend on a long-running
-hill-climb can be scaled up or down without touching the controller:
+Preflight reports the canonical workspace, Git root, full commit, branch,
+dirty state, pinned manifest and input digests, and required-file SHA-256
+hashes. Required files must be readable files inside the workspace, at most
+1 MiB each. Missing inputs, dirty work, and a mismatched commit return a
+nonzero status. A budget below the number of declared agent cells produces a
+warning; the estimate assumes one pass through those cells. The command creates no grant, task,
+or schedule and starts no provider. Git inspection disables filesystem monitor
+hooks, blocks tracked files with active filter attributes and submodules,
+and limits each command to 1 MiB of output and a five-second read deadline (plus process cleanup).
+Its result is a local snapshot: repeat it
+if inputs change. It does not enforce these conditions on later schedule runs.
+
+The example controller contains five sequential agent cells: inspection,
+implementation, verification, reporting, and delivery. `--managed-calls 8`
+is a per-run ceiling; it adds neither stages nor parallelism. A remaining
+budget of 100 child tasks covers about 20 complete five-cell cycles before
+other automatic work, failed runs, or expiry consume that allowance. A
+30-day expiry does not guarantee 30 days of hourly runs. Recovery, maintenance,
+and capacity review are separate responsibilities, not additional cells in
+this example.
+
+Before enabling any ongoing work, validate one isolated complete cycle and
+inspect its worker results, restart/resume behavior, and delivery evidence.
+Keep schedules disabled until that project is explicitly selected for setup.
+Provider access, resource capacity, and successful delivery require their own
+checks; an offline preflight result does not establish execution readiness.
+
+The grant also carries task-rate and concurrency controls that can change
+without editing the controller. Actual token use depends on each task, model,
+and context and must be measured separately; these controls enforce no token
+budget:
 `xcb projects configure --parallel N --per-hour N` sets them at grant time
 and `xcb projects scale` changes them later; `--parallel` caps concurrent
 provider-bound lanes across the whole repository family (linked worktrees

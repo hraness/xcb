@@ -575,9 +575,10 @@ fn managed_status(root: &Path, query: &StatusQuery) -> serde_json::Value {
         let policies: Vec<_> = policies
             .into_iter()
             .filter(|policy| {
-                herd_workspace
-                    .as_deref()
-                    .is_none_or(|workspace| policy.workspace == workspace)
+                query.workspace.is_none()
+                    || herd_workspace
+                        .as_deref()
+                        .is_some_and(|workspace| policy.workspace == workspace)
             })
             .collect();
         let mut herds = Vec::with_capacity(policies.len());

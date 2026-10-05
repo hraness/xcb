@@ -1,3 +1,6 @@
+#[path = "project_preflight.rs"]
+mod project_preflight;
+
 use clap::Subcommand;
 use std::{
     io::Read,
@@ -210,6 +213,28 @@ pub enum DaemonCommand {
 
 #[derive(Subcommand)]
 pub enum ProjectCommand {
+    /// Check a program and its exact workspace without starting any work.
+    Preflight {
+        /// Exact workspace directory, resolved relative to --cwd.
+        workspace: PathBuf,
+        /// Program manifest, resolved relative to --cwd.
+        manifest: PathBuf,
+        /// JSON input file, resolved relative to --cwd; defaults to an empty object.
+        #[arg(long)]
+        inputs: Option<PathBuf>,
+        /// Maximum managed calls per run, not a concurrency setting.
+        #[arg(long, value_parser = clap::value_parser!(u8).range(1..=8))]
+        managed_calls: Option<u8>,
+        /// Required file inside the workspace; repeat for multiple files.
+        #[arg(long = "require-file")]
+        required_files: Vec<PathBuf>,
+        /// Require HEAD to match this full Git commit hash.
+        #[arg(long)]
+        expect_revision: Option<String>,
+        /// Remaining child-task budget to use for cycle estimates.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(0..=100))]
+        task_budget: Option<u32>,
+    },
     /// Let a project start follow-up work on its own for a goal, within a
     /// task count and a time limit.
     Configure {
@@ -409,12 +434,38 @@ fn project_status_report(store: &ManagedStore, status: &HerdStatus, json: bool) 
     Ok(0)
 }
 
-pub fn projects(
+pub async fn projects(
     root: &Path,
     cwd: &Path,
     command: Option<ProjectCommand>,
     json: bool,
 ) -> Result<i32> {
+    if let Some(ProjectCommand::Preflight {
+        workspace,
+        manifest,
+        inputs,
+        managed_calls,
+        required_files,
+        expect_revision,
+        task_budget,
+    }) = &command
+    {
+        let program = load_program(
+            &cwd.join(manifest),
+            inputs.as_ref().map(|p| cwd.join(p)).as_deref(),
+            *managed_calls,
+        )?;
+        let report = project_preflight::inspect(
+            &cwd.join(workspace),
+            &program,
+            required_files,
+            expect_revision.as_deref(),
+            *task_budget,
+        )
+        .await?;
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(if report["ready"] == true { 0 } else { 1 });
+    }
     let store = ManagedStore::open(root)?;
     if let Some(ProjectCommand::Status { scope: value }) = command {
         let workspace = scope(&store, cwd, &value)?;
@@ -471,7 +522,9 @@ pub fn projects(
             wake(root)?;
             vec![row]
         }
-        Some(ProjectCommand::Status { .. }) => unreachable!("handled above"),
+        Some(ProjectCommand::Status { .. } | ProjectCommand::Preflight { .. }) => {
+            unreachable!("handled above")
+        }
         Some(ProjectCommand::Pause {
             scope: value,
             revision,

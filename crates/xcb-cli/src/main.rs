@@ -1576,6 +1576,18 @@ async fn dispatch_inner(
             return Err(Error::Unavailable("the sandbox test runs on Linux only"));
         }
     }
+    // Project preflight uses only local arguments and Git, even without app state.
+    if matches!(
+        &cli.command,
+        Some(Commands::Projects {
+            command: Some(habitat::ProjectCommand::Preflight { .. })
+        })
+    ) {
+        if let Some(Commands::Projects { command }) = cli.command {
+            return habitat::projects(std::path::Path::new("/"), &cli.cwd, command, cli.json).await;
+        }
+        unreachable!("matched project preflight above");
+    }
     // Update before opening any task state. A successful replacement re-enters
     // once with the original arguments; completed product work is never replayed.
     let update_root = cli
@@ -2939,7 +2951,7 @@ async fn dispatch_inner(
         }
         Some(Commands::Attention) => habitat::attention(store.root(), cli.json),
         Some(Commands::Projects { command }) => {
-            habitat::projects(store.root(), &cli.cwd, command, cli.json)
+            habitat::projects(store.root(), &cli.cwd, command, cli.json).await
         }
         Some(Commands::Memory { command }) => {
             habitat::memory(store.root(), &cli.cwd, command, cli.json).await

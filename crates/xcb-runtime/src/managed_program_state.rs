@@ -310,6 +310,10 @@ pub(super) fn check_dispatch(db: &Connection, task: &ManagedTask, now: u64) -> R
         if task.detail == "project authority task budget is exhausted" {
             require_grant(db, &task.workspace, Some(generation), now, true)?;
         }
+        if task.detail == "project hourly start limit reached" {
+            let policy = require_grant(db, &task.workspace, Some(generation), now, false)?;
+            project::check_admission_window(db, &policy, now)?;
+        }
         if task.detail == "program waits for other project work to settle" {
             no_other_work(db, task)?;
         }
@@ -405,6 +409,7 @@ pub(super) fn transition(
                     "project authority changed before program publication",
                 ));
             }
+            project::check_admission_window(tx, &policy, now_ms())?;
             no_other_work(tx, expected)?;
             if task_from(tx, &child.task.id)?.is_some() {
                 return Err(Error::Conflict("program child identity already exists"));
@@ -1133,7 +1138,8 @@ impl ManagedStore {
                 {
                     Err(Error::Conflict(reason))
                         if reason.starts_with("project authority")
-                            || reason == "program waits for other project work to settle" =>
+                            || reason == "program waits for other project work to settle"
+                            || reason == "project hourly start limit reached" =>
                     {
                         self.hold_program(&task, reason).await
                     }

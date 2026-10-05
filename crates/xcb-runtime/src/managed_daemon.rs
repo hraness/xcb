@@ -1281,6 +1281,7 @@ impl ManagedStore {
             tx.commit()?;
             return Ok(());
         }
+        project::check_admission_window(&tx, &current, now_ms())?;
         let count: i64 = tx.query_row("SELECT count(*) FROM tasks", [], |row| row.get(0))?;
         let active: i64 = tx.query_row(
             "SELECT count(*) FROM tasks WHERE state IN ('queued','running','needs_input')",
@@ -1550,6 +1551,109 @@ mod tests {
         let mut daemon = admitted(pure_manifest(), 0);
         daemon.manifest["name"] = json!("changed");
         assert!(daemon.verify().is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hourly_limit_preserves_daemon_intent_and_retries_without_budget_charge() {
+        let fixture = fixture().await;
+        grant(&fixture).await;
+        let policy = fixture
+            .managed
+            .project_policy(&fixture.conversation)
+            .unwrap()
+            .unwrap();
+        fixture
+            .managed
+            .update_project_throughput_in(&policy.workspace, policy.revision, 0, 1)
+            .unwrap();
+        for name in ["first", "second"] {
+            let mut manifest = agent_manifest();
+            manifest["cells"][0]["prompt"] = json!(format!("Do bounded project task {name}"));
+            let daemon = admitted(manifest, 1);
+            fixture
+                .managed
+                .enqueue_daemon(&fixture.conversation, name, &daemon)
+                .unwrap();
+        }
+        fixture
+            .managed
+            .tick_daemons(&fixture.store, true)
+            .await
+            .unwrap();
+        fixture
+            .managed
+            .tick_daemons(&fixture.store, true)
+            .await
+            .unwrap();
+        let statuses: Vec<_> = ["first", "second"]
+            .into_iter()
+            .map(|name| fixture.managed.daemon_status_for(name).unwrap().unwrap())
+            .collect();
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|s| s.pending_child.is_some())
+                .count(),
+            1
+        );
+        assert!(statuses.iter().all(|s| s.pending_call.is_some()));
+        let pending = statuses
+            .iter()
+            .find(|s| s.pending_child.is_none())
+            .unwrap()
+            .pending_call
+            .clone()
+            .unwrap();
+        let policy = fixture
+            .managed
+            .project_policy(&fixture.conversation)
+            .unwrap()
+            .unwrap();
+        assert_eq!(policy.admitted_tasks, 1);
+        // The blocked request survives reopening the store and repeated pumps.
+        let reopened = Arc::new(ManagedStore::open(&fixture.state).unwrap());
+        reopened.tick_daemons(&fixture.store, true).await.unwrap();
+        assert!(
+            read_call(&reopened.db().unwrap(), &pending)
+                .unwrap()
+                .unwrap()
+                .child
+                .is_none()
+        );
+        assert_eq!(
+            reopened
+                .project_policy(&fixture.conversation)
+                .unwrap()
+                .unwrap()
+                .admitted_tasks,
+            1
+        );
+        reopened
+            .update_project_throughput_in(&policy.workspace, policy.revision, 0, 2)
+            .unwrap();
+        reopened.tick_daemons(&fixture.store, true).await.unwrap();
+        let child = read_call(&reopened.db().unwrap(), &pending)
+            .unwrap()
+            .unwrap()
+            .child
+            .unwrap();
+        reopened.tick_daemons(&fixture.store, true).await.unwrap();
+        assert_eq!(
+            read_call(&reopened.db().unwrap(), &pending)
+                .unwrap()
+                .unwrap()
+                .child,
+            Some(child)
+        );
+        assert_eq!(
+            reopened
+                .project_policy(&fixture.conversation)
+                .unwrap()
+                .unwrap()
+                .admitted_tasks,
+            2
+        );
     }
 
     // Daemons run provider agents, which Windows refuses.
