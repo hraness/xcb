@@ -3,6 +3,10 @@ import { lstat, open, realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
 
 import { boundedText } from "./validation.ts";
+import { createClefJudge, CLEF_ACCOUNT_ENV, CLEF_TOKEN_ENV, CLEF_TOKEN_ALIAS_ENV, CLEF_MODEL_ENV } from "./clef.ts";
+export { createClefJudge, clefEndpoint, checkClefImages, checkClefQuestions, parseClefResponse,
+  CLEF_MODELS, CLEF_IMAGE_LIMITS, CLEF_ACCOUNT_ENV, CLEF_TOKEN_ENV, CLEF_TOKEN_ALIAS_ENV, CLEF_MODEL_ENV } from "./clef.ts";
+export type { ClefOptions, ClefModel, ClefImage } from "./clef.ts";
 
 /**
  * Provider-neutral judgment port ("jev-style"): one fast request answers a
@@ -48,6 +52,7 @@ export interface ScoreAnswer {
   score: number;
   confidence: number;
   probabilities: Record<string, number>;
+  legend?: Record<string, string>;
 }
 export type JudgeAnswer = NoulAnswer | ChoiceAnswer | ScoreAnswer;
 
@@ -58,12 +63,16 @@ export interface JudgeAnswers {
 }
 
 /** Anything that can answer a batch of judgment questions. */
+export interface JudgeAskOptions {
+  images?: readonly unknown[];
+  signal?: AbortSignal;
+}
 export interface Judge {
-  ask(state: JudgeState, questions: JudgeQuestions): Promise<JudgeAnswers>;
+  ask(state: JudgeState, questions: JudgeQuestions, options?: JudgeAskOptions): Promise<JudgeAnswers>;
 }
 
 export const SYSTEM_ONE_URL = "https://api.typesafe.ai/v1/systemone";
-export const DEFAULT_JUDGE_MODEL = "jev-latest";
+export const DEFAULT_JUDGE_MODEL = "clef";
 export const JUDGE_TOKEN_FILE = "jev-api-token";
 export const JUDGE_KEY_ENV = "XCB_JEV_API_KEY";
 export const JUDGE_KEY_VENDOR_ENV = "TYPESAFE_API_KEY";
@@ -199,7 +208,7 @@ export function parseJudgeResponse(status: number, body: string): JudgeAnswers {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) fail("JUDGE_RESPONSE_MALFORMED");
   const entries = Object.entries(raw as Record<string, unknown>);
   if (entries.length === 0) fail("JUDGE_RESPONSE_MALFORMED");
-  const answers: Record<string, JudgeAnswer> = {};
+  const answers: Record<string, JudgeAnswer> = Object.create(null);
   for (const [name, value] of entries) answers[name] = parseAnswer(name, value);
   const result: JudgeAnswers = { answers };
   const responseModel = response.model;
@@ -235,7 +244,7 @@ export function parseJudgeResponse(status: number, body: string): JudgeAnswers {
 export function checkJudgeAnswers(questions: JudgeQuestions, response: JudgeAnswers): JudgeAnswers {
   checkJudgeQuestions(questions);
   const names = Object.keys(questions), answered = Object.keys(response.answers);
-  if (answered.length !== names.length || names.some(name => !(name in response.answers))) {
+  if (answered.length !== names.length || names.some(name => !Object.hasOwn(response.answers, name))) {
     return fail("JUDGE_RESPONSE_QUESTION_MISMATCH");
   }
   for (const name of names) {
@@ -243,8 +252,8 @@ export function checkJudgeAnswers(questions: JudgeQuestions, response: JudgeAnsw
     if (answer.type === "choice") {
       if (question.type !== "choice") return fail("JUDGE_RESPONSE_TYPE_MISMATCH");
       const criteria = question.criteria, buckets = Object.keys(answer.probabilities);
-      if (!(answer.choice in criteria) || !(answer.choice in answer.probabilities)
-        || buckets.length === 0 || buckets.some(bucket => !(bucket in criteria))) {
+      if (!Object.hasOwn(criteria, answer.choice) || !Object.hasOwn(answer.probabilities, answer.choice)
+        || buckets.length === 0 || buckets.some(bucket => !Object.hasOwn(criteria, bucket))) {
         return fail("JUDGE_RESPONSE_OPTION_MISMATCH");
       }
     } else if (answer.type === "score") {
@@ -302,13 +311,17 @@ export interface SystemOneOptions {
 /** The TypeSafe System One backend: a `Judge` over one bounded HTTPS POST. */
 export function createSystemOneJudge(options: SystemOneOptions): Judge {
   if (!validJudgeToken(options.token)) fail("JUDGE_KEY_INVALID");
-  const endpoint = parseJudgeEndpoint(options.endpoint ?? SYSTEM_ONE_URL).toString();
-  const model = checkName(options.model ?? DEFAULT_JUDGE_MODEL);
+  const parsedEndpoint = parseJudgeEndpoint(options.endpoint ?? SYSTEM_ONE_URL);
+  if (parsedEndpoint.hostname === "api.cloudflare.com") fail("JUDGE_PROVIDER_ENDPOINT_MISMATCH");
+  const endpoint = parsedEndpoint.toString();
+  const model = checkName(options.model ?? "jev-latest");
   const fetcher = options.fetch ?? fetch;
   const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 120_000) fail("JUDGE_TIMEOUT_INVALID");
   return Object.freeze({
-    async ask(state: JudgeState, questions: JudgeQuestions): Promise<JudgeAnswers> {
+    async ask(state: JudgeState, questions: JudgeQuestions, input: JudgeAskOptions = {}): Promise<JudgeAnswers> {
+      if (input.images !== undefined && input.images.length > 0) fail("JUDGE_IMAGES_UNSUPPORTED");
+      input.signal?.throwIfAborted();
       checkJudgeState(state);
       checkJudgeQuestions(questions);
       const response = await fetcher(endpoint, {
@@ -319,7 +332,7 @@ export function createSystemOneJudge(options: SystemOneOptions): Judge {
           accept: "application/json",
         },
         body: JSON.stringify({ model, state, questions }),
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: input.signal ? AbortSignal.any([input.signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
         redirect: "error",
       });
       return checkJudgeAnswers(
@@ -465,6 +478,8 @@ export interface ResolveJudgeOptions {
   stateRoot: string;
   /** The judge extension gate; resolution returns null when false. */
   enabled: boolean;
+  provider?: "clef" | "system-one";
+  accountId?: string;
   model?: string;
   endpoint?: string;
   env?: (name: string) => string | undefined;
@@ -483,6 +498,20 @@ export function checkJudgeKeyTarget(source: JudgeKeySource, endpoint?: string): 
 export async function resolveJudge(options: ResolveJudgeOptions): Promise<Judge | null> {
   if (!options.enabled) return null;
   const env = options.env ?? ((name: string) => process.env[name]);
+  const provider = options.provider ?? env("XCB_JUDGE_PROVIDER");
+  if (provider !== undefined && !["clef", "system-one"].includes(provider)) fail("JUDGE_PROVIDER_INVALID");
+  const legacy = provider === "system-one" || (provider === undefined
+    && (options.endpoint !== undefined || (options.model !== undefined && !["clef", "clef-flash"].includes(options.model))));
+  if (!legacy) {
+    const accountId = options.accountId ?? env(CLEF_ACCOUNT_ENV);
+    const token = env(CLEF_TOKEN_ENV) ?? env(CLEF_TOKEN_ALIAS_ENV);
+    if (accountId === undefined || accountId === "" || token === undefined || token === "") return null;
+    return createClefJudge({ accountId, token,
+      model: options.model ?? env(CLEF_MODEL_ENV) ?? DEFAULT_JUDGE_MODEL,
+      ...(options.endpoint === undefined ? {} : { endpoint: options.endpoint }),
+      ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+    });
+  }
   const key = await resolveJudgeKey(options.stateRoot, env);
   if (key === null) return null;
   const model = options.model ?? env(JUDGE_MODEL_ENV);

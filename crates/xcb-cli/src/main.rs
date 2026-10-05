@@ -329,7 +329,7 @@ enum Commands {
         #[command(subcommand)]
         command: Option<HookCommand>,
     },
-    /// Configure the optional routing judge (key, policy, status).
+    /// Configure the optional Cloudflare Clef judge (environment token, policy, status).
     Judge {
         #[command(subcommand)]
         command: Option<JudgeCommand>,
@@ -779,7 +779,7 @@ enum PluginCommand {
 }
 #[derive(Subcommand)]
 enum JudgeCommand {
-    /// Store a judge API key piped on stdin; never an argument or terminal echo.
+    /// Store an explicitly selected legacy System One key from stdin; Clef uses environment tokens.
     Token,
     /// Remove the vaulted judge key.
     Logout,
@@ -789,8 +789,14 @@ enum JudgeCommand {
     Enable,
     /// Disable judge use; routing, continuation, and compaction stay deterministic.
     Disable,
-    /// Send one live noul question to verify the key and endpoint.
+    /// Check judge configuration locally without sending an inference request.
     Test,
+    #[command(about = "Select Cloudflare Clef; credentials stay in CLOUDFLARE_API_TOKEN")]
+    Clef {
+        #[arg(long)]
+        #[arg(long, default_value = "clef", value_parser = ["clef", "clef-flash"])]
+        model: String,
+    },
 }
 #[derive(Subcommand)]
 enum RoutingCommand {
@@ -3228,6 +3234,11 @@ async fn dispatch_inner(
         Some(Commands::Judge { command }) => {
             match command {
                 Some(JudgeCommand::Token) => {
+                    if config.extensions.judge.is_clef() {
+                        return Err(Error::Unavailable(
+                            "Clef reads CLOUDFLARE_API_TOKEN from the environment only; judge token is for explicitly configured legacy System One",
+                        ));
+                    }
                     if io::stdin().is_terminal() {
                         return Err(Error::Unavailable(
                             "key input is accepted only through a pipe, never an argument or terminal echo",
@@ -3243,6 +3254,15 @@ async fn dispatch_inner(
                         println!("No vaulted judge key.");
                     }
                 }
+                Some(JudgeCommand::Clef { model }) => {
+                    let (mut fresh, revision) = Config::load(store.root())?;
+                    fresh.extensions.judge.provider =
+                        Some(xcb_runtime::config::JudgeProvider::Clef);
+                    fresh.extensions.judge.model = Some(Id::new(model)?);
+                    fresh.extensions.judge.endpoint = None;
+                    fresh.save(store.root(), revision.as_deref())?;
+                    println!("Cloudflare Clef selected; enable it with xcb judge enable.");
+                }
                 Some(JudgeCommand::Enable) => {
                     let (mut fresh, revision) = Config::load(store.root())?;
                     fresh.extensions.judge.enabled = true;
@@ -3256,77 +3276,20 @@ async fn dispatch_inner(
                     println!("Judge disabled.");
                 }
                 Some(JudgeCommand::Test) => {
-                    let backend = judge::resolve(store.root(), &config.extensions.judge)?.ok_or(
-                        Error::Unavailable(
-                            "judge not configured: store a key with xcb judge token and xcb judge enable",
-                        ),
+                    judge::resolve(store.root(), &config.extensions.judge)?.ok_or(
+                        Error::Unavailable("judge not configured: set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN, then xcb judge enable"),
                     )?;
-                    let mut questions = judge::JudgeQuestions::new();
-                    questions.insert(
-                        "ping".to_owned(),
-                        judge::JudgeQuestion::Noul {
-                            instructions: "Is the sky blue on a clear day?".to_owned(),
-                            criteria: None,
-                        },
-                    );
-                    questions.insert(
-                        "pick".to_owned(),
-                        judge::JudgeQuestion::Choice {
-                            instructions: "Which option names a color?".to_owned(),
-                            criteria: std::collections::BTreeMap::from([
-                                ("red".to_owned(), Some("a color".to_owned())),
-                                ("spoon".to_owned(), Some("not a color".to_owned())),
-                            ]),
-                        },
-                    );
-                    questions.insert(
-                        "rate".to_owned(),
-                        judge::JudgeQuestion::Score {
-                            instructions: "How true is the claim that water is wet? Rate on the ordered criteria scale.".to_owned(),
-                            criteria: vec![
-                                "false".to_owned(),
-                                "partly true".to_owned(),
-                                "true".to_owned(),
-                            ],
-                        },
-                    );
-                    let answers = backend
-                        .ask(
-                            &serde_json::json!({"context": "xcb judge connectivity test"}),
-                            &questions,
-                        )
-                        .await?;
-                    let noul = answers
-                        .answers
-                        .get("ping")
-                        .and_then(|a| a.noul())
-                        .ok_or(Error::Unavailable("judge response missing noul answer"))?;
-                    let (pick, pick_confidence) = answers
-                        .answers
-                        .get("pick")
-                        .and_then(|a| a.choice())
-                        .ok_or(Error::Unavailable("judge response missing choice answer"))?;
-                    let (score, score_confidence) = answers
-                        .answers
-                        .get("rate")
-                        .and_then(|a| a.score())
-                        .ok_or(Error::Unavailable("judge response missing score answer"))?;
-                    println!(
-                        "Judge reachable · model {} · noul {noul:.3} · choice {pick}@{pick_confidence:.3} · score {score:.3}@{score_confidence:.3}",
-                        answers.model.as_deref().unwrap_or("unknown")
-                    );
+                    println!("Judge configuration valid. No inference request was sent.");
                 }
                 None | Some(JudgeCommand::Status) => {
-                    let source = judge::judge_token(store.root())?.map(|(_, source)| source);
-                    if let Some(source) = source {
-                        judge::check_key_target(source, &config.extensions.judge)?;
-                    }
+                    let source = judge::configured_key(store.root(), &config.extensions.judge)?;
                     let (judge_model, judge_endpoint) =
-                        xcb_runtime::jev::effective_target(&config.extensions.judge)?;
+                        judge::effective_target(&config.extensions.judge)?;
                     if cli.json {
                         print_json(json!({
                             "version": 1,
                             "enabled": config.extensions.judge.enabled,
+                            "provider": if config.extensions.judge.is_clef() { "clef" } else { "system-one" },
                             "key": match source {
                                 Some(judge::JudgeKeySource::Env) => "env",
                                 Some(judge::JudgeKeySource::Vault) => "vault",
@@ -3342,12 +3305,15 @@ async fn dispatch_inner(
                             None => "none",
                         };
                         println!(
-                            "judge: {} · key {key} · model {judge_model} · {judge_endpoint}",
+                            "judge: {} · key {key} · model {judge_model} · {}",
                             if config.extensions.judge.enabled {
                                 "enabled"
                             } else {
                                 "disabled"
                             },
+                            judge_endpoint
+                                .as_deref()
+                                .unwrap_or("set CLOUDFLARE_ACCOUNT_ID"),
                         );
                     }
                 }

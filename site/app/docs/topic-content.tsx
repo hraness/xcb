@@ -148,13 +148,13 @@ function Security() {
       <p>The provider CLI sends your prompt, and any file contents the model reads through xcb’s tools, to its own service under your account. Each provider’s terms and data policies apply.</p>
       <p>While a task runs, the provider process is sandboxed: Seatbelt on macOS, <code>bwrap</code> on Linux. It runs a private copy of the provider executable xcb checked, uses a configuration folder xcb created for that account, reaches the network on port 443 only, and reaches your project only through xcb’s file tools, which stay inside the task’s folder. Credentials never enter a project folder. The <a href="/docs/workspace">command runner</a> gives commands a copy of the project with no credentials and no network.</p>
       <h2 id="judge">The optional judge</h2>
-      <p>The judge is off by default. When you enable it, xcb sends questions to TypeSafe’s System One service (<code>api.typesafe.ai</code>) to help classify tasks, decide whether a turn stopped short, and choose which old tool output to keep. Each request carries at most 128 KiB:</p>
+      <p>The judge is off by default. When you enable it, xcb sends questions to Cloudflare’s Clef service (<code>api.cloudflare.com</code>) to help classify tasks, decide whether a turn stopped short, and choose which old tool output to keep. Each request carries at most 128 KiB:</p>
       <ul>
         <li>routing: up to 8 KiB of the task text;</li>
         <li>continuation: up to 8 KiB each of the original task and the last response;</li>
         <li>context management: up to 88 KiB of recent messages, plus the names and sizes of old tool results, never their contents.</li>
       </ul>
-      <p>The judge helps classify the task; deterministic routing picks among accounts and models that passed the required checks. The judge cannot add a provider or skip a safety check. Its key is stored in the state folder with mode 0600, or read from <code>XCB_JEV_API_KEY</code>. See <a href="/docs/customization#judge">customize xcb</a> to turn it on.</p>
+      <p>The judge helps classify the task; deterministic routing picks among accounts and models that passed the required checks. The judge cannot add a provider or skip a safety check. It reads <code>CLOUDFLARE_ACCOUNT_ID</code> and <code>CLOUDFLARE_API_TOKEN</code> from the host environment and never stores the token. Supplied image evidence is sent only when a caller explicitly includes it; xcb does not collect screenshots. See <a href="/docs/customization#judge">customize xcb</a> to turn it on.</p>
       <h2 id="network">Other network requests</h2>
       <ul>
         <li><strong>Supported builds:</strong> about once an hour, xcb reads the list of reviewed provider builds from this repository’s <code>qualified-builds.json</code> on GitHub.</li>
@@ -351,14 +351,14 @@ xcb plugins enable gobstopper`}</Code>
       <Code>{`xcb plugins enable hooks
 xcb hooks add turn_end /absolute/path/to/program`}</Code>
       <h2 id="judge">The optional judge</h2>
-      <p>The judge asks TypeSafe’s System One model to help classify tasks, decide whether a turn stopped short, and pick which old tool output to keep. It is off by default and needs a TypeSafe key. <a href="/docs/security#judge">Security and privacy</a> lists what it sends.</p>
-      <Code>{`xcb judge token < /secure/path/to/judge-key
+      <p>The judge asks Cloudflare Clef to help classify tasks, decide whether a turn stopped short, and pick which old tool output to keep. It is off by default. Set <code>CLOUDFLARE_ACCOUNT_ID</code> (32 hexadecimal characters) and <code>CLOUDFLARE_API_TOKEN</code> through your trusted host environment. Cloudflare Workers AI charges apply. <a href="/docs/security#judge">Security and privacy</a> lists what it sends.</p>
+      <Code>{`xcb judge clef --model clef
 xcb judge enable
+xcb judge status
 xcb judge test
-# To stop using it:
-xcb judge disable
-xcb judge logout`}</Code>
-      <p>Pipe the key from a file; don’t put it in a command-line argument. <code>XCB_JEV_API_KEY</code> or <code>TYPESAFE_API_KEY</code> can supply it instead, and a custom endpoint in <code>XCB_JEV_URL</code> requires an environment key.</p>
+xcb judge disable`}</Code>
+      <p>Status, test, and doctor check configuration without inference. <code>clef-flash</code> is an explicit alternative; <code>CLOUDFLARE_AUTH_TOKEN</code> is a token alias. Tokens stay out of arguments and configuration. Explicit System One configurations use separate legacy keys and endpoint restrictions.</p>
+      <p>SDK callers can include embedded PNG, JPEG, or WebP evidence: four images, 4 MiB and 16 megapixels each, 8 MiB total, and a 13 MiB request. Remote or invalid images are refused before sending. xcb never captures screenshots or silently drops supplied images.</p>
     </>
   );
 }
@@ -687,7 +687,7 @@ const configKeys: readonly (readonly [string, string, string])[] = [
   ["extensions.usage", "true", "Local usage measurement"],
   ["extensions.hooks", "false", "Allow hooks to run"],
   ["extensions.aicharts_export", "false", "Allow local usage exports (xcb sessions export)"],
-  ["extensions.judge", "enabled: false", "enabled, model, endpoint for the optional judge"],
+  ["extensions.judge", "enabled: false; model: clef", "enabled, provider (clef or legacy system-one), account_id, model, endpoint; token stays in the environment"],
   ["extensions.reflexes", "route active, settle auto, confirm auto, learn true", "off, observe, active, or auto (settle and confirm only)"],
 ];
 
@@ -719,9 +719,12 @@ function Reference() {
       <Table label="Environment variables" head={["Variable", "Effect"]} rows={[
         [<code key="e">XCB_STATE</code>, <>State folder, instead of <code>~/.local/share/xcb</code></>],
         [<code key="e">XCB_COORDINATION_ROOT</code>, <>Folder for the locks that let one writer change a project at a time, instead of <code>~/.local/share/xcb-coordination</code>. Every cooperating xcb process must use the same value.</>],
-        [<code key="e">XCB_JEV_API_KEY</code>, <>Judge key, instead of the stored one. <code>TYPESAFE_API_KEY</code> also works.</>],
-        [<code key="e">XCB_JEV_URL</code>, "Custom judge endpoint; requires a key from the environment"],
-        [<code key="e">XCB_JEV_MODEL</code>, "Judge model"],
+        [<code key="e">CLOUDFLARE_ACCOUNT_ID</code>, "32-hex account ID for the optional Clef judge"],
+        [<code key="e">CLOUDFLARE_API_TOKEN</code>, <>Workers AI token, environment only. <code>CLOUDFLARE_AUTH_TOKEN</code> is a fallback alias.</>],
+        [<code key="e">XCB_CLEF_MODEL</code>, "clef (default) or clef-flash; stored model takes precedence"],
+        [<code key="e">XCB_JEV_API_KEY</code>, <>Explicit legacy System One only; <code>TYPESAFE_API_KEY</code> also works.</>],
+        [<code key="e">XCB_JEV_URL</code>, "Legacy custom judge endpoint; requires a legacy environment key"],
+        [<code key="e">XCB_JEV_MODEL</code>, "Model for explicitly selected legacy System One"],
         [<code key="e">XCB_RELAY_URL</code>, <>Legacy relay configuration; not an active transport in the current source build</>],
         [<code key="e">NO_COLOR</code>, "Any non-empty value turns off color"],
         [<code key="e">VISUAL</code>, <>Editor opened by Ctrl-G, then <code>EDITOR</code></>],

@@ -56,6 +56,7 @@ fn vaulted_keys_are_bound_to_the_canonical_system_one_endpoint() {
         enabled: true,
         model: None,
         endpoint: Some("https://api.typesafe.ai:443/v1/systemone".to_owned()),
+        ..Default::default()
     };
     judge::check_key_target(JudgeKeySource::Vault, &canonical).unwrap();
 

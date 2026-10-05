@@ -10,8 +10,8 @@ import { assertWorkspaceStateSeparation, ensureCliState } from "./cli/state.ts";
 import { inspectCliBinary, CLI_CODEX_ENV, CLI_CLAUDE_ENV, type CliProviderName } from "./cli/binaries.ts";
 import { claudeLogin, claudeAuthStatus, clearClaudeOAuthToken } from "./cli/auth.ts";
 import { cliCodexHostDiagnostic, codexAuthStatus, codexLogin, codexLogout } from "./cli/codex.ts";
-import { checkJudgeKeyTarget, resolveJudge, resolveJudgeKey, storeJudgeKey, removeJudgeKey, hasJudgeKey,
-  JUDGE_KEY_ENV, JUDGE_KEY_VENDOR_ENV, JUDGE_TOKEN_FILE, JUDGE_URL_ENV, type JudgeAnswers } from "./judge.ts";
+import { resolveJudge, storeJudgeKey, removeJudgeKey,
+  JUDGE_TOKEN_FILE, type JudgeAnswers } from "./judge.ts";
 import { readCliQualification } from "./cli/qualification.ts";
 import { seatbeltAvailable } from "./cli/sandbox.ts";
 import type { ClaudeTaskEvents } from "./claude-task-adapter.ts";
@@ -39,10 +39,10 @@ Usage:
   xcb-compat sessions prune    remove sessions idle over 30 days (or N days)
   xcb-compat resume [id]       continue a session (default: most recent)
   xcb-compat run [-p text]     run one task headlessly (or pipe the task on stdin)
-  xcb-compat judge [status]    show judgment-provider (jev) state
-  xcb-compat judge token       store the jev API key read from stdin (piped, never echoed)
-  xcb-compat judge logout      remove the stored jev API key
-  xcb-compat judge test        ask the judge a bounded question batch (live call)
+  xcb-compat judge [status]    show Cloudflare Clef configuration without inference
+  xcb-compat judge token       store an explicitly selected legacy System One key from stdin
+  xcb-compat judge logout      remove the legacy System One key
+  xcb-compat judge test        validate configuration locally without inference
   xcb-compat update            install the latest verified compatibility release
   xcb-compat update check      check for a newer release (--json for structured output)
   xcb-compat update status     show this installation's update policy
@@ -57,7 +57,10 @@ Options:
 Environment:
   ${CLI_CLAUDE_ENV}    pin an exact claude executable path
   ${CLI_CODEX_ENV}     pin an exact codex executable path
-  ${JUDGE_KEY_ENV}   jev API key (also ${JUDGE_KEY_VENDOR_ENV}); overrides the vaulted key
+  CLOUDFLARE_ACCOUNT_ID        32-hex Cloudflare account ID for Clef
+  CLOUDFLARE_API_TOKEN         Workers AI token (CLOUDFLARE_AUTH_TOKEN also works)
+  XCB_CLEF_MODEL              clef (default) or clef-flash
+  XCB_JUDGE_PROVIDER          clef (default) or explicit legacy system-one
   XCB_STATE     override the state root (default ~/.xcb)
   HRANESS_NO_UPDATE=1          suppress automatic updates for this invocation
   XCB_NO_UPDATE=1              suppress xcb automatic updates
@@ -132,15 +135,10 @@ async function commandDoctor(stateRoot: string): Promise<number> {
     const seatbelt = await seatbeltAvailable();
     process.stdout.write(`${seatbelt ? green("✓") : yellow("!")} sandbox: seatbelt ${seatbelt ? "available" : "unavailable"} ${dim("(claude runs confined; availability is not attestation)")}\n`);
   }
-  const judgeKey = await resolveJudgeKey(stateRoot).catch(() => null);
-  let judgeBlocked = false;
-  if (judgeKey !== null) {
-    try { checkJudgeKeyTarget(judgeKey.source, process.env[JUDGE_URL_ENV]); } catch { judgeBlocked = true; }
-  }
-  process.stdout.write(`${judgeKey === null ? dim("○") : judgeBlocked ? yellow("!") : green("✓")} judge: ${judgeKey === null
-    ? `no jev key — ${dim(`--provider auto\` needs one; pipe it into \`xcb-compat judge token\``)}`
-    : judgeBlocked ? "blocked — vaulted key cannot be used with a custom endpoint"
-      : `key from ${judgeKey.source} — ${dim("\`--provider auto\` can route")}`}\n`);
+  const configuredJudge = await resolveJudge({ stateRoot, enabled: true }).catch(() => null);
+  process.stdout.write(`${configuredJudge === null ? dim("○") : green("✓")} judge: ${configuredJudge === null
+    ? "set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN for --provider auto"
+    : "configuration valid; no inference request sent"}\n`);
   // Doctor succeeds when at least one provider is admitted; an absent optional
   // provider is a diagnostic line, not a failure.
   return admitted > 0 ? 0 : 1;
@@ -209,11 +207,12 @@ async function commandAuthLogout(provider: string | undefined, stateRoot: string
   return 0;
 }
 
-/** `xcb-compat judge` — the judgment-provider vault and a live connectivity probe.
+/** `xcb-compat judge` — configuration checks and the legacy judgment-provider vault.
  * The key resolves environment-first; the file lives in the private state
  * root like every other credential. Nothing here ever prints the key. */
 async function commandJudge(sub: string | undefined, stateRoot: string): Promise<number> {
   if (sub === "token") {
+    if (process.env.XCB_JUDGE_PROVIDER !== "system-one") return fail("Clef reads CLOUDFLARE_API_TOKEN from the environment only; judge token requires XCB_JUDGE_PROVIDER=system-one.");
     if (process.stdin.isTTY) fail("usage: pipe the jev API key on stdin — e.g. `pbpaste | xcb-compat judge token` (never a command argument).");
     const key = (await readStdin()).trim();
     if (key === "") fail("empty input — pipe the jev API key on stdin.");
@@ -236,35 +235,16 @@ async function commandJudge(sub: string | undefined, stateRoot: string): Promise
   }
   if (sub === "test") {
     const judge = await resolveJudge({ stateRoot, enabled: true });
-    if (judge === null) {
-      return fail(`no jev API key — pipe one into \`xcb-compat judge token\` or set ${JUDGE_KEY_ENV}.`);
-    }
-    const started = Date.now();
-    const answers = await judge.ask("xcb-compat judge connectivity probe", {
-      probe: { type: "noul", instructions: "Is the sky blue on a clear day?" },
-      pick: { type: "choice", instructions: "Which option names a color?", criteria: { red: "a color", spoon: "not a color" } },
-      rate: { type: "score", instructions: "How true is the claim that water is wet? Rate on the ordered criteria scale.", criteria: ["false", "partly true", "true"] },
-    });
-    const probe = answers.answers.probe, pick = answers.answers.pick, rate = answers.answers.rate;
-    if (probe?.type !== "noul" || pick?.type !== "choice" || rate?.type !== "score") {
-      return fail("judge returned a malformed answer shape.");
-    }
-    process.stdout.write(`${green("✓")} judge answered in ${Date.now() - started}ms ${dim(`(model ${answers.model ?? "unknown"}, p=${probe.noul.toFixed(3)}, choice=${pick.choice}@${pick.confidence.toFixed(3)}, score=${rate.score.toFixed(3)}@${rate.confidence.toFixed(3)})`)}\n`);
+    if (judge === null) return fail("set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN for Clef.");
+    process.stdout.write("Judge configuration valid. No inference request was sent.\n");
     return 0;
   }
   if (sub !== undefined && sub !== "status") return fail("usage: xcb-compat judge [status|token|logout|test]");
-  const key = await resolveJudgeKey(stateRoot).catch(() => null);
-  if (key !== null) {
-    try { checkJudgeKeyTarget(key.source, process.env[JUDGE_URL_ENV]); } catch {
-      return fail("vaulted judge key is bound to the canonical System One endpoint; use an environment key for a custom endpoint.");
-    }
-  }
-  const vaulted = await hasJudgeKey(stateRoot);
-  const source = key === null ? "none" : key.source === "env" ? "environment" : "vault";
-  process.stdout.write(`judge: ${key === null ? "no key configured" : `key from ${source}`}${vaulted && key?.source !== "vault" ? dim(" (vault file also present)") : ""}\n`);
-  process.stdout.write(`${dim("  env: ")}${JUDGE_KEY_ENV} or ${JUDGE_KEY_VENDOR_ENV}${dim("  vault: ")}${join(stateRoot, JUDGE_TOKEN_FILE)}\n`);
-  process.stdout.write(`${dim("  use --provider auto on \`xcb-compat run\` to route a task through the judge")}\n`);
-  return key === null ? 1 : 0;
+  const judge = await resolveJudge({ stateRoot, enabled: true });
+  process.stdout.write(`judge: ${judge === null ? "not configured" : "configuration valid"} · ${process.env.XCB_JUDGE_PROVIDER ?? "clef"}\n`);
+  process.stdout.write("  env: CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN (CLOUDFLARE_AUTH_TOKEN also works)\n");
+  process.stdout.write("  model: XCB_CLEF_MODEL=clef or clef-flash; no inference request sent\n");
+  return judge === null ? 1 : 0;
 }
 
 async function latestSessionId(stateRoot: string): Promise<string | undefined> {
@@ -332,7 +312,7 @@ async function routeAutoProvider(stateRoot: string, prompt: string): Promise<Cli
   if (candidates.length === 1) return candidates[0]!.provider;
   const judge = await resolveJudge({ stateRoot, enabled: true });
   if (judge === null) {
-    return fail(`--provider auto needs a jev API key — pipe one into \`xcb-compat judge token\` or set ${JUDGE_KEY_ENV}.`);
+    return fail("--provider auto needs CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN for Clef.");
   }
   const criteria: Record<string, string> = {};
   candidates.forEach((candidate, index) => { criteria[`route_${index}`] = candidate.label; });

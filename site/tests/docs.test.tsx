@@ -188,7 +188,9 @@ describe("organized documentation", () => {
     expect(textOf(html)).toContain("xcb plugins disable auto-continue");
     expect(html).toContain("turn_timeout_ms");
     expect(html).toContain("1,000 to 3,600,000 milliseconds");
-    expect(textOf(html)).toContain("xcb judge token < /secure/path/to/judge-key");
+    expect(textOf(html)).toContain("xcb judge clef --model clef");
+    expect(textOf(html)).toContain("CLOUDFLARE_ACCOUNT_ID");
+    expect(textOf(html)).toContain("CLOUDFLARE_API_TOKEN");
   });
 
   test("documents offline command-runner setup and its limits without internal tools", async () => {

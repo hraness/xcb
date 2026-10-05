@@ -44,12 +44,14 @@ export { codexManagedStaticCatalog, CODEX_MANAGED_CATALOG_LIMITS } from "./codex
 export type { CodexManagedStaticCatalog, CodexManagedCatalogJson, CodexManagedCatalogObject } from "./codex-managed-catalog.ts";
 export { browserSessionArgv, browserSessionEnvironment, createBrowserSession, purgeBrowserSession, recoverBrowserSession } from "./browser-session.ts";
 export type { BrowserSessionBinding, BrowserSessionCloseReceipt, BrowserSessionOptions, BrowserSessionPhase, BrowserSessionPort, BrowserSessionRuntimeAdmission, BrowserSessionSpawn, BrowserSessionSystem } from "./browser-session.ts";
-export { createSystemOneJudge, checkJudgeAnswers, checkJudgeQuestions, checkJudgeState,
+export { createClefJudge, clefEndpoint, checkClefImages, parseClefResponse, CLEF_MODELS, CLEF_IMAGE_LIMITS,
+  CLEF_ACCOUNT_ENV, CLEF_TOKEN_ENV, CLEF_TOKEN_ALIAS_ENV, CLEF_MODEL_ENV,
+  createSystemOneJudge, checkJudgeAnswers, checkJudgeQuestions, checkJudgeState,
   checkJudgeKeyTarget, parseJudgeEndpoint, parseJudgeResponse, resolveJudge, resolveJudgeKey,
   storeJudgeKey, removeJudgeKey, hasJudgeKey,
   SYSTEM_ONE_URL, DEFAULT_JUDGE_MODEL, JUDGE_TOKEN_FILE, JUDGE_KEY_ENV, JUDGE_KEY_VENDOR_ENV,
   JUDGE_URL_ENV, JUDGE_MODEL_ENV, MAX_JUDGE_STATE_BYTES, MAX_JUDGE_QUESTIONS, MAX_JUDGE_INSTRUCTION_BYTES } from "./judge.ts";
-export type { Judge, JudgeAnswers, JudgeAnswer, JudgeQuestion, JudgeQuestions, JudgeState,
+export type { ClefOptions, ClefImage, ClefModel, JudgeAskOptions, Judge, JudgeAnswers, JudgeAnswer, JudgeQuestion, JudgeQuestions, JudgeState,
   JudgeKeySource, NoulQuestion, ChoiceQuestion, ScoreQuestion, NoulAnswer, ChoiceAnswer,
   ScoreAnswer, SystemOneOptions, ResolveJudgeOptions } from "./judge.ts";
 export { createManagedAccountController } from "./managed-account.ts";
