@@ -10,6 +10,13 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.19.2 - 2026-10-05
+
+xcb keeps a durable supervisor under custody while it reconciles large state roots at startup.
+
+- Extend the bounded pre-heartbeat startup grace so launchd does not restart a valid supervisor before reconciliation can finish.
+- Preserve the existing stale-heartbeat restart and worker-recovery rules after startup.
+
 ## 0.19.1 - 2026-10-05
 
 xcb stops selecting Claude accounts after an explicit organization refusal of
