@@ -563,7 +563,7 @@ pub async fn run(
     }
     println!("{}", usage_line(style, &usage_history));
     println!(
-        "{} judge: {} · key {judge_key_name} · {judge_endpoint}",
+        "{} judge: {} · key {judge_key_name} · {}",
         if config.extensions.judge.enabled {
             style.symbol(ux::Symbol::On)
         } else {
@@ -574,6 +574,7 @@ pub async fn run(
         } else {
             "disabled"
         },
+        judge_endpoint.as_deref().unwrap_or("unset"),
     );
     if sweep.reclaimed > 0 {
         println!(

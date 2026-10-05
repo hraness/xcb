@@ -296,7 +296,7 @@ describe("organized documentation", () => {
 
   test("states what the optional judge sends", async () => {
     const html = await renderTopic("security");
-    for (const fact of ["api.typesafe.ai", "128 KiB", "8 KiB", "88 KiB", "port 443", "~/.local/share/xcb"]) expect(html).toContain(fact);
+    for (const fact of ["api.cloudflare.com", "128 KiB", "8 KiB", "88 KiB", "port 443", "~/.local/share/xcb"]) expect(html).toContain(fact);
     expect(html).toContain('id="judge"');
   });
 

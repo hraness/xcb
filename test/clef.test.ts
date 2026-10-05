@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { parseClefResponse } from "../src/clef.ts";
-import { checkClefImages, createClefJudge, createSystemOneJudge, clefEndpoint, resolveJudge, type JudgeQuestions } from "../src/judge.ts";
+import { checkClefImages, createClefJudge, createSystemOneJudge, clefEndpoint, resolveJudge, type JudgeAnswers, type JudgeQuestions } from "../src/judge.ts";
 
 const accountId = "a".repeat(32);
 const questions: JudgeQuestions = {
@@ -16,7 +16,7 @@ const recordedQuestions: JudgeQuestions = {
   team: { type: "choice", instructions: "Which team should handle the outage?", criteria: { technical: "Outages and errors", sales: "Sales inquiries" } },
   severity: { type: "score", instructions: "How severe is the customer impact?", criteria: ["No impact", "Minor", "Major", "Critical"] },
 };
-const recordedResults = [
+const recordedResults: (JudgeAnswers & { model: string })[] = [
   { model: "clef", usage: { input_tokens: 319, output_tokens: 0 }, answers: {
     urgent: { type: "noul", noul: 0.9869 },
     team: { type: "choice", choice: "technical", probabilities: { technical: 0.9635, sales: 0.0365 }, confidence: 0.8593 },
@@ -51,10 +51,10 @@ function imageWithPadding(size: number): string {
 }
 function client(value: unknown, status = 200) {
   const calls: RequestInit[] = [];
-  const judge = createClefJudge({ accountId, token: "synthetic-token", fetch: (async (_url, init) => {
+  const judge = createClefJudge({ accountId, token: "synthetic-token", fetch: (async (_url: unknown, init: RequestInit) => {
     calls.push(init!);
     return new Response(JSON.stringify(value), { status });
-  }) as typeof fetch });
+  }) as unknown as typeof fetch });
   return { judge, calls };
 }
 
@@ -127,7 +127,7 @@ test("Clef accepts rounded normalized distributions across score levels", () => 
     const legend = Object.fromEntries(criteria.map((criterion, level) => [String(level), criterion]));
     const probabilities = Object.fromEntries(original.map((probability, level) => [String(level), round(probability)]));
     const score = round(original.reduce((sum, probability, level) => sum + level * probability, 0));
-    const answer = { type: "score", score, probabilities, legend, confidence: 0.5 };
+    const answer = { type: "score" as const, score, probabilities, legend, confidence: 0.5 };
     const value = { model: "clef", usage: { input_tokens: 1, output_tokens: 0 }, answers: { score: answer } };
     expect(parseClefResponse(200, JSON.stringify({ success: true, errors: [], result: value }), "clef", {
       score: { type: "score", instructions: "Rate", criteria },
@@ -157,7 +157,7 @@ test("response streaming is bounded and failures are not retried", async () => {
   const judge = createClefJudge({ accountId, token: "synthetic", fetch: (async () => {
     calls++;
     return new Response(new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array(256 * 1024 + 1)); }, cancel() { cancelled = true; } }));
-  }) as typeof fetch });
+  }) as unknown as typeof fetch });
   await expect(judge.ask("evidence", questions)).rejects.toThrow("JUDGE_RESPONSE_LIMIT");
   expect(calls).toBe(1); expect(cancelled).toBe(true);
 });
@@ -169,7 +169,7 @@ test("Clef request body is capped and legacy adapters reject supplied images", a
   }]));
   await expect(judge.ask("evidence", large)).rejects.toThrow("JUDGE_REQUEST_LIMIT");
   expect(calls).toHaveLength(0);
-  const legacy = createSystemOneJudge({ token: "synthetic", fetch: (async () => { throw new Error("must not call"); }) as typeof fetch });
+  const legacy = createSystemOneJudge({ token: "synthetic", fetch: (async () => { throw new Error("must not call"); }) as unknown as typeof fetch });
   await expect(legacy.ask("evidence", questions, { images: [png] })).rejects.toThrow("JUDGE_IMAGES_UNSUPPORTED");
   expect(() => createSystemOneJudge({ token: "legacy", endpoint: clefEndpoint(accountId) })).toThrow("JUDGE_PROVIDER_ENDPOINT_MISMATCH");
   expect(checkClefImages([{ content_type: "image/png", base64: png.split(",")[1] }])).toHaveLength(1);

@@ -11,7 +11,7 @@ export const CLEF_TOKEN_ALIAS_ENV = "CLOUDFLARE_AUTH_TOKEN";
 export const CLEF_MODEL_ENV = "XCB_CLEF_MODEL";
 export const CLEF_IMAGE_LIMITS = { maxImages: 4, maxImageBytes: 4 * 1024 * 1024,
   maxTotalImageBytes: 8 * 1024 * 1024, maxPixels: 16_000_000, maxBodyBytes: 13 * 1024 * 1024 } as const;
-const fail = (code = "JUDGE_CLEF_RESPONSE_INVALID"): never => { throw new Error(code); };
+function fail(code = "JUDGE_CLEF_RESPONSE_INVALID"): never { throw new Error(code); }
 
 export function clefEndpoint(accountId: string, model: string = "clef"): string {
   if (!/^[a-fA-F0-9]{32}$/.test(accountId) || !CLEF_MODELS.includes(model as ClefModel)) fail("JUDGE_CLEF_TARGET_INVALID");
