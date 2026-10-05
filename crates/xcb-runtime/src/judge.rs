@@ -104,14 +104,27 @@ pub struct JudgeAnswers {
 /// Questions are keyed by short stable names chosen by the caller.
 pub type JudgeQuestions = BTreeMap<String, JudgeQuestion>;
 
-/// Anything that can answer a batch of judgment questions: the System One
-/// backend, a test double, or a future provider with the same shape.
+/// Anything that can answer a batch of judgment questions: Cloudflare Clef,
+/// legacy System One, a test double, or a provider with the same shape.
 pub trait Judge: Send + Sync {
     fn ask<'a>(
         &'a self,
         state: &'a serde_json::Value,
         questions: &'a JudgeQuestions,
     ) -> Pin<Box<dyn Future<Output = Result<JudgeAnswers>> + Send + 'a>>;
+
+    fn ask_with_images<'a>(
+        &'a self,
+        state: &'a serde_json::Value,
+        questions: &'a JudgeQuestions,
+        images: &'a [serde_json::Value],
+    ) -> Pin<Box<dyn Future<Output = Result<JudgeAnswers>> + Send + 'a>> {
+        if images.is_empty() {
+            self.ask(state, questions)
+        } else {
+            Box::pin(async { Err(Error::Unavailable("judge does not support images")) })
+        }
+    }
 }
 
 /// Bounds shared by every backend and enforced before transport.
@@ -172,7 +185,7 @@ pub fn check_questions(questions: &JudgeQuestions) -> Result<()> {
                 instructions
             }
         };
-        if instructions.is_empty() {
+        if instructions.trim().is_empty() {
             return Err(xcb_core::Error::Invalid("judge instructions").into());
         }
         bounded_text(instructions, MAX_JUDGE_INSTRUCTION_BYTES)?;
@@ -263,7 +276,7 @@ pub const JUDGE_KEY_ENV: &str = "XCB_JEV_API_KEY";
 pub const JUDGE_KEY_VENDOR_ENV: &str = "TYPESAFE_API_KEY";
 const MAX_JUDGE_TOKEN_BYTES: usize = 2048;
 
-fn valid_judge_token(token: &str) -> bool {
+pub(crate) fn valid_judge_token(token: &str) -> bool {
     !token.is_empty()
         && token.len() <= 512
         && token
@@ -342,6 +355,18 @@ pub fn judge_token(root: &Path) -> Result<Option<(Zeroizing<String>, JudgeKeySou
 /// key; future backends own distinct credential custody rather than repurposing
 /// the System One vault.
 pub fn check_key_target(source: JudgeKeySource, config: &JudgeConfig) -> Result<()> {
+    if config.is_clef() {
+        return Err(Error::Unavailable(
+            "legacy System One keys cannot authenticate Cloudflare Clef",
+        ));
+    }
+    if crate::jev::Endpoint::parse(&crate::jev::effective_target(config)?.1)?.host
+        == "api.cloudflare.com"
+    {
+        return Err(Error::Unavailable(
+            "legacy judge endpoint cannot use Cloudflare",
+        ));
+    }
     if source != JudgeKeySource::Vault {
         return Ok(());
     }
@@ -359,12 +384,36 @@ pub fn check_key_target(source: JudgeKeySource, config: &JudgeConfig) -> Result<
     Ok(())
 }
 
+pub fn effective_target(config: &JudgeConfig) -> Result<(Id, Option<String>)> {
+    if config.is_clef() {
+        crate::clef::effective_target(config)
+    } else {
+        let (model, endpoint) = crate::jev::effective_target(config)?;
+        Ok((model, Some(endpoint)))
+    }
+}
+
+pub fn configured_key(root: &Path, config: &JudgeConfig) -> Result<Option<JudgeKeySource>> {
+    if config.is_clef() {
+        Ok(crate::clef::token()?.map(|_| JudgeKeySource::Env))
+    } else {
+        let source = judge_token(root)?.map(|(_, source)| source);
+        if let Some(source) = source {
+            check_key_target(source, config)?;
+        }
+        Ok(source)
+    }
+}
+
 /// Resolves a ready-to-use judge when the extension is enabled and a key is
 /// configured. Returns `Ok(None)` for either absence — consumers keep their
 /// deterministic path in both cases.
 pub fn resolve(root: &Path, config: &JudgeConfig) -> Result<Option<Arc<dyn Judge>>> {
     if !config.enabled {
         return Ok(None);
+    }
+    if config.is_clef() {
+        return crate::clef::resolve(config);
     }
     let Some((token, source)) = judge_token(root)? else {
         return Ok(None);

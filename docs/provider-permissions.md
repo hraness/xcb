@@ -22,14 +22,6 @@ tools remain unavailable.
 Provider account or organization restrictions can make an approval mode
 unavailable; xcb cannot grant access the provider has withheld.
 
-Devin uses its CLI `auto` setting and ACP `accept-edits` mode. xcb answers
-allowed workspace-tool requests automatically for one call at a time. Devin
-bypass is not enabled: the pinned 3000.11.3 build executed a native web request
-despite a deny rule, and its separate tool-disable setting did not disable the
-native `skill` tool. The
-[bypass test results](../qualification/devin-bypass-3000.11.3-assessment.json)
-record both failures for that exact executable.
-
 ## When a provider denies an action
 
 A permission denial stops automatic continuation and provider switching.

@@ -1,7 +1,7 @@
 <!-- hraness:xcb-landing:start -->
 # Excalibur (xcb)
 
-Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin
+Excalibur (xcb) routes coding tasks across the Claude and Codex
 subscriptions you already pay for. Each task runs on an account that is signed
 in, idle, and not at a known usage limit, on a model that fits the work. Send
 work through the headless CLI, JSON contract, or SDK. The former interactive
@@ -37,6 +37,14 @@ and installs `~/.local/bin/xcb`:
 curl -fsSL https://xcb.sh/install.sh | sh
 ```
 
+On macOS with Apple silicon and Linux x86_64 it also installs
+[aicharts](https://aicharts.io/usage) beside xcb, checked against a pinned
+SHA-256 digest and, on macOS, its Developer ID signature. On a first install
+it turns on local usage history: daily token totals for your agents, kept on
+this computer and never uploaded. `aicharts history disable` turns it off.
+Set `XCB_USAGE_HISTORY=no` to leave it off, or `XCB_AICHARTS=no` to skip
+aicharts.
+
 New release installs update automatically before an interactive `run` or
 `doctor` command, at most once a day and only when no other
 xcb command or service is using the installation. Run `xcb update disable` to
@@ -53,8 +61,8 @@ not self-update; rerun the release installer to create a supported install.
 ### Windows
 
 To run Claude Code on Windows, install the Linux build of xcb inside [WSL2](https://learn.microsoft.com/windows/wsl/install) with
-the command above. Claude is the supported provider on Linux; Codex and Devin
-require macOS. Releases also carry a native
+the command above. Claude is the supported provider on Linux; Codex
+requires macOS. Releases also carry a native
 Windows x86_64 build for local task inspection, `xcb doctor`, accounts, and
 `xcb route`, which refuses provider work with those WSL2 steps. Install it from PowerShell:
 
@@ -94,8 +102,8 @@ Claude Code build, opens browser sign-in, and loads the account's models. New
 Claude accounts keep a model-only token in xcb's state folder. Accounts connected
 for shared browser access use a dedicated xcb Keychain entry on macOS. Both are
 separate from your usual Claude Code login. `xcb setup codex`
-works the same way; Devin connects by importing the Devin CLI's sign-in
-([accounts and models](https://xcb.sh/docs/providers)).
+works the same way; see [accounts and models](https://xcb.sh/docs/providers)
+for sign-in and import options.
 
 `xcb run` picks an account and model and prints the result. `xcb --json route`
 runs exactly one turn and returns a JSON result; its caller owns any retry.
@@ -164,9 +172,8 @@ example.
 | --- | --- | --- |
 | Claude | Claude Code 2.1.268 or later within version 2 | Coding workflow passed on macOS ARM64 with the tested account. On Linux, Claude runs after you run xcb's sandbox checks on that machine. |
 | Codex | Codex CLI 0.159.0, 0.158.0, 0.157.1, or 0.156.1 on macOS ARM64 | Coding workflow passed on macOS ARM64 with the tested account and Codex CLI 0.158.0. |
-| Devin | Devin CLI 3000.11.3, 3000.11.1, or 3000.10.31 on macOS ARM64 | Coding workflow passed on macOS ARM64 with the tested account and Devin CLI 3000.11.3. |
 
-xcb checks each provider executable's version, and for Codex and Devin its
+xcb checks each provider executable's version, and for Codex its
 exact SHA-256, before it runs anything. `xcb doctor` shows what it found.
 
 ## Use available quota before it resets
@@ -181,7 +188,7 @@ exact SHA-256, before it runs anything. `xcb doctor` shows what it found.
 Tasks that require an existing signed-in browser or native desktop control
 stay with Codex and prefer Astra, including after a retry or handoff. Use
 `xcb run --signed-in-browser` or `xcb run --desktop` to state that requirement.
-Claude and Devin can hand these tasks to Codex after their current run ends
+Claude can hand these tasks to Codex after their current run ends
 safely. `xcb tools setup-computer` connects the installed desktop computer-use
 plugin on macOS. `xcb tools setup-browser` shares Claude's Chrome extension
 across providers and opens full Claude sign-in when needed. This sign-in uses
@@ -197,6 +204,7 @@ xcb run -p "Explain this repository"   # one task here; prints the answer
 xcb tasks                              # managed tasks across projects
 xcb attention                          # questions and approvals waiting on you
 xcb accounts                           # accounts, usage, and which need you
+xcb usage                              # your token use by day, agent and model
 xcb doctor                             # provider builds and unfinished runs
 xcb upgrade                            # install the latest verified release
 xcb help advanced                      # project agents and extensions
@@ -206,6 +214,37 @@ Accounts, credentials, and task history live in `~/.local/share/xcb`, outside
 your projects (`--state` or `XCB_STATE` moves it). The
 [CLI and configuration reference](https://xcb.sh/docs/reference) lists every
 command, setting, and exit code.
+
+## Optional Cloudflare Clef judge
+
+The judge is off by default. Set `CLOUDFLARE_ACCOUNT_ID` (32 hexadecimal
+characters) and `CLOUDFLARE_API_TOKEN` in your trusted host environment, then
+run `xcb judge enable`. `CLOUDFLARE_AUTH_TOKEN` also works. Clef requests use
+your Cloudflare Workers AI account and have separate provider charges.
+
+`xcb judge clef --model clef-flash` selects the alternative model; the default
+is `clef`. `xcb judge status`, `xcb judge test`, and `xcb doctor` do not send
+inference requests. `xcb judge disable` stops judge use. The judge advises
+routing and can veto safe continuation or context elision; it cannot approve
+a task, grant tools, or override deterministic safety checks.
+
+SDK callers can supply embedded PNG, JPEG, or WebP evidence explicitly: up to
+four images, 4 MiB and 16 megapixels each, 8 MiB total, and a 13 MiB request.
+xcb never captures screenshots automatically. See the
+[judge API and legacy configuration](docs/compatibility.md#judged-routing-continuation-and-compaction-optional).
+
+## See your token use
+
+`xcb usage` shows your token use across coding agents by day, agent, provider,
+and model. The numbers come from [aicharts](https://aicharts.io), which keeps a
+daily record on your computer and uploads nothing. The installer above adds
+aicharts; after another install method, [get it](https://aicharts.io/usage).
+`xcb usage enable` has aicharts collect four times a day, and
+`xcb usage report --csv` exports the rows. `xcb usage connect` gives Claude and
+Codex tasks aicharts' read-only usage tools, so an agent you route can answer
+questions about your token use or chart it; run it again after updating
+aicharts. `xcb doctor` shows whether the record is collecting and the tools are
+connected. Quota left on each subscription stays in `xcb accounts`.
 
 ## Limits
 
@@ -217,8 +256,8 @@ command, setting, and exit code.
 
 ## Compared with
 
-- **Claude Code, Codex, or the Devin CLI alone:** enough when one subscription covers your work, and you keep all of the tool's built-in tools, MCP servers, and plugins. xcb supplies workspace tools, its offline command runner on macOS, and registered host tool servers across providers.
-- **Account switchers such as [claude-swap](https://github.com/realiti4/claude-swap):** change which login Claude Code uses. xcb picks an account for each task across Claude, Codex, and Devin, and sandboxes each run.
+- **Claude Code or Codex alone:** enough when one subscription covers your work, and you keep all of the tool's built-in tools, MCP servers, and plugins. xcb supplies workspace tools, its offline command runner on macOS, and registered host tool servers across providers.
+- **Account switchers such as [claude-swap](https://github.com/realiti4/claude-swap):** change which login Claude Code uses. xcb picks an account for each task across Claude and Codex, and sandboxes each run.
 - **[Claude Code Router](https://xcb.sh/compare/claude-code-router) and [OpenRouter](https://xcb.sh/compare/openrouter):** send each API request to a provider or model you choose, usually paid per token. xcb never touches API traffic; it routes whole tasks to subscriptions you already pay for.
 - **[Conductor](https://xcb.sh/compare/conductor) and Claude Squad:** give each agent a Git worktree and a merge flow. xcb has no worktree or pull request flow.
 

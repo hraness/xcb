@@ -185,6 +185,31 @@ must say whether replay is safe, forbidden, or requires reconciliation. This
 is the boundary between resuming useful work and accidentally repeating an
 external mutation after a provider or host failure.
 
+### State-driven progress and recovery
+
+Task completion should follow owner-declared predicates over current state,
+required child results, and effect evidence. Safety invariants must hold during
+all work; satisfying them alone does not finish a task. A provider's final
+message or an ALGAL planner's completed slice is not independent evidence
+that the product's acceptance criteria have passed.
+
+Each proposed step should name the state it observed, its permissions, and the
+version of the checks it must satisfy. The host validates those references
+before starting new work, records one limited transition, and observes again.
+A stale proposal needs reconsideration. The proposer cannot alter the running
+kernel, project grant, evaluator, or completion conditions through an ordinary
+task transition. Reviewed source changes produce separately checked artifacts.
+These requirements extend the local protocol; they do not add methods
+or fields to the [frozen P1 slice](protocol-seam.md) by implication.
+
+Recovery choices should remain durable attention items accessible through the
+same protocol and SDK as other task state. Each choice binds the failed step,
+current revision, and granted capability, so another agent can resume or stop
+without reconstructing a terminal session. A rejected pure proposal leaves
+accepted state unchanged. A possibly executed effect retains its identity and
+account ownership until independent evidence establishes how it ended; a
+snapshot or expired deadline cannot release the account or authorize a retry.
+
 ### Replaceable storage with one contract
 
 The local journal and Valhalla transport are implementations of one storage

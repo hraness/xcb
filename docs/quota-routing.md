@@ -13,7 +13,7 @@ explicit account, provider, and model choices, known usage blocks, and the
 highest-quality tier required by a substantial task. Measurements must be
 at most five minutes old and belong to the account's applicable quota pool.
 A stale active window makes the rate unknown; unknown capacity receives no
-bonus. Devin currently reports no comparable account-wide percentage meter.
+bonus.
 Percentages across subscriptions are a routing heuristic, not equal amounts of
 work or a promise about provider billing.
 
@@ -32,8 +32,7 @@ supersede the old one. Reaching a reset permits another attempt; it does not
 prove that the provider will accept it.
 
 A provider can also refuse a turn for the account's usage limit without saying
-when the limit resets. Every Codex `usageLimitExceeded` and Devin
-resource-exhaustion error arrives this way (the Codex error carries no reset
+when the limit resets. Every Codex `usageLimitExceeded` error arrives this way (the Codex error carries no reset
 or rate-limit snapshot), and a Claude rejection may omit its reset time. Once
 the provider process has exited and xcb has recorded that the turn ended at
 the account's usage limit, xcb records a cooldown for the account while it
@@ -70,8 +69,7 @@ relative quality, cost, and latency profiles from observed model identities and
 sorts the models into Pareto layers: a model is in the first layer when no other
 model is at least as good on every measure and better on one. It then scores the layers for routine,
 balanced, or complex work. Fresh quota timing, configured favorites and a
-soft workspace-learned provider preference adjust the score. An explicit opening “Use
-Claude/Codex/Devin” directive remains a hard provider constraint. The optional
+soft workspace-learned provider preference adjust the score. An explicit opening “Use Claude/Codex” directive remains a hard provider constraint. The optional
 judge classifies capability demand through the ALGAL fitted classifier; route
 selection then follows deterministic policy within already eligible candidates.
 A missing or failed classification uses a deterministic demand estimate without
@@ -79,9 +77,7 @@ widening eligibility. `xcb models tiers --task TEXT` shows the model layers and
 `xcb --cwd WORKSPACE models route --task TEXT` previews the route using
 the same workspace preferences and provider directive. Preview does not reserve
 an account; availability and optional classification may change before execution. These are relative
-routing heuristics, not provider price guarantees; the SWE-2 capability/cost
-position follows Cognition’s published
-[Pareto analysis](https://cognition.com/blog/swe-2).
+routing heuristics, not provider price guarantees.
 
 `xcb accounts` and `/accounts` show the known retry estimate.
 `xcb --json accounts` adds `quotaBlockedUntilMs`, the exact Unix timestamp in
@@ -108,18 +104,6 @@ xcb does not infer account-wide meters from Claude model-specific windows or
 arbitrary Codex quota buckets. A refused turn without a reset records only the
 bounded cooldown above, never a percentage or a provider reset. Existing
 percentage summaries remain telemetry, not proof of model-specific availability.
-
-Official temporary pricing offers are a separate observation class. xcb checks
-the bounded public [Devin pricing page](https://devin.ai/pricing) at supervisor
-startup and every six hours,
-retains its source digest, treats it as stale after 24 hours, and enforces the
-advertised end timestamp independently of page freshness. The September 2026
-observation annotates the advertised Devin CLI SWE-2 promotion only for known
-SWE-2 effort variants. The public offer is conditional on an eligible paid plan;
-it does not prove that a connected account qualifies. xcb therefore does not
-zero a route’s relative cost or grant a free-price bonus from this observation.
-It never qualifies Devin or verifies the user-supplied `--plan` label. Inspect or refresh it with `xcb offers` and
-`xcb offers --refresh`.
 
 Managed continuation has one owner. Each supervisor attempt executes exactly
 one settled provider turn. Turn/token-limit continuation uses the existing
@@ -151,8 +135,6 @@ models each pattern matches.
 
 ```json
 "routing": {
-  "never": ["devin/swe-*"],
-  "fallback_providers": ["devin"],
   "tiers": {
     "buildout":   ["codex/gpt-*-astra/ultra", "claude/*fable*/max"],
     "meaty":      ["codex/gpt-*-astra/max",   "claude/*fable*/max"],
@@ -166,7 +148,7 @@ Every key is optional and keeps its default when absent. Each list holds at
 most 64 patterns.
 
 **Patterns.** A pattern is `provider/model-glob[/effort]`. The provider is
-`claude`, `codex`, `devin`, or `*`. The model glob (`*` any run of
+`claude`, `codex`, or `*`. The model glob (`*` any run of
 characters, `?` one character) is matched against the model's id and, for a
 Claude alias such as `opus` or `default`, also against the id the catalog
 resolved it to, lowercased with `.` written as `-` and with or without the
@@ -174,9 +156,7 @@ provider prefix: `gpt-*-sol` matches `gpt-5.6-sol`, `gpt-6-sol`, and
 `gpt-6.1-sol`; `*fable*` matches `claude-fable-5-1`; `opus*` matches `opus`,
 `opus[1m]`, and a `default` alias resolved to `claude-opus-5-5`. The effort
 must match exactly (`ultra`, `xhigh`, `max`, `high`, `medium`, `low`,
-`minimal`, `none`, or `*`); an absent effort matches every effort. Devin ids
-carry the effort as a suffix (`gpt-6-astra-medium`), so for Devin the suffix
-is removed before matching and the pattern's effort segment is ignored.
+`minimal`, `none`, or `*`); an absent effort matches every effort.
 Malformed patterns are refused with a message naming the segment at fault.
 
 **Tiers.** Each task is assigned one tier, printed in the route reason as
@@ -217,15 +197,14 @@ a substantial prompt still gets the highest known quality.
 automatic routing, not by failover, and not by an explicit `--model` or route
 pin, which is refused with `excluded by routing.never` instead of widened.
 `xcb routing never add <pattern>` and `xcb routing never remove <pattern>`
-edit the list. The built-in default excludes SWE models on Devin.
+edit the list. The built-in default has no excluded provider models.
 
 **Fallback providers.** Routes on a fallback provider are considered only
 when no route on any other provider can take the task now (every other
 account is at a usage limit, busy, signed out, or disabled). They are then
-ranked by the same tier patterns and the profile order. Devin is the built-in
-fallback.
+ranked by the same tier patterns and the profile order. No fallback provider is built in.
 
-**Pins and constraints.** An opening “Use Claude/Codex/Devin”, `--account`,
+**Pins and constraints.** An opening “Use Claude/Codex”, `--account`,
 `--provider`, and `--model` still narrow the routes first; the stack orders
 what remains. A pinned model that matches no pattern still runs. Managed
 backlog tasks take the same pin: `xcb backlog add <target> "<task>" --model
@@ -256,7 +235,7 @@ fitting lowers log loss within the accuracy and AUC guardrails described in
 restores the fitted head.
 
 Score answers use zero-based criterion indices, as specified by the
-[TypeSafe API](https://docs.typesafe.ai/api#score-answer). Five criteria therefore
+[Cloudflare Clef API](https://developers.cloudflare.com/workers-ai/models/clef/). Five criteria therefore
 admit indices 0–4; their text labels do not change the numeric scale. The ALGAL
 example response fixture includes an out-of-range probability bucket `5` and
 is not a live-wire conformance fixture. Native tests preserve the fitted

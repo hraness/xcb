@@ -10,14 +10,13 @@ import { boundedText } from "../validation.ts";
 import { assertWorkspaceStateSeparation, ensureCliState } from "./state.ts";
 import { CliSessionStore, type CliSession, type CliTranscriptEntry } from "./sessions.ts";
 import { createCliWorkspace, createCliWorkspaceProfile } from "./workspace.ts";
-import { openCliProvider, CLI_CLAUDE_DEFAULT_MODEL, CLI_CODEX_DEFAULT_MODEL, CLI_DEVIN_DEFAULT_MODEL } from "./provider.ts";
+import { openCliProvider, CLI_CLAUDE_DEFAULT_MODEL, CLI_CODEX_DEFAULT_MODEL } from "./provider.ts";
 import type { ClaudeTaskEvents } from "../claude-task-adapter.ts";
 import { inspectCliBinary, type CliProviderName } from "./binaries.ts";
 import { runCliTurn } from "./run.ts";
 import { LineEditor, bold, cyan, dim, green, red, startSpinner, printTool, printRemainingText, yellow } from "./tui.ts";
 import { claudeAuthStatus } from "./auth.ts";
 import { codexAuthStatus } from "./codex.ts";
-import { devinAuthStatus } from "./devin.ts";
 
 const ACCOUNT_ID = "local";
 
@@ -67,25 +66,25 @@ export async function runCliChat(options: { workspace: string; sessionId?: strin
       sessions.close();
       return 2;
     }
-    try {
-      workspacePath = await resolveWorkspace(resumed.workspace);
-    } catch {
-      process.stderr.write(`${red("xcb-compat:")} session workspace is gone: ${resumed.workspace}\n`);
-      sessions.close();
-      return 2;
-    }
-  } else {
-    try {
-      workspacePath = await resolveWorkspace(options.workspace);
-    } catch (error) {
-      process.stderr.write(`${red("xcb-compat:")} ${error instanceof Error ? error.message : "invalid workspace"}\n`);
-      sessions.close();
-      return 2;
-    }
+  }
+  const recordedProvider = resumed?.provider;
+  if (recordedProvider === "devin") {
+    process.stderr.write(`${red("xcb-compat:")} Devin support was removed; saved sessions and transcripts remain on disk.\n`);
+    sessions.close();
+    return 2;
+  }
+  try {
+    workspacePath = await resolveWorkspace(resumed?.workspace ?? options.workspace);
+  } catch (error) {
+    const detail = resumed === null ? (error instanceof Error ? error.message : "invalid workspace")
+      : `session workspace is gone: ${resumed.workspace}`;
+    process.stderr.write(`${red("xcb-compat:")} ${detail}\n`);
+    sessions.close();
+    return 2;
   }
   try { assertWorkspaceStateSeparation(workspacePath, stateRoot); }
   catch (error) { sessions.close(); throw error; }
-  const providerName: CliProviderName = options.provider ?? resumed?.provider ?? "claude";
+  const providerName: CliProviderName = options.provider ?? recordedProvider ?? "claude";
   if (resumed !== null && resumed.provider !== providerName) {
     process.stderr.write(`${red("xcb-compat:")} session ${resumed.id} belongs to provider ${resumed.provider} — resume with \`--provider ${resumed.provider}\`.\n`);
     sessions.close();
@@ -122,19 +121,7 @@ export async function runCliChat(options: { workspace: string; sessionId?: strin
       }
     }
   }
-  if (providerName === "devin") {
-    const devinInspection = await inspectCliBinary("devin");
-    if (devinInspection !== null) {
-      const devin = await devinAuthStatus(stateRoot, devinInspection);
-      if (!devin.loggedIn) {
-        process.stderr.write(`${red("xcb-compat:")} not signed in — run ${bold("xcb-compat auth devin")} first.\n`);
-        sessions.close();
-        return 2;
-      }
-    }
-  }
-  const model = boundedText(options.model ?? (providerName === "claude" ? CLI_CLAUDE_DEFAULT_MODEL
-    : providerName === "devin" ? CLI_DEVIN_DEFAULT_MODEL : CLI_CODEX_DEFAULT_MODEL), 160);
+  const model = boundedText(options.model ?? (providerName === "claude" ? CLI_CLAUDE_DEFAULT_MODEL : CLI_CODEX_DEFAULT_MODEL), 160);
   let session: CliSession;
   if (resumed !== null) {
     session = resumed;

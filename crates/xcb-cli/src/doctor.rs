@@ -54,10 +54,8 @@ impl Tally {
 }
 
 /// The detail doctor's JSON has always carried for a pinned build.
-fn build_detail(provider: Provider, native: bool) -> &'static str {
-    if native && provider == Provider::Devin {
-        "pinned · xcb accounts refresh <account> loads the model list after you connect an account"
-    } else if native {
+fn build_detail(_provider: Provider, native: bool) -> &'static str {
+    if native {
         "pinned · checked again before each run"
     } else {
         "pinned · xcb can't run this build yet"
@@ -67,7 +65,7 @@ fn build_detail(provider: Provider, native: bool) -> &'static str {
 /// How to add the first account for a provider.
 fn add_account_hint(provider: Provider) -> String {
     match provider {
-        Provider::Devin => "after devin auth login, add it with xcb accounts import-devin --source <credentials.toml>".to_owned(),
+        Provider::Devin => "Devin support was removed; use a Claude or Codex account".to_owned(),
         provider => format!("xcb setup {provider} adds one"),
     }
 }
@@ -363,11 +361,8 @@ pub async fn run(
                 }
             }
         }
-        // Devin's model list needs an account's own sign-in; doctor only
-        // pins its build.
         if let Some(pin) = pin
             && runnable
-            && provider != Provider::Devin
         {
             match runner::probe(store, pin, None).await {
                 Ok(models) => store.set_models(provider, &models)?,
@@ -422,10 +417,7 @@ pub async fn run(
             )
         })
         .collect();
-    let judge_key = judge::judge_token(store.root())?.map(|(_, source)| source);
-    if let Some(source) = judge_key {
-        judge::check_key_target(source, &config.extensions.judge)?;
-    }
+    let judge_key = judge::configured_key(store.root(), &config.extensions.judge)?;
     let judge_key_name = match judge_key {
         Some(judge::JudgeKeySource::Env) => "env",
         Some(judge::JudgeKeySource::Vault) => "vault",
@@ -434,14 +426,19 @@ pub async fn run(
     // Remove only launch folders already marked safe to delete after their
     // run finished; the parent exiting doesn't prove the provider stopped.
     let sweep = runner::reclaim_launch_artifacts(root, true)?;
-    let (judge_model, judge_endpoint) =
-        xcb_runtime::jev::effective_target(&config.extensions.judge)?;
+    let (judge_model, judge_endpoint) = judge::effective_target(&config.extensions.judge)?;
     let judge_status = json!({
         "enabled": config.extensions.judge.enabled,
+        "provider": if config.extensions.judge.is_clef() { "clef" } else { "system-one" },
         "key": judge_key_name,
         "model": judge_model,
         "endpoint": judge_endpoint,
     });
+    let usage_history = crate::usage::doctor_status(config).await;
+    // A stale aicharts pin makes host tool listing refuse until it is renewed.
+    if usage_history["connected"] == "stale" {
+        tally.warnings += 1;
+    }
     let unsettled = store.unsettled_runs()?;
     tally.warnings += pending_admissions.len() + unsettled.len();
     if !sweep.unprovable.is_empty() {
@@ -474,7 +471,7 @@ pub async fn run(
         .map(|account| account.row.id.clone());
     let next = if !any_found {
         // Suggest the most common provider first.
-        [Provider::Claude, Provider::Codex, Provider::Devin]
+        [Provider::Claude, Provider::Codex]
             .into_iter()
             .find(|provider| builds.iter().any(|(checked, _, _)| checked == provider))
             .map(install_step)
@@ -500,6 +497,7 @@ pub async fn run(
     };
     if as_json {
         let mut report = json!({"version":1,"providers":reports,"unsettledRuns":unsettled});
+        report["usageHistory"] = usage_history.clone();
         report["accounts"] = json!(account_reports);
         report["judge"] = judge_status;
         report["catalog"] = json!({
@@ -563,8 +561,9 @@ pub async fn run(
             println!("  {fix}");
         }
     }
+    println!("{}", usage_line(style, &usage_history));
     println!(
-        "{} judge: {} · key {judge_key_name} · {judge_endpoint}",
+        "{} judge: {} · key {judge_key_name} · {}",
         if config.extensions.judge.enabled {
             style.symbol(ux::Symbol::On)
         } else {
@@ -575,6 +574,7 @@ pub async fn run(
         } else {
             "disabled"
         },
+        judge_endpoint.as_deref().unwrap_or("unset"),
     );
     if sweep.reclaimed > 0 {
         println!(
@@ -618,6 +618,35 @@ pub async fn run(
 }
 
 /// The next step when a provider isn't installed.
+/// One line on aicharts' local usage history, which `xcb usage` reads.
+fn usage_line(style: ux::Style, status: &serde_json::Value) -> String {
+    if status["aicharts"].is_null() {
+        return format!(
+            "{} usage history: aicharts is not installed · {}",
+            style.symbol(ux::Symbol::Off),
+            crate::usage::GET_AICHARTS
+        );
+    }
+    let version = status["version"].as_str().unwrap_or("version unknown");
+    let collecting = match status["collecting"].as_str() {
+        Some("off") => "collection off · xcb usage enable".to_owned(),
+        Some(state) => format!("collecting {state}"),
+        None => "status unavailable".to_owned(),
+    };
+    let (symbol, tools) = match status["connected"].as_str() {
+        Some("yes") => (ux::Symbol::On, " · tools connected"),
+        Some("stale") => (
+            ux::Symbol::Warn,
+            " · aicharts changed since its tools were connected; run xcb usage connect",
+        ),
+        _ => (ux::Symbol::On, ""),
+    };
+    format!(
+        "{} usage history: aicharts {version} · {collecting}{tools}",
+        style.symbol(symbol)
+    )
+}
+
 fn install_step(provider: Provider) -> String {
     format!(
         "install {}, or run xcb doctor --provider {provider} --executable <absolute path>",
@@ -939,47 +968,6 @@ mod tests {
         };
         assert_eq!(tally.summary(), "1 warning.");
         assert_eq!(tally.exit_code(), 1);
-    }
-
-    #[test]
-    fn devin_shows_the_import_hint_only_without_an_account() {
-        let none = account_section(ux::Style::PLAIN, Provider::Devin, true, &[], false, NOW);
-        assert_eq!(
-            none.lines,
-            [
-                "  ○ no accounts yet · after devin auth login, add it with xcb accounts import-devin --source <credentials.toml>"
-            ]
-        );
-        assert_eq!((none.warnings, none.passed, none.ready), (0, 0, 0));
-        let imported = [account(
-            "a_devin",
-            Provider::Devin,
-            "devin/a_devin",
-            Health::Ready { busy: false },
-        )];
-        let refs: Vec<&Account> = imported.iter().collect();
-        let with_models =
-            account_section(ux::Style::PLAIN, Provider::Devin, true, &refs, true, NOW);
-        assert_eq!(with_models.lines, ["  ✓ 1 account ready"]);
-        assert_eq!(
-            (with_models.warnings, with_models.passed, with_models.ready),
-            (0, 1, 1)
-        );
-        assert!(!with_models.lines.concat().contains("import"));
-        // Signed in but no model list yet: the one fix is a refresh.
-        let without = account_section(ux::Style::PLAIN, Provider::Devin, true, &refs, false, NOW);
-        assert_eq!(
-            without.lines,
-            [
-                "  ⚠ 1 account ready",
-                "    ⚠ no Devin models loaded yet → xcb accounts refresh a_devin",
-            ]
-        );
-        assert_eq!(without.warnings, 1);
-        assert_eq!(
-            without.refresh.as_deref(),
-            Some("xcb accounts refresh a_devin")
-        );
     }
 
     #[test]

@@ -10,7 +10,7 @@ pub(super) struct Resources {
     pub(super) monitor: Monitor,
     pub(super) policy: ResourcePolicy,
     config_at: Option<Instant>,
-    config_error: bool,
+    pub(super) config_error: bool,
     collection: Option<tokio::task::JoinHandle<Snapshot>>,
     sampled_at: Option<Instant>,
     cursor: usize,

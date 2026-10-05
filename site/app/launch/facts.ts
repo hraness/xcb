@@ -19,8 +19,8 @@ export const LAUNCH_STATUS: LaunchStatus = launchStatusFor(publishedRelease);
  */
 export const launchFacts = {
   providers: {
-    value: "three",
-    source: "README.md Providers table: Claude, Codex, and Devin",
+    value: "two",
+    source: "README.md Providers table: Claude and Codex",
   },
   meterMaxAge: {
     value: "five minutes",

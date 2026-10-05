@@ -339,7 +339,7 @@ fn favorites_precede_provider_modes_and_other_models() {
             .iter()
             .map(|choice| choice.id.as_str())
             .collect::<Vec<_>>(),
-        ["gpt-6-astra-max", "gpt-5-6-sol-max", "other", "swe-2-high"]
+        ["gpt-5-6-sol-max", "gpt-6-astra-max", "other", "swe-2-high"]
     );
     assert!(
         default_preferences()

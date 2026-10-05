@@ -15,21 +15,6 @@ continuation, or switching to another account. Private run records keep the
 account, process, model, and timing without storing application prompts or
 replies. Provider sign-in stays in xcb; applications never pass credentials.
 
-For Devin ACP, the host instructions and application prompt are combined in one
-text content block, separated by a blank line; there is no separate system-role
-message. This tool-free route does not add the MCP workspace instructions used
-by tool-enabled Devin sessions. The native decoder follows
-[ACP extension semantics](https://agentclientprotocol.com/protocol/v1/extensibility):
-unrecognized, size-limited, valid underscore-prefixed notifications without an `id`
-are discarded
-without events, replies, or changes to the session, model, tools, or account. Unknown
-requests still receive a method-not-found response and trigger attention;
-ordinary unknown notifications and invalid `session/update` messages still fail.
-Recognized `_cognition.ai/compaction` notifications retain their closed-shape,
-matching-session and active-turn checks before this extension fallback. Their
-summary is discarded without changing output or tool state. This handling does
-not approve a provider for application use.
-
 An installation reports `supported: false` until the application path has
 passed xcb's application checks for that xcb executable, provider, account, and
 model. The record of those checks is called a qualification. A provider pin, a
@@ -140,7 +125,7 @@ unchanged.
 
 The diagnostic contains request/run/account identities, provider, timestamp,
 a closed execution stage and category, and optional closed RPC operation,
-numeric RPC code and protocol-check reason. For example, a Devin resource
+numeric RPC code and protocol-check reason. For example, a resource
 refusal can retain `receive`, `quota_or_resource_limit`, `session_prompt` and
 `-32011`; a model-selection mismatch retains `initialize`, `protocol` and
 `model_changed`. Unknown protocol checks become `other`. No original error

@@ -5,6 +5,12 @@ template. The scenes draw the same illustrations as the site: `mockups.tsx`
 renders `site/app/mockups/surfaces.tsx` with the fixtures in
 `site/app/mockups/fixtures.ts`, and `copy.ts` takes each number from `site/app/launch/facts.ts`.
 
+The earlier three-provider film remains an unchanged historical asset in
+`site/public/media/`, but `launchFilm` is disabled so the current post uses the
+router illustration. Update and inspect the film against the current
+agent-first interface and Claude/Codex support before enabling it again.
+Keep an archived film's captions consistent with its original picture.
+
 Run these in `video/`, one at a time; each render is heavy.
 
 ```sh

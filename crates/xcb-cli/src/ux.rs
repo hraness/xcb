@@ -234,7 +234,7 @@ mod tests {
 pub fn start_text() -> String {
     format!(
         "\
-Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin
+Excalibur (xcb) routes coding tasks across the Claude and Codex
 subscriptions you already pay for.
 
 Start here
@@ -260,7 +260,7 @@ xcb {}
 /// lines. Hidden internal commands are left out, and the rest that aren't
 /// here are in [`ADVANCED`]; a test keeps both lists in step with the parser.
 pub const ROOT_HELP: &str = "\
-Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin
+Excalibur (xcb) routes coding tasks across the Claude and Codex
 subscriptions you already pay for. Use `xcb run`, `xcb --json route`, or the
 SDK; the former interactive terminal surface has been removed.
 
@@ -274,6 +274,7 @@ Start here
 Accounts and models
   accounts       List accounts; add, sign in, remove and manage them
   models         List models; refresh catalogs and set the default
+  usage          Your token use by day, agent and model (kept by aicharts)
   routing        Show which models each kind of task prefers; exclude routes
   offers         Show public plan offers (not checked against your account)
 

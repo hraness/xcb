@@ -272,7 +272,7 @@ pub fn context_recipe_host_profile() -> Result<Value> {
             "profileDigest": record_digest(&json!({
                 "contract": "xcb.route-profile.v1",
                 "profile": "xcb-managed-task",
-                "providers": ["claude", "codex", "devin"],
+                "providers": ["claude", "codex"],
                 "selection": "project-grant",
             }))?,
             "scopeDigest": record_digest(&json!({

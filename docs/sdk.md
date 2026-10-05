@@ -145,7 +145,6 @@ null
 Replace the stand-in with an adapter that launches a provider:
 `createClaudeTaskAdapter` (Claude Code), `createClaudeApiAdapter` (the Claude
 API), or `createCodexTaskAdapter` and `createCodexManagedTaskAdapter` (Codex).
-The Devin adapter is present but not enabled for tasks.
 
 A real adapter runs only with a qualification record from your host: evidence
 that its exact provider build runs with the expected tools, configuration, and

@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
 import Compare from "../app/compare/page";
 import { ComparisonPage } from "../app/compare/comparison-page";
-import { comparisonPath, comparisons, devinStatus } from "../app/compare/comparisons";
+import { comparisonPath, comparisons } from "../app/compare/comparisons";
 import { hubDescription, hubGroups } from "../app/compare/hub";
 
 const sitemap = readFileSync(resolve(import.meta.dir, "../public/sitemap.xml"), "utf8");
@@ -50,12 +50,11 @@ describe("the comparison pages", () => {
     });
   }
 
-  test("the hub links every comparison page and states Devin's status once", () => {
+  test("the hub links every comparison page and states current support", () => {
     const html = renderToStaticMarkup(<Compare />);
     expect(html.match(/<h1\b/gu)).toHaveLength(1);
     for (const entry of comparisons) expect(html).toContain(`href="${comparisonPath(entry.slug)}"`);
     for (const group of hubGroups) expect(html).toContain(`id="${group.id}"`);
-    expect(html.split(devinStatus.replaceAll("’", "’")).length - 1).toBe(1);
     expect(hubDescription.length).toBeLessThanOrEqual(160);
     expect(html).not.toContain("—");
   });

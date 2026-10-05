@@ -24,7 +24,7 @@
     "sync:installer": "bun scripts/sync-installer.ts"
   },
   "dependencies": {
-    "@hraness/design-kit": "github:hraness/design-kit#v0.36.3",
+    "@hraness/design-kit": "github:hraness/design-kit#v0.40.2",
     "@hraness/posthog": "https://github.com/hraness/posthog/releases/download/v0.3.11/hraness-posthog-0.3.11.tgz",
     "@hraness/site-footer": "https://github.com/hraness/site-footer/releases/download/v0.20.7/hraness-site-footer-0.20.7.tgz",
     "@hraness/ui": "github:hraness/ui#v0.5.18",
@@ -46,5 +46,8 @@
     "tailwindcss": "4.3.3",
     "typescript": "6.0.3"
   },
-  "type": "module"
+  "type": "module",
+  "overrides": {
+    "fast-glob": "npm:tinyglobby@0.2.17"
+  }
 }

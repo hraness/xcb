@@ -10,7 +10,7 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
-## Unreleased
+## 0.18.0 - 2026-10-04
 
 xcb's current source build is agent-first: use the headless CLI, JSON route,
 and SDK instead of the former interactive terminal or hosted remote commands.
@@ -18,6 +18,18 @@ and SDK instead of the former interactive terminal or hosted remote commands.
 - Remove the Ratatui frontend and native chat, resume, and remote entry points.
   Saved conversations and task history remain readable through local commands.
 - Add `xcb conversations --new --json` for creating project views without a UI.
+- Add `xcb usage`, which shows token use across your coding agents by day,
+  agent, provider, and model from aicharts' record on your computer. It never
+  uploads, and xcb forwards only aicharts' report and scheduling commands.
+- `xcb usage connect` gives Claude and Codex tasks aicharts' read-only usage
+  tools through xcb's host tool bridge, pinned to the installed aicharts build;
+  `xcb usage disconnect` removes them. `xcb doctor` now reports whether aicharts
+  is collecting and whether that pin still matches.
+- `curl -fsSL https://xcb.sh/install.sh | sh` also installs aicharts 0.3.1 on
+  macOS (Apple silicon) and Linux x86_64, checked against a pinned digest and,
+  on macOS, its Developer ID signature, and turns on local usage history on a
+  first install. `XCB_AICHARTS=no` skips it; `XCB_USAGE_HISTORY=no` leaves
+  history off.
 - Keep inbox replay, project isolation, managed-program restart, and cancellation
   checks on the headless path; preserve the current website and its checks.
 - Define the north-star execution plan with ALGAL, protocol and SDK milestones,

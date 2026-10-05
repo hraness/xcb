@@ -1,4 +1,5 @@
 import { CliSessionStore } from "../src/cli/sessions.ts";
+import { openAccountDatabase } from "../src/sqlite-port.ts";
 import { describe, expect, test } from "bun:test";
 import { mkdtemp, realpath, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -13,17 +14,19 @@ async function stateDir(): Promise<string> {
 
 /** Run the CLI source under Bun in an isolated state root with provider
  * discovery pinned to paths that cannot exist. */
-async function cli(args: readonly string[], input?: string, state?: string): Promise<{ code: number; stdout: string; stderr: string }> {
+async function cli(args: readonly string[], input?: string, state?: string, env: Record<string, string> = {}): Promise<{ code: number; stdout: string; stderr: string }> {
   const root = state ?? await stateDir();
   const child = Bun.spawn([process.execPath, CLI, ...args], {
     cwd: ROOT,
     env: {
       ...process.env, XCB_STATE: root, NO_COLOR: "1",
-      XCB_CLAUDE: join(root, "no-such-claude"), XCB_CODEX: join(root, "no-such-codex"), XCB_DEVIN: join(root, "no-such-devin"),
+      XCB_CLAUDE: join(root, "no-such-claude"), XCB_CODEX: join(root, "no-such-codex"),
       PATH: join(root, "empty-path"), HOME: root,
       // Bun's transpiler cache otherwise creates Library/Caches in the fake
       // HOME, independently of CLI application or updater state.
       BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
+      CLOUDFLARE_ACCOUNT_ID: "", CLOUDFLARE_API_TOKEN: "", CLOUDFLARE_AUTH_TOKEN: "", XCB_JUDGE_PROVIDER: "clef", XCB_CLEF_MODEL: "clef",
+      ...env,
     },
     stdin: input === undefined ? "ignore" : "pipe",
     stdout: "pipe", stderr: "pipe",
@@ -43,7 +46,7 @@ describe("xcb CLI", () => {
   test("--help prints the command surface", async () => {
     const { code, stdout } = await cli(["--help"]);
     expect(code).toBe(0);
-    for (const command of ["auth claude", "auth devin", "auth status", "auth logout", "doctor", "sessions", "resume", "run [-p", "--cwd", "devin", "update check", "update status", "update disable"]) expect(stdout).toContain(command);
+    for (const command of ["auth claude", "auth codex", "auth status", "auth logout", "doctor", "sessions", "resume", "run [-p", "--cwd", "update check", "update status", "update disable"]) expect(stdout).toContain(command);
   });
 
   test("update commands run before opening application state and refuse source updates", async () => {
@@ -74,6 +77,21 @@ describe("xcb CLI", () => {
     expect(stdout).toContain("codex: not found");
   });
 
+  test("Clef help, status and test use separate environment auth without inference or token output", async () => {
+    const env = { CLOUDFLARE_ACCOUNT_ID: "a".repeat(32), CLOUDFLARE_API_TOKEN: "synthetic-clef-cli-token" };
+    const help = await cli(["--help"]);
+    expect(help.stdout).toContain("CLOUDFLARE_ACCOUNT_ID");
+    for (const command of [["judge", "status"], ["judge", "test"]]) {
+      const result = await cli(command, undefined, undefined, env);
+      expect(result.code, result.stderr).toBe(0);
+      expect(result.stdout).toContain("configuration valid");
+      expect(result.stdout + result.stderr).not.toContain(env.CLOUDFLARE_API_TOKEN);
+    }
+    const rejected = await cli(["judge", "token"], "synthetic-legacy-token");
+    expect(rejected.code).toBe(2);
+    expect(rejected.stderr).toContain("environment only");
+  });
+
   test("auth claude refuses when the pinned binary is absent", async () => {
     const { code, stderr } = await cli(["auth", "claude"]);
     expect(code).toBe(2);
@@ -84,29 +102,6 @@ describe("xcb CLI", () => {
     const { code, stderr } = await cli(["auth", "codex"]);
     expect(code).toBe(2);
     expect(stderr).toContain("codex binary not found");
-  });
-
-  test("auth devin refuses when the pinned binary is absent", async () => {
-    const { code, stderr } = await cli(["auth", "devin"]);
-    expect(code).toBe(2);
-    expect(stderr).toContain("devin binary not found");
-  });
-
-  test("doctor reports devin among the missing providers", async () => {
-    const { stdout } = await cli(["doctor"]);
-    expect(stdout).toContain("devin: not found");
-  });
-
-  test("run --provider devin refuses before provider admission", async () => {
-    const { code, stderr } = await cli(["run", "--provider", "devin", "-p", "hi"]);
-    expect(code).toBe(2);
-    expect(stderr).toContain("provider not admitted");
-  });
-
-  test("chat --provider devin refuses before provider admission", async () => {
-    const { code, stderr } = await cli(["--provider", "devin"], "hello\n");
-    expect(code).toBe(2);
-    expect(stderr).toContain("devin binary not found");
   });
 
   test("run refuses before provider admission", async () => {
@@ -148,18 +143,41 @@ describe("xcb CLI", () => {
     expect(stderr).toContain("session not found");
   });
 
+  test("lists retired-provider sessions but refuses resume without creating provider state", async () => {
+    const root = await stateDir();
+    const sessions = await CliSessionStore.open(join(root, "sessions"));
+    const session = await sessions.create({ provider: "claude", accountId: "local", workspace: ROOT, model: "retired-model", now: 1 });
+    sessions.close();
+    const database = await openAccountDatabase(join(root, "sessions", "sessions.sqlite"));
+    database.query("UPDATE xcb_cli_sessions SET provider='devin' WHERE id=?").run(session.id);
+    database.close();
+    const listed = await cli(["sessions"], "", root);
+    expect(listed.code, listed.stderr).toBe(0);
+    expect(listed.stdout).toContain(session.id);
+    expect(listed.stdout).toContain("devin");
+    for (const args of [["resume", session.id], ["resume", session.id, "--provider", "claude"]]) {
+      const resumed = await cli(args, "", root);
+      expect(resumed.code, resumed.stderr).toBe(2);
+      expect(resumed.stderr).toContain("Devin support was removed");
+    }
+    await expect(stat(join(root, "account-leases.sqlite"))).rejects.toMatchObject({ code: "ENOENT" });
+    const reopened = await CliSessionStore.open(join(root, "sessions"));
+    try { expect(reopened.get(session.id)?.provider).toBe("devin"); }
+    finally { reopened.close(); }
+  });
+
   test("resume inherits the stored provider when --provider is omitted", async () => {
     const root = await stateDir();
     const sessions = await CliSessionStore.open(join(root, "sessions"));
-    const session = await sessions.create({ provider: "devin", accountId: "local", workspace: ROOT, model: "adaptive", now: Date.now() });
+    const session = await sessions.create({ provider: "codex", accountId: "local", workspace: ROOT, model: "gpt-5.1-codex-mini", now: Date.now() });
     sessions.close();
     const resumed = await cli(["resume", session.id], "", root);
     expect(resumed.code, resumed.stderr).toBe(2);
-    expect(resumed.stderr).toContain("devin binary not found");
+    expect(resumed.stderr).toContain("codex binary not found");
     expect(resumed.stderr).not.toContain("claude binary not found");
     const mismatched = await cli(["resume", session.id, "--provider", "claude"], "", root);
     expect(mismatched.code).toBe(2);
-    expect(mismatched.stderr).toContain("belongs to provider devin");
+    expect(mismatched.stderr).toContain("belongs to provider codex");
   });
 
   test("resume without an id reports no sessions on a fresh state root", async () => {

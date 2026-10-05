@@ -178,7 +178,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_admission_accepts_exact_updates_and_honors_denials() {
+    fn catalog_cannot_admit_retired_provider_updates() {
         let directory = tempfile::tempdir().unwrap();
         let root = xcb_core::canonical(directory.path()).unwrap();
         crate::private::directory(&root.join("providers")).unwrap();
@@ -201,7 +201,7 @@ mod tests {
             host_sha256: "0".repeat(64),
             observed_at_ms: 0,
         };
-        runtime_admitted_with_catalog(&root, &pin).unwrap();
+        assert!(runtime_admitted_with_catalog(&root, &pin).is_err());
         let mut unknown = pin.clone();
         unknown.version = "3000.12.1".into();
         assert!(runtime_admitted_with_catalog(&root, &unknown).is_err());

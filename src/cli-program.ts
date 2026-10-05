@@ -7,16 +7,15 @@ import { createPublicWeb } from "./public-web.ts";
 import { boundedText } from "./validation.ts";
 
 import { assertWorkspaceStateSeparation, ensureCliState } from "./cli/state.ts";
-import { inspectCliBinary, CLI_CODEX_ENV, CLI_CLAUDE_ENV, CLI_DEVIN_ENV, type CliProviderName } from "./cli/binaries.ts";
+import { inspectCliBinary, CLI_CODEX_ENV, CLI_CLAUDE_ENV, type CliProviderName } from "./cli/binaries.ts";
 import { claudeLogin, claudeAuthStatus, clearClaudeOAuthToken } from "./cli/auth.ts";
 import { cliCodexHostDiagnostic, codexAuthStatus, codexLogin, codexLogout } from "./cli/codex.ts";
-import { CLI_DEVIN_MIN_VERSION, devinAuthStatus, devinLogin, devinLogout } from "./cli/devin.ts";
-import { checkJudgeKeyTarget, resolveJudge, resolveJudgeKey, storeJudgeKey, removeJudgeKey, hasJudgeKey,
-  JUDGE_KEY_ENV, JUDGE_KEY_VENDOR_ENV, JUDGE_TOKEN_FILE, JUDGE_URL_ENV, type JudgeAnswers } from "./judge.ts";
+import { resolveJudge, storeJudgeKey, removeJudgeKey,
+  JUDGE_TOKEN_FILE, type JudgeAnswers } from "./judge.ts";
 import { readCliQualification } from "./cli/qualification.ts";
 import { seatbeltAvailable } from "./cli/sandbox.ts";
 import type { ClaudeTaskEvents } from "./claude-task-adapter.ts";
-import { admitCliProvider, openCliProvider, CLI_CLAUDE_DEFAULT_MODEL, CLI_CODEX_DEFAULT_MODEL, CLI_DEVIN_DEFAULT_MODEL } from "./cli/provider.ts";
+import { admitCliProvider, openCliProvider, CLI_CLAUDE_DEFAULT_MODEL, CLI_CODEX_DEFAULT_MODEL } from "./cli/provider.ts";
 import { CliSessionStore } from "./cli/sessions.ts";
 import { createCliWorkspace, createCliWorkspaceProfile } from "./cli/workspace.ts";
 import { runCliTurn } from "./cli/run.ts";
@@ -25,14 +24,13 @@ import { dim, green, red, yellow, printRemainingText } from "./cli/tui.ts";
 
 
 const USAGE = `xcb-compat: the TypeScript compatibility CLI for Excalibur (xcb), which routes
-coding tasks across the Claude, Codex, and Devin subscriptions you already pay
+coding tasks across the Claude and Codex subscriptions you already pay
 for (the native Rust CLI installs separately as \`xcb\`)
 
 Usage:
   xcb-compat [path]            open the chat in a workspace (default: .)
   xcb-compat auth claude       sign in with your Claude subscription
   xcb-compat auth codex        sign in with your ChatGPT subscription
-  xcb-compat auth devin        sign in with your Devin account
   xcb-compat auth status       show stored sign-in state
   xcb-compat auth logout [p]   remove the stored credential (default: claude)
   xcb-compat doctor            check provider binaries and record the ones this build can run
@@ -41,10 +39,10 @@ Usage:
   xcb-compat sessions prune    remove sessions idle over 30 days (or N days)
   xcb-compat resume [id]       continue a session (default: most recent)
   xcb-compat run [-p text]     run one task headlessly (or pipe the task on stdin)
-  xcb-compat judge [status]    show judgment-provider (jev) state
-  xcb-compat judge token       store the jev API key read from stdin (piped, never echoed)
-  xcb-compat judge logout      remove the stored jev API key
-  xcb-compat judge test        ask the judge a bounded question batch (live call)
+  xcb-compat judge [status]    show Cloudflare Clef configuration without inference
+  xcb-compat judge token       store an explicitly selected legacy System One key from stdin
+  xcb-compat judge logout      remove the legacy System One key
+  xcb-compat judge test        validate configuration locally without inference
   xcb-compat update            install the latest verified compatibility release
   xcb-compat update check      check for a newer release (--json for structured output)
   xcb-compat update status     show this installation's update policy
@@ -52,15 +50,17 @@ Usage:
   xcb-compat --version
 
 Options:
-  --provider <claude|codex|devin|auto>  pick the provider for run/chat/resume (default claude; resume uses session provider)
+  --provider <claude|codex|auto>  pick the provider for run/chat/resume (default claude; resume uses session provider)
   --model <id>                 model for this run or session
   --cwd <path>                 workspace for run (default: current directory)
 
 Environment:
   ${CLI_CLAUDE_ENV}    pin an exact claude executable path
   ${CLI_CODEX_ENV}     pin an exact codex executable path
-  ${CLI_DEVIN_ENV}     pin an exact devin executable path
-  ${JUDGE_KEY_ENV}   jev API key (also ${JUDGE_KEY_VENDOR_ENV}); overrides the vaulted key
+  CLOUDFLARE_ACCOUNT_ID        32-hex Cloudflare account ID for Clef
+  CLOUDFLARE_API_TOKEN         Workers AI token (CLOUDFLARE_AUTH_TOKEN also works)
+  XCB_CLEF_MODEL              clef (default) or clef-flash
+  XCB_JUDGE_PROVIDER          clef (default) or explicit legacy system-one
   XCB_STATE     override the state root (default ~/.xcb)
   HRANESS_NO_UPDATE=1          suppress automatic updates for this invocation
   XCB_NO_UPDATE=1              suppress xcb automatic updates
@@ -82,8 +82,8 @@ function parseFlags(args: readonly string[]): { provider: CliProviderName | "aut
       const value = args[++i];
       if (value === undefined) fail(`option ${arg} requires a value`);
       if (arg === "--provider") {
-        if (value !== "claude" && value !== "codex" && value !== "devin" && value !== "auto") {
-          fail(`unknown provider ${value} — supported: claude, codex, devin, auto`);
+        if (value !== "claude" && value !== "codex" && value !== "auto") {
+          fail(`unknown provider ${value} — supported: claude, codex, auto`);
         }
         provider = value as CliProviderName | "auto";
       } else if (arg === "--model") model = boundedText(value, 160);
@@ -116,12 +116,12 @@ async function cliProfileFor(workspace: string) {
   return { profile, workspace: ws };
 }
 
-const PROVIDER_PIN_ENV: Record<CliProviderName, string> = { claude: CLI_CLAUDE_ENV, codex: CLI_CODEX_ENV, devin: CLI_DEVIN_ENV };
+const PROVIDER_PIN_ENV: Record<CliProviderName, string> = { claude: CLI_CLAUDE_ENV, codex: CLI_CODEX_ENV };
 
 async function commandDoctor(stateRoot: string): Promise<number> {
   const { profile } = await cliProfileFor(process.cwd());
   let admitted = 0;
-  for (const provider of ["claude", "codex", "devin"] as const) {
+  for (const provider of ["claude", "codex"] as const) {
     const admission = await admitCliProvider(stateRoot, provider, profile);
     if (admission.inspection === null) {
       process.stdout.write(`${dim("○")} ${provider}: not found (checked ${dim("$" + PROVIDER_PIN_ENV[provider])}, PATH, known locations)\n`);
@@ -135,15 +135,10 @@ async function commandDoctor(stateRoot: string): Promise<number> {
     const seatbelt = await seatbeltAvailable();
     process.stdout.write(`${seatbelt ? green("✓") : yellow("!")} sandbox: seatbelt ${seatbelt ? "available" : "unavailable"} ${dim("(claude runs confined; availability is not attestation)")}\n`);
   }
-  const judgeKey = await resolveJudgeKey(stateRoot).catch(() => null);
-  let judgeBlocked = false;
-  if (judgeKey !== null) {
-    try { checkJudgeKeyTarget(judgeKey.source, process.env[JUDGE_URL_ENV]); } catch { judgeBlocked = true; }
-  }
-  process.stdout.write(`${judgeKey === null ? dim("○") : judgeBlocked ? yellow("!") : green("✓")} judge: ${judgeKey === null
-    ? `no jev key — ${dim(`--provider auto\` needs one; pipe it into \`xcb-compat judge token\``)}`
-    : judgeBlocked ? "blocked — vaulted key cannot be used with a custom endpoint"
-      : `key from ${judgeKey.source} — ${dim("\`--provider auto\` can route")}`}\n`);
+  const configuredJudge = await resolveJudge({ stateRoot, enabled: true }).catch(() => null);
+  process.stdout.write(`${configuredJudge === null ? dim("○") : green("✓")} judge: ${configuredJudge === null
+    ? "set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN for --provider auto"
+    : "configuration valid; no inference request sent"}\n`);
   // Doctor succeeds when at least one provider is admitted; an absent optional
   // provider is a diagnostic line, not a failure.
   return admitted > 0 ? 0 : 1;
@@ -168,20 +163,7 @@ async function commandAuth(provider: string, stateRoot: string): Promise<number>
     process.stdout.write(`${green("✓")} codex: signed in (${snapshot.planType ?? "ChatGPT"})\n`);
     return 0;
   }
-  if (provider === "devin") {
-    const inspection = await inspectCliBinary("devin");
-    if (inspection === null) return fail("devin binary not found — install the Devin CLI, then retry.");
-    if (!inspection.versionMatches) return fail(`devin ${inspection.version} found; this build requires devin >= ${CLI_DEVIN_MIN_VERSION} — run \`xcb-compat doctor\`.`);
-    const existing = await devinAuthStatus(stateRoot, inspection);
-    if (existing.loggedIn) { process.stdout.write(`${green("✓")} devin: already signed in (${existing.planType ?? "Devin"})\n`); return 0; }
-    process.stdout.write(`${dim("Opening Devin sign-in (credentials are stored under ~/.xcb only)…")}\n`);
-    await devinLogin(stateRoot, inspection);
-    const status = await devinAuthStatus(stateRoot, inspection);
-    if (!status.loggedIn) return fail("sign-in did not produce credentials — re-run `xcb-compat auth devin`.");
-    process.stdout.write(`${green("✓")} devin: signed in (${status.planType ?? "Devin"})\n`);
-    return 0;
-  }
-  if (provider !== "claude") return fail(`unknown provider ${provider} — supported: claude, codex, devin`);
+  if (provider !== "claude") return fail(`unknown provider ${provider} — supported: claude, codex`);
   const inspection = await inspectCliBinary("claude");
   if (inspection === null) return fail("claude binary not found — install Claude Code, then retry.");
   if (!inspection.versionMatches) return fail(`claude ${inspection.version} found; this build admits only the pinned version — run \`xcb-compat doctor\`.`);
@@ -208,16 +190,6 @@ async function commandAuthStatus(stateRoot: string): Promise<number> {
       process.stdout.write(`codex: error checking status\n`);
     }
   }
-  const devinInspection = await inspectCliBinary("devin");
-  if (devinInspection !== null) {
-    try {
-      const devin = await devinAuthStatus(stateRoot, devinInspection);
-      process.stdout.write(`devin: ${devin.loggedIn ? `signed in (${devin.planType ?? "Devin"})` : "signed out"}\n`);
-      if (devin.loggedIn) any = true;
-    } catch {
-      process.stdout.write(`devin: error checking status\n`);
-    }
-  }
   return any ? 0 : 1;
 }
 
@@ -229,24 +201,18 @@ async function commandAuthLogout(provider: string | undefined, stateRoot: string
     process.stdout.write(`codex: signed out\n`);
     return 0;
   }
-  if (provider === "devin") {
-    const inspection = await inspectCliBinary("devin");
-    if (inspection === null) return fail("devin binary not found.");
-    await devinLogout(stateRoot, inspection);
-    process.stdout.write(`devin: signed out\n`);
-    return 0;
-  }
-  if (provider !== undefined && provider !== "claude") return fail(`unknown provider ${provider} — supported: claude, codex, devin`);
+  if (provider !== undefined && provider !== "claude") return fail(`unknown provider ${provider} — supported: claude, codex`);
   await clearClaudeOAuthToken(stateRoot);
   process.stdout.write(`claude: signed out\n`);
   return 0;
 }
 
-/** `xcb-compat judge` — the judgment-provider vault and a live connectivity probe.
+/** `xcb-compat judge` — configuration checks and the legacy judgment-provider vault.
  * The key resolves environment-first; the file lives in the private state
  * root like every other credential. Nothing here ever prints the key. */
 async function commandJudge(sub: string | undefined, stateRoot: string): Promise<number> {
   if (sub === "token") {
+    if (process.env.XCB_JUDGE_PROVIDER !== "system-one") return fail("Clef reads CLOUDFLARE_API_TOKEN from the environment only; judge token requires XCB_JUDGE_PROVIDER=system-one.");
     if (process.stdin.isTTY) fail("usage: pipe the jev API key on stdin — e.g. `pbpaste | xcb-compat judge token` (never a command argument).");
     const key = (await readStdin()).trim();
     if (key === "") fail("empty input — pipe the jev API key on stdin.");
@@ -269,35 +235,16 @@ async function commandJudge(sub: string | undefined, stateRoot: string): Promise
   }
   if (sub === "test") {
     const judge = await resolveJudge({ stateRoot, enabled: true });
-    if (judge === null) {
-      return fail(`no jev API key — pipe one into \`xcb-compat judge token\` or set ${JUDGE_KEY_ENV}.`);
-    }
-    const started = Date.now();
-    const answers = await judge.ask("xcb-compat judge connectivity probe", {
-      probe: { type: "noul", instructions: "Is the sky blue on a clear day?" },
-      pick: { type: "choice", instructions: "Which option names a color?", criteria: { red: "a color", spoon: "not a color" } },
-      rate: { type: "score", instructions: "How true is the claim that water is wet? Rate on the ordered criteria scale.", criteria: ["false", "partly true", "true"] },
-    });
-    const probe = answers.answers.probe, pick = answers.answers.pick, rate = answers.answers.rate;
-    if (probe?.type !== "noul" || pick?.type !== "choice" || rate?.type !== "score") {
-      return fail("judge returned a malformed answer shape.");
-    }
-    process.stdout.write(`${green("✓")} judge answered in ${Date.now() - started}ms ${dim(`(model ${answers.model ?? "unknown"}, p=${probe.noul.toFixed(3)}, choice=${pick.choice}@${pick.confidence.toFixed(3)}, score=${rate.score.toFixed(3)}@${rate.confidence.toFixed(3)})`)}\n`);
+    if (judge === null) return fail("set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN for Clef.");
+    process.stdout.write("Judge configuration valid. No inference request was sent.\n");
     return 0;
   }
   if (sub !== undefined && sub !== "status") return fail("usage: xcb-compat judge [status|token|logout|test]");
-  const key = await resolveJudgeKey(stateRoot).catch(() => null);
-  if (key !== null) {
-    try { checkJudgeKeyTarget(key.source, process.env[JUDGE_URL_ENV]); } catch {
-      return fail("vaulted judge key is bound to the canonical System One endpoint; use an environment key for a custom endpoint.");
-    }
-  }
-  const vaulted = await hasJudgeKey(stateRoot);
-  const source = key === null ? "none" : key.source === "env" ? "environment" : "vault";
-  process.stdout.write(`judge: ${key === null ? "no key configured" : `key from ${source}`}${vaulted && key?.source !== "vault" ? dim(" (vault file also present)") : ""}\n`);
-  process.stdout.write(`${dim("  env: ")}${JUDGE_KEY_ENV} or ${JUDGE_KEY_VENDOR_ENV}${dim("  vault: ")}${join(stateRoot, JUDGE_TOKEN_FILE)}\n`);
-  process.stdout.write(`${dim("  use --provider auto on \`xcb-compat run\` to route a task through the judge")}\n`);
-  return key === null ? 1 : 0;
+  const judge = await resolveJudge({ stateRoot, enabled: true });
+  process.stdout.write(`judge: ${judge === null ? "not configured" : "configuration valid"} · ${process.env.XCB_JUDGE_PROVIDER ?? "clef"}\n`);
+  process.stdout.write("  env: CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN (CLOUDFLARE_AUTH_TOKEN also works)\n");
+  process.stdout.write("  model: XCB_CLEF_MODEL=clef or clef-flash; no inference request sent\n");
+  return judge === null ? 1 : 0;
 }
 
 async function latestSessionId(stateRoot: string): Promise<string | undefined> {
@@ -365,7 +312,7 @@ async function routeAutoProvider(stateRoot: string, prompt: string): Promise<Cli
   if (candidates.length === 1) return candidates[0]!.provider;
   const judge = await resolveJudge({ stateRoot, enabled: true });
   if (judge === null) {
-    return fail(`--provider auto needs a jev API key — pipe one into \`xcb-compat judge token\` or set ${JUDGE_KEY_ENV}.`);
+    return fail("--provider auto needs CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN for Clef.");
   }
   const criteria: Record<string, string> = {};
   candidates.forEach((candidate, index) => { criteria[`route_${index}`] = candidate.label; });
@@ -410,17 +357,9 @@ async function commandRun(prompt: string, workspace: string, stateRoot: string, 
       if (!codex.loggedIn) return fail("not signed in — run `xcb-compat auth codex` first.");
     }
   }
-  if (provider === "devin") {
-    const inspection = await inspectCliBinary("devin");
-    if (inspection !== null) {
-      const devin = await devinAuthStatus(stateRoot, inspection);
-      if (!devin.loggedIn) return fail("not signed in — run `xcb-compat auth devin` first.");
-    }
-  }
   const leases = new SqliteAccountLeases(await openAccountDatabase(join(stateRoot, "account-leases.sqlite")));
   const sessions = await CliSessionStore.open(join(stateRoot, "sessions"));
-  const runModel = model ?? (provider === "claude" ? CLI_CLAUDE_DEFAULT_MODEL
-    : provider === "devin" ? CLI_DEVIN_DEFAULT_MODEL : CLI_CODEX_DEFAULT_MODEL);
+  const runModel = model ?? (provider === "claude" ? CLI_CLAUDE_DEFAULT_MODEL : CLI_CODEX_DEFAULT_MODEL);
   let streamedAll = "", streamedLast = "", providerError: string | null = null;
   events.onAssistantText = (block) => {
     if (!process.stdout.isTTY) return;

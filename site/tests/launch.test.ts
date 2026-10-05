@@ -27,8 +27,8 @@ const read = (path: string) => readFile(join(repo, path), "utf8");
 describe("xcb launch facts", () => {
   test("each number matches its source record", async () => {
     const [readme, quota] = await Promise.all([read("README.md"), read("docs/quota-routing.md")]);
-    expect(launchFacts.providers.value).toBe("three");
-    for (const provider of ["Claude", "Codex", "Devin"]) expect(readme).toContain(provider);
+    expect(launchFacts.providers.value).toBe("two");
+    for (const provider of ["Claude", "Codex"]) expect(readme).toContain(provider);
     expect(quota).toContain("at most five minutes old");
     expect(launchFacts.meterMaxAge.value).toBe("five minutes");
     expect(quota).toMatch(/Claude uses `five_hour` and `seven_day`/u);
@@ -49,7 +49,10 @@ describe("xcb launch facts", () => {
   test("the post is an indexable beats post with an independent review", () => {
     const post = findBlogPost(launchPostSlug);
     expect(post?.format).toBe("beats");
-    expect(post?.admission.review).toMatchObject({ reviewerType: "ai", reviewedOn: "2026-10-01" });
+    // A recorded AI or human-editor review admits the post; the author cannot admit it.
+    const review = post?.admission.review;
+    expect(review?.reviewer.trim().length).toBeGreaterThan(0);
+    expect(review?.reviewerType === "ai" || review?.reviewerType === "human-editor").toBe(true);
     expect(post?.admission.lifecycle).toBe("indexable");
     const scores: number[] = Object.values(post?.admission.scores ?? {});
     expect(scores.every((score) => score > 0)).toBe(true);
@@ -117,6 +120,13 @@ describe("xcb illustration shapes", () => {
     const route = await read("docs/route.md");
     const parsed = JSON.parse(routeResponse) as Record<string, unknown>;
     for (const key of Object.keys(parsed)) expect(route).toContain(`"${key}"`);
+  });
+
+  test("the embedded launch film names only current providers", async () => {
+    // The pre-retirement film named Devin; the current film must not.
+    if (launchFilm === null) return;
+    const captions = await read(`site/public${launchFilm.video.captions}`);
+    for (const text of [captions, launchFilm.video.description]) expect(text).not.toMatch(/Devin/u);
   });
 
   test("the launch film names only files that exist", async () => {

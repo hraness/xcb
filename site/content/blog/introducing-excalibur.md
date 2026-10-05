@@ -1,12 +1,16 @@
-Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for. Give it a task, and it chooses an available account and a model for the work. Each task runs through the provider's own coding tool under your sign-in.
+Excalibur (xcb) routes coding tasks across the Claude and Codex subscriptions you already pay for. Give it a task from your terminal or from another agent, and it chooses an available account and a model for the work. Each task runs through the provider's own coding tool under your sign-in.
 
-With several coding plans, choosing where to send the next task becomes a job of its own. One account is busy, another is close to its limit, and a third has unused quota that resets soon. xcb keeps that account selection together with the tasks, so you can follow the work from one terminal.
+With several coding plans, choosing where to send the next task becomes a job of its own. One account is busy, another is close to its limit, and a third has unused quota that resets soon. xcb makes that choice for each task and keeps a local record of the work, so you or your agent can check on it later.
 
-## Put the task in one thread
+## Give xcb a task
 
-Plain `xcb` opens a conversation across your projects. Name a project in your request, such as “fix the failing parser test in ~/src/app”, and xcb selects its directory. If the project is unclear, it asks you to choose before starting.
+`xcb run -p "Fix the failing parser test"` runs one task in the current project folder and prints the answer when it finishes. For work that should keep going after the command returns, add it to a project's backlog:
 
-The task runs under a background supervisor and continues when you close the terminal. `/tasks` shows the work, `/attention` collects questions waiting for your answer, and `/steer <task-id> <guidance>` adds instructions for a task's next turn. Different projects can run at the same time on different accounts; tasks in the same project take turns.
+```sh
+xcb backlog add ~/src/app "Fix the failing parser test" --ready
+```
+
+xcb's background supervisor runs backlog tasks, so they can outlive the command that submitted them. `xcb tasks` shows the work across your projects, `xcb attention` collects questions waiting for your answer, and `xcb steer <task-id> <guidance>` adds instructions for a task's next turn. Different projects can run at the same time on different accounts; tasks in the same project take turns.
 
 ## Choose an account for the work
 
@@ -42,11 +46,11 @@ An application can instead use the TypeScript SDK. In that interface, the applic
 
 ## Connect your first account
 
-Latest release: {{release.version}}. Follow the [installation guide](/install) for your platform. With Claude Code installed, connect an account and open your thread:
+Latest release: {{release.version}}. Follow the [installation guide](/install) for your platform. With Claude Code installed, connect an account and run a first task from a project folder:
 
 ```sh
 xcb setup claude
-xcb
+xcb run -p "Explain this repository"
 ```
 
-Setup checks the provider build, opens sign-in, and loads the account's models. The [getting started guide](/docs/getting-started) walks through the first task.
+Setup checks the provider build, opens sign-in, and loads the account's models. On macOS with Apple silicon and Linux x86_64, the installer also adds aicharts, which keeps a daily record of your agents' token use on your computer for `xcb usage` to read; [How xcb uses aicharts](/blog/how-xcb-uses-aicharts) covers it. The [getting started guide](/docs/getting-started) walks through the first task.

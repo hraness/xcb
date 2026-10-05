@@ -449,7 +449,18 @@ pub fn wrapper_digest(path: &Path) -> Result<String> {
     digest_file(wrapper_file(path)?, 8 * 1024 * 1024)
 }
 
+fn require_supported_provider(provider: Provider) -> Result<()> {
+    if Provider::SUPPORTED.contains(&provider) {
+        Ok(())
+    } else {
+        Err(Error::Unavailable(
+            "Devin support was removed; use Claude or Codex",
+        ))
+    }
+}
+
 pub fn discover(provider: Provider, explicit: Option<&Path>) -> Result<PathBuf> {
+    require_supported_provider(provider)?;
     #[cfg(windows)]
     {
         let _ = (provider, explicit);
@@ -640,6 +651,7 @@ fn parse_version(provider: Provider, output: &str) -> Result<&str> {
 }
 
 pub async fn inspect(provider: Provider, explicit: Option<&Path>, home: &Path) -> Result<Pin> {
+    require_supported_provider(provider)?;
     let host = host_executable()?;
     host.verify()?;
     let executable = discover(provider, explicit)?;
@@ -767,7 +779,8 @@ pub async fn refresh_provider(
     explicit: Option<&Path>,
     home: &Path,
 ) -> ProviderRefresh {
-    let outcome = private::directory(home)
+    let outcome = require_supported_provider(provider)
+        .and_then(|_| private::directory(home))
         .and_then(|_| private::directory(&home.join("tmp")))
         .map(|_| ());
     let outcome = match outcome {
@@ -2112,6 +2125,33 @@ mod tests {
                 assert!(prove_process_group_absent(pid).is_ok());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn retired_provider_cannot_be_discovered_inspected_or_refreshed() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
+        let root = base.join("state");
+        let home = base.join("provider-home");
+        let missing = base.join("missing-executable");
+        assert!(
+            discover(Provider::Devin, Some(&missing))
+                .unwrap_err()
+                .to_string()
+                .contains("support was removed")
+        );
+        assert!(
+            inspect(Provider::Devin, Some(&missing), &home)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("support was removed")
+        );
+        let refreshed = refresh_provider(&root, Provider::Devin, Some(&missing), &home).await;
+        assert_eq!(refreshed.outcome, RefreshOutcome::Rejected);
+        assert!(refreshed.detail.unwrap().contains("support was removed"));
+        assert!(!root.exists());
+        assert!(!home.exists());
     }
 
     #[test]

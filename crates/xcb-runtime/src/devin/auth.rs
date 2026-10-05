@@ -625,11 +625,16 @@ mod login_tests {
     async fn fixture(base: &Path, body: &str) -> crate::process::Pin {
         let fixture_home = private::directory(&base.join("fixture")).unwrap();
         let executable = fixture_home.join("fake-devin");
-        private::create(&executable, format!("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'devin 3000.11.3 (fixture)'; exit 0; fi\n{body}\n").as_bytes()).unwrap();
+        private::create(&executable, format!("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'codex-cli 0.159.3'; exit 0; fi\n{body}\n").as_bytes()).unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-        crate::process::inspect(Provider::Devin, Some(&executable), &fixture_home)
+        let observed = crate::process::inspect(Provider::Codex, Some(&executable), &fixture_home)
             .await
-            .unwrap()
+            .unwrap();
+        crate::process::Pin {
+            provider: Provider::Devin,
+            version: "3000.11.3".into(),
+            ..observed
+        }
     }
 
     const WRITE_TOKEN: &str = "test \"$1 $2\" = 'auth login' || exit 8\ntest \"$3\" = '--force-manual-token-flow' || exit 10\ntest -n \"$TERM\" || exit 11\ntest \"$XDG_DATA_HOME\" = \"$HOME/.local/share\" || exit 9\nmkdir -p \"$XDG_DATA_HOME/devin\"\ncat > \"$XDG_DATA_HOME/devin/credentials.toml\" <<'CREDENTIAL'\nwindsurf_api_key = \"synthetic-native-login\"\napi_server_url = \"https://server.codeium.com\"\ndevin_webapp_host = \"https://app.devin.ai\"\ndevin_api_url = \"https://api.devin.ai\"\nCREDENTIAL";

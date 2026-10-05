@@ -18,11 +18,11 @@ type Receipt = { before: string; after: string; error: string | null; token: str
   handlersBefore: number[]; handlersAfter: number[]; subsequentSignal: number;
   flowingBefore: boolean | null; flowingAfter: boolean | null };
 
-async function ptyCase(provider: "claude" | "devin", mode: "success" | "failure" | "cancel" | "cancel-status" | "retry" | "missing" | "logout" | "timeout") {
+async function ptyCase(provider: "claude", mode: "success" | "failure" | "cancel" | "cancel-status" | "retry" | "missing" | "timeout") {
   const root = await realpath(await mkdtemp(join(tmpdir(), "xcb-auth-pty-")));
   const executable = join(root, "provider"), calls = join(root, "calls"), normalized = join(root, "normalized");
   const receipt = join(root, "receipt.json"), runner = join(root, "runner.ts");
-  const inspection = { provider, executablePath: executable, version: provider === "claude" ? "2.1.268" : "3000.10.31",
+  const inspection = { provider, executablePath: executable, version: "2.1.268",
     sha256: "0".repeat(64), pinnedSha256: null, versionMatches: true, digestMatches: true };
   const stub = `#!/bin/sh
 printf '%s\\n' "$*" >> ${shellQuote(calls)}
@@ -36,12 +36,10 @@ ${provider === "claude" ? `printf '%s\\n' ${shellQuote(token)}` : "printf 'signe
 exit 0
 `;
   const auth = new URL("../src/cli/auth.ts", import.meta.url).href;
-  const devin = new URL("../src/cli/devin.ts", import.meta.url).href;
   const terminal = new URL("../src/cli/auth-terminal.ts", import.meta.url).href;
   const script = `import { spawn, spawnSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { claudeLogin, readClaudeOAuthToken } from ${JSON.stringify(auth)};
-import { devinLogin, devinLogout } from ${JSON.stringify(devin)};
 import { waitForAuthChild, withAuthTerminal } from ${JSON.stringify(terminal)};
 const state = () => spawnSync(${JSON.stringify(stty)}, ["-g"], { stdio: [0, "pipe", "pipe"], encoding: "utf8" }).stdout.trim();
 const signals = ["SIGINT", "SIGTERM", "SIGHUP"];
@@ -51,7 +49,7 @@ const before = state(); let error = null;
 try { ${mode === "timeout" ? `await withAuthTerminal(async () => {
   const child = spawn(${JSON.stringify(executable)}, [], { stdio: "inherit", env: { PATH: "/usr/bin:/bin" } });
   if ((await waitForAuthChild(child, 500)).timedOut) throw new Error("SYNTHETIC_AUTH_TIMEOUT");
-});` : `await ${provider === "claude" ? "claudeLogin" : mode === "logout" ? "devinLogout" : "devinLogin"}(${JSON.stringify(root)}, ${JSON.stringify(inspection)});`} }
+});` : `await claudeLogin(${JSON.stringify(root)}, ${JSON.stringify(inspection)});`} }
 catch (caught) { error = caught instanceof Error ? caught.message : String(caught); }
 const handlersAfter = signals.map(signal => process.listenerCount(signal));
 let subsequentSignal = 0;
@@ -97,14 +95,9 @@ describe("compatibility provider terminal handoff", () => {
     expect(attempts.trim()).toBe("setup-token");
   }, 20_000);
 
-  test.skipIf(!hasPty)("Devin accepts Enter and restores all original terminal flags", async () => {
-    const { result } = await ptyCase("devin", "success");
-    expect(result.error).toBeNull();
-  }, 20_000);
-
   test.skipIf(!hasPty)("failed and missing providers restore the exact state", async () => {
-    expect((await ptyCase("devin", "failure")).result.error).toBe("DEVIN_LOGIN_FAILED");
-    expect((await ptyCase("devin", "missing")).result.error).toBe("DEVIN_LOGIN_FAILED");
+    expect((await ptyCase("claude", "failure")).result.error).toBe("CLAUDE_LOGIN_FAILED");
+    expect((await ptyCase("claude", "missing")).result.error).toBe("CLAUDE_LOGIN_FAILED");
   }, 35_000);
 
   test.skipIf(!hasPty)("Claude normalizes every fallback attempt and restores the original state", async () => {
@@ -130,14 +123,8 @@ describe("compatibility provider terminal handoff", () => {
     expect(attempts.trim()).toBe("setup-token");
   }, 20_000);
 
-  test.skipIf(!hasPty)("Devin logout also normalizes and restores the terminal", async () => {
-    const { result, attempts } = await ptyCase("devin", "logout");
-    expect(result.error).toBeNull();
-    expect(attempts.trim()).toBe("auth logout");
-  }, 20_000);
-
   test.skipIf(!hasPty)("timeout joins the owned child and restores the exact terminal state", async () => {
-    const { result } = await ptyCase("devin", "timeout");
+    const { result } = await ptyCase("claude", "timeout");
     expect(result.error).toBe("SYNTHETIC_AUTH_TIMEOUT");
   }, 20_000);
 

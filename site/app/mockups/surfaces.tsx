@@ -18,7 +18,7 @@ import { installCommand as installCommandLine } from "../install/commands";
 
 type SurfaceProps = Readonly<{ mode: RouterMode; theme?: MockupTheme; height?: number }>;
 
-const PROVIDER_NAMES = { claude: "Claude", codex: "Codex", devin: "Devin" } as const;
+const PROVIDER_NAMES = { claude: "Claude", codex: "Codex" } as const;
 
 /**
  * The `xcb accounts` table with a meter drawn beside each status cell. The
@@ -75,7 +75,7 @@ export function AccountsBoard({ height, mode, theme }: SurfaceProps) {
   );
 }
 
-/** Your one thread in the xcb terminal app: the task you typed and what xcb shows back. */
+/** One xcb conversation: the task you gave it and the notices the managed runtime records. */
 export function ThreadView({ height, mode, theme }: SurfaceProps) {
   const lines: TerminalLine[] = threadLines[mode].map((line, index) => ({
     kind: line.who === "you" ? "input" : "output",
@@ -84,8 +84,8 @@ export function ThreadView({ height, mode, theme }: SurfaceProps) {
     beat: `thread-${index}`,
   }));
   const describe = mode === "reset"
-    ? "Illustration of an xcb thread: you type a task, xcb names the project it picked, runs the task on a Claude account, and shows the answer."
-    : "Illustration of an xcb thread: the task stops at a usage limit on one Claude account, continues on another, and finishes.";
+    ? "Illustration of an xcb conversation: your task, the project it runs in, the Claude account that runs it, and the answer."
+    : "Illustration of an xcb conversation: the task stops at a usage limit on one Claude account, continues on another, and finishes.";
   return <TerminalFrame density="presentation" describe={describe} height={height} lines={lines} prompt="›" theme={theme} title="xcb" />;
 }
 
@@ -100,7 +100,7 @@ export function TasksView({ height, mode, theme }: SurfaceProps) {
   return (
     <TerminalFrame
       density="presentation"
-      describe="Illustration of xcb tasks and xcb attention: three made-up tasks, one running, one waiting for your answer, one done, and the question that needs you."
+      describe="Illustration of xcb tasks and xcb attention: two made-up tasks, one running and one waiting for your answer, and the question that needs you."
       height={height}
       lines={lines}
       theme={theme}
@@ -160,9 +160,9 @@ export function RouteSplit({ theme }: Readonly<{ theme?: MockupTheme }>) {
 /** What stands between a provider and your project on every run, from README "How xcb runs a task". */
 const RUN_LAYERS = [
   { id: "signin", icon: "key", label: "Your sign-in", detail: "Kept in a private profile outside your projects" },
-  { id: "provider", icon: "cli", label: "The provider's own tool", detail: "A private copy of Claude Code, Codex, or the Devin CLI" },
+  { id: "provider", icon: "cli", label: "The provider's own tool", detail: "A private copy of Claude Code or Codex" },
   { id: "sandbox", icon: "shield", label: "An OS sandbox", detail: "Seatbelt on macOS, bwrap on Linux, a cleared environment" },
-  { id: "tools", icon: "file", label: "xcb's file tools", detail: "The only way in to your files; no provider plugins or MCP servers" },
+  { id: "tools", icon: "file", label: "xcb's file tools", detail: "The only way in to your files; no native shell or unrelated provider plugins" },
   { id: "project", icon: "folder", label: "One project folder", detail: "Changes land here for you to review and commit" },
 ] as const;
 
@@ -210,17 +210,17 @@ export function RunDiagram({ focus = "all", theme }: Readonly<{ focus?: RunFocus
   );
 }
 
-/** The three commands that take you from nothing to your thread. */
+/** The three commands that take you from nothing to a first task. */
 export function InstallView({ height, theme }: Readonly<{ height?: number; theme?: MockupTheme }>) {
   const lines: TerminalLine[] = [
     { kind: "input", text: installCommandLine, beat: "install" },
     { kind: "input", text: "xcb setup claude", beat: "setup" },
-    { kind: "input", text: "xcb", beat: "open" },
+    { kind: "input", text: 'xcb run -p "Explain this repository"', beat: "run" },
   ];
   return (
     <TerminalFrame
       density="presentation"
-      describe="Illustration of installing xcb: the one-line installer, connecting a Claude account, and opening your thread."
+      describe="Illustration of installing xcb: the one-line installer, connecting a Claude account, and running a first task."
       height={height}
       lines={lines}
       theme={theme}

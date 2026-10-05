@@ -103,6 +103,43 @@ fn plain(args: &[&str]) -> Output {
 }
 
 #[test]
+fn clef_judge_cli_checks_configuration_without_inference_or_token_output() {
+    let sandbox = Sandbox::new("clef-judge");
+    let account = "a".repeat(32);
+    let env = [
+        ("CLOUDFLARE_ACCOUNT_ID", account.as_str()),
+        ("CLOUDFLARE_API_TOKEN", "synthetic-clef-cli-token"),
+    ];
+    let initial = sandbox.run(&["--json", "judge", "status"], &[]);
+    assert!(initial.status.success(), "{initial:?}");
+    let status: serde_json::Value = serde_json::from_slice(&initial.stdout).unwrap();
+    assert_eq!(status["provider"], "clef");
+    assert_eq!(status["model"], "clef");
+    assert_eq!(status["key"], "none");
+    assert!(status["endpoint"].is_null());
+    assert!(
+        sandbox
+            .run(&["judge", "clef", "--model", "clef-flash"], &[])
+            .status
+            .success()
+    );
+    assert!(sandbox.run(&["judge", "enable"], &[]).status.success());
+    let checked = sandbox.run(&["judge", "test"], &env);
+    assert!(checked.status.success(), "{checked:?}");
+    assert!(text(&checked.stdout).contains("No inference request was sent"));
+    let status = sandbox.run(&["--json", "judge", "status"], &env);
+    assert!(status.status.success(), "{status:?}");
+    assert!(!text(&status.stdout).contains("synthetic-clef-cli-token"));
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["model"], "clef-flash");
+    assert_eq!(status["key"], "env");
+    let refused = sandbox.run_with_input(&["judge", "token"], b"legacy-key");
+    assert!(!refused.status.success());
+    assert!(text(&refused.stderr).contains("environment only"));
+    assert!(!sandbox.state().join("jev-api-token").exists());
+}
+
+#[test]
 fn version_prints_name_and_version() {
     let output = plain(&["--version"]);
     assert!(output.status.success());
@@ -119,8 +156,7 @@ fn bare_xcb_without_a_terminal_prints_where_to_start() {
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     let stdout = text(&output.stdout);
     assert!(
-        stdout
-            .starts_with("Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin"),
+        stdout.starts_with("Excalibur (xcb) routes coding tasks across the Claude and Codex"),
         "{stdout}"
     );
     assert!(
@@ -256,7 +292,7 @@ fn every_command_help_exits_zero() {
     }
     assert!(!root.contains("<account-id>"), "{root}");
     let setup = text(&plain(&["setup", "--help"]).stdout);
-    assert!(setup.contains("claude, codex, or devin"), "{setup}");
+    assert!(setup.contains("claude or codex"), "{setup}");
 }
 
 #[test]
@@ -477,11 +513,11 @@ fn doctor_marks_each_provider_and_names_one_next_step() {
     let summary = stdout.rsplit_once("\n\n").map(|(_, last)| last);
     if cfg!(target_os = "linux") {
         assert!(
-            matches!(summary, Some("3 problems.\n" | "3 problems, 1 warning.\n")),
+            matches!(summary, Some("2 problems.\n" | "2 problems, 1 warning.\n")),
             "{stdout}"
         );
     } else {
-        assert_eq!(summary, Some("3 problems.\n"), "{stdout}");
+        assert_eq!(summary, Some("2 problems.\n"), "{stdout}");
     }
     assert!(
         text(&output.stderr).ends_with("Next: install Claude Code, or run xcb doctor --provider claude --executable <absolute path>\n"),
@@ -514,12 +550,12 @@ fn doctor_reports_accounts_under_their_provider_and_exits_nonzero() {
         ),
         "{stdout}"
     );
-    // Claude and Devin have no accounts and another provider was found.
+    // Claude has no accounts and another provider was found.
     assert!(
         stdout.starts_with("○ claude: xcb can't find `claude` on your PATH."),
         "{stdout}"
     );
-    assert!(stdout.contains("\n○ devin: "), "{stdout}");
+    assert!(!stdout.contains("devin"), "{stdout}");
     assert!(!stdout.contains("passed"), "{stdout}");
     assert!(
         text(&output.stderr).ends_with(
@@ -548,19 +584,19 @@ fn doctor_reports_accounts_under_their_provider_and_exits_nonzero() {
     let empty = Sandbox::new("doctor-empty-json");
     let report: serde_json::Value =
         serde_json::from_slice(&empty.run(&["--json", "doctor"], &[]).stdout).unwrap();
-    assert_eq!(report["checks"]["problems"], 3, "{report}");
+    assert_eq!(report["checks"]["problems"], 2, "{report}");
 }
 
 // Exact-artifact providers run only on macOS. These catalog entries belong
-// solely to the private fixture; Devin avoids doctor starting a model probe.
+// solely to the private fixture; model probes use only the synthetic process.
 #[cfg(target_os = "macos")]
-fn admit_doctor_devin(sandbox: &Sandbox, version: &str) -> String {
-    let sha256 = xcb_runtime::digest(std::fs::read(sandbox.root.join("bin/devin")).unwrap());
+fn admit_doctor_codex(sandbox: &Sandbox, version: &str) -> String {
+    let sha256 = xcb_runtime::digest(std::fs::read(sandbox.root.join("bin/codex")).unwrap());
     let directory = xcb_runtime::private::directory(&sandbox.state().join("providers")).unwrap();
     let path = directory.join("catalog.json");
     let catalog = serde_json::json!({
         "version": 1,
-        "devin": [{"version": version, "sha256": sha256}],
+        "codex": [{"version": version, "sha256": sha256}],
     });
     if path.exists() {
         std::fs::write(path, catalog.to_string()).unwrap();
@@ -575,41 +611,41 @@ fn admit_doctor_devin(sandbox: &Sandbox, version: &str) -> String {
 fn doctor_preserves_a_supported_pin_when_discovery_or_explicit_selection_is_unsupported() {
     for explicit in [false, true] {
         let sandbox = Sandbox::new(&format!("doctor-retained-{explicit}"));
-        sandbox.fake_provider("devin", "devin 3000.11.3 (fixture)");
-        let saved_sha = admit_doctor_devin(&sandbox, "3000.11.3");
-        let initial = sandbox.run(&["--json", "doctor", "--provider", "devin"], &[]);
+        sandbox.fake_provider("codex", "codex-cli 0.159.3");
+        let saved_sha = admit_doctor_codex(&sandbox, "0.159.3");
+        let initial = sandbox.run(&["--json", "doctor", "--provider", "codex"], &[]);
         let initial: serde_json::Value = serde_json::from_slice(&initial.stdout).unwrap();
         assert_eq!(
             initial["providers"][0]["nativeCandidate"], true,
             "{initial}"
         );
-        let pin_path = sandbox.state().join("providers/devin.json");
+        let pin_path = sandbox.state().join("providers/codex.json");
         let saved_pin = std::fs::read(&pin_path).unwrap();
 
         let selected = if explicit {
-            sandbox.root.join("selected-devin")
+            sandbox.root.join("selected-codex")
         } else {
-            sandbox.root.join("bin/devin")
+            sandbox.root.join("bin/codex")
         };
-        sandbox.script(&selected, "#!/bin/sh\necho 'devin 3000.99.0 (fixture)'\n");
+        sandbox.script(&selected, "#!/bin/sh\necho 'codex-cli 0.199.0'\n");
         let skipped_sha = xcb_runtime::digest(std::fs::read(&selected).unwrap());
-        let mut args = vec!["doctor", "--provider", "devin"];
+        let mut args = vec!["doctor", "--provider", "codex"];
         if explicit {
             args.extend(["--executable", selected.to_str().unwrap()]);
         }
         let output = sandbox.run(&args, &[("HRANESS_AUDIENCE", "human")]);
         let stdout = text(&output.stdout);
         assert_eq!(output.status.code(), Some(1), "{output:?}");
-        assert!(stdout.contains("devin 3000.11.3: ready"), "{stdout}");
+        assert!(stdout.contains("codex 0.159.3: ready"), "{stdout}");
         assert!(
-            stdout.contains("Devin 3000.99.0, but xcb can't run it yet; keeping 3000.11.3"),
+            stdout.contains("Codex 0.199.0, but xcb can't run it yet; keeping 0.159.3"),
             "{stdout}"
         );
         assert!(
             stdout.contains(if explicit {
-                "selected Devin"
+                "selected Codex"
             } else {
-                "found Devin"
+                "found Codex"
             }),
             "{stdout}"
         );
@@ -619,14 +655,14 @@ fn doctor_preserves_a_supported_pin_when_discovery_or_explicit_selection_is_unsu
         let output = sandbox.run(&args, &[]);
         let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         let provider = &report["providers"][0];
-        assert_eq!(provider["version"], "3000.11.3", "{report}");
+        assert_eq!(provider["version"], "0.159.3", "{report}");
         assert_eq!(provider["sha256"], saved_sha, "{report}");
         assert_eq!(provider["nativeCandidate"], true, "{report}");
         assert_eq!(provider["storedPin"], true, "{report}");
         assert_eq!(
             provider["skippedBuild"],
             serde_json::json!({
-                "version": "3000.99.0", "sha256": skipped_sha,
+                "version": "0.199.0", "sha256": skipped_sha,
                 "nativeCandidate": false,
                 "source": if explicit { "explicit" } else { "discovered" },
             }),
@@ -645,9 +681,9 @@ fn doctor_preserves_a_supported_pin_when_discovery_or_explicit_selection_is_unsu
 fn doctor_never_retains_a_changed_or_denied_saved_pin() {
     for denied in [false, true] {
         let sandbox = Sandbox::new(&format!("doctor-invalid-saved-{denied}"));
-        sandbox.fake_provider("devin", "devin 3000.11.3 (fixture)");
-        let saved_sha = admit_doctor_devin(&sandbox, "3000.11.3");
-        let initial = sandbox.run(&["--json", "doctor", "--provider", "devin"], &[]);
+        sandbox.fake_provider("codex", "codex-cli 0.159.3");
+        let saved_sha = admit_doctor_codex(&sandbox, "0.159.3");
+        let initial = sandbox.run(&["--json", "doctor", "--provider", "codex"], &[]);
         let initial: serde_json::Value = serde_json::from_slice(&initial.stdout).unwrap();
         assert_eq!(
             initial["providers"][0]["nativeCandidate"], true,
@@ -656,8 +692,8 @@ fn doctor_never_retains_a_changed_or_denied_saved_pin() {
         if denied {
             let catalog = serde_json::json!({
                 "version": 1,
-                "devin": [{"version": "3000.11.3", "sha256": saved_sha}],
-                "deny": {"devin": [saved_sha]},
+                "codex": [{"version": "0.159.3", "sha256": saved_sha}],
+                "deny": {"codex": [saved_sha]},
             });
             std::fs::write(
                 sandbox.state().join("providers/catalog.json"),
@@ -666,7 +702,7 @@ fn doctor_never_retains_a_changed_or_denied_saved_pin() {
             .unwrap();
         } else {
             let saved: serde_json::Value = serde_json::from_slice(
-                &std::fs::read(sandbox.state().join("providers/devin.json")).unwrap(),
+                &std::fs::read(sandbox.state().join("providers/codex.json")).unwrap(),
             )
             .unwrap();
             std::fs::remove_file(saved["executable"].as_str().unwrap()).unwrap();
@@ -675,11 +711,11 @@ fn doctor_never_retains_a_changed_or_denied_saved_pin() {
                 "#!/bin/sh\nexit 9\n",
             );
         }
-        sandbox.fake_provider("devin", "devin 3000.99.0 (fixture)");
-        let output = sandbox.run(&["--json", "doctor", "--provider", "devin"], &[]);
+        sandbox.fake_provider("codex", "codex-cli 0.199.0");
+        let output = sandbox.run(&["--json", "doctor", "--provider", "codex"], &[]);
         let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         let provider = &report["providers"][0];
-        assert_eq!(provider["version"], "3000.99.0", "{report}");
+        assert_eq!(provider["version"], "0.199.0", "{report}");
         assert_eq!(provider["nativeCandidate"], false, "{report}");
         assert!(provider["skippedBuild"].is_null(), "{report}");
     }
@@ -689,17 +725,17 @@ fn doctor_never_retains_a_changed_or_denied_saved_pin() {
 #[test]
 fn doctor_adopts_a_new_supported_build() {
     let sandbox = Sandbox::new("doctor-supported-replacement");
-    for version in ["3000.11.3", "3000.99.0"] {
-        sandbox.fake_provider("devin", &format!("devin {version} (fixture)"));
-        let sha = admit_doctor_devin(&sandbox, version);
-        let output = sandbox.run(&["--json", "doctor", "--provider", "devin"], &[]);
+    for version in ["0.159.3", "0.199.0"] {
+        sandbox.fake_provider("codex", &format!("codex-cli {version}"));
+        let sha = admit_doctor_codex(&sandbox, version);
+        let output = sandbox.run(&["--json", "doctor", "--provider", "codex"], &[]);
         let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         let provider = &report["providers"][0];
         assert_eq!(provider["version"], version, "{report}");
         assert_eq!(provider["nativeCandidate"], true, "{report}");
         assert!(provider["skippedBuild"].is_null(), "{report}");
         let saved: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(sandbox.state().join("providers/devin.json")).unwrap(),
+            &std::fs::read(sandbox.state().join("providers/codex.json")).unwrap(),
         )
         .unwrap();
         assert_eq!(saved["sha256"], sha);
@@ -711,14 +747,17 @@ fn accounts_table_lines_up_and_names_the_account_to_sign_in() {
     let sandbox = Sandbox::new("accounts-table");
     let claude = sandbox.add(&["claude", "--plan", "Max"]);
     let codex = sandbox.add(&["codex", "--plan", "ChatGPT subscription"]);
-    let devin = sandbox.add(&["devin", "--plan", "Imported subscription"]);
+    let ready = sandbox.add(&["claude", "--plan", "Pro"]);
     assert!(
         sandbox
             .run(&["accounts", "disable", &codex], &[])
             .status
             .success()
     );
-    let stored = sandbox.run_with_input(&["accounts", "token", &devin], b"synthetic-devin-token");
+    let stored = sandbox.run_with_input(
+        &["accounts", "token", &ready],
+        b"sk-ant-oat01-syntheticToken000000000000",
+    );
     assert!(stored.status.success(), "{stored:?}");
     let output = sandbox.run(&["accounts"], &[("HRANESS_AUDIENCE", "human")]);
     assert!(output.status.success(), "{output:?}");
@@ -727,11 +766,18 @@ fn accounts_table_lines_up_and_names_the_account_to_sign_in() {
     let status_at = lines[0].find("STATUS").unwrap();
     assert!(lines[0].starts_with("  ID  "), "{stdout}");
     let short = |id: &str| format!("{}…", &id[..10]);
-    // Claude, Codex, Devin order; the first account added is the default.
+    let row = |id: &str| {
+        lines
+            .iter()
+            .copied()
+            .find(|line| line.contains(&short(id)))
+            .unwrap()
+    };
+    // Claude accounts, then Codex; the first account added is the default.
     for (line, id, provider, plan, status) in [
-        (lines[1], &claude, "claude", "Max", "needs sign-in"),
-        (lines[2], &codex, "codex", "ChatGPT", "off"),
-        (lines[3], &devin, "devin", "Imported", "ready"),
+        (row(&claude), &claude, "claude", "Max", "needs sign-in"),
+        (row(&ready), &ready, "claude", "Pro", "ready"),
+        (row(&codex), &codex, "codex", "ChatGPT", "off"),
     ] {
         assert!(line.contains(&short(id)), "{line}");
         assert!(line.contains(&format!("  {provider}  ")), "{line}");
@@ -741,7 +787,7 @@ fn accounts_table_lines_up_and_names_the_account_to_sign_in() {
         assert_eq!(column, status_at, "{stdout}");
         assert!(line.chars().count() <= 100, "{line}");
     }
-    assert!(lines[1].starts_with("> "), "{stdout}");
+    assert!(row(&claude).starts_with("> "), "{stdout}");
     assert!(!stdout.contains("unmeasured"), "{stdout}");
     assert!(!stdout.contains("subscripti"), "{stdout}");
     assert_eq!(
@@ -1038,25 +1084,24 @@ fn protocol_helpers_refuse_an_unfinished_update_before_opening_product_state() {
         .unwrap();
     xcb_runtime::private::create(&share.join("update-use.lock"), b"").unwrap();
     xcb_runtime::private::create(&share.join("update-in-progress"), b"fixture").unwrap();
-    for command in ["broker-stdio", "native-mcp-stdio"] {
-        let output = Command::new(&binary)
-            .env_clear()
-            .env("HOME", sandbox.root.join("home"))
-            .env("PATH", sandbox.root.join("bin"))
-            .arg("--state")
-            .arg(sandbox.state())
-            .args(["--json", command])
-            .stdin(Stdio::null())
-            .output()
-            .unwrap();
-        assert!(!output.status.success(), "{command}: {output:?}");
-        assert!(output.stdout.is_empty(), "{command}: {output:?}");
-        assert!(
-            text(&output.stderr).contains("update is unfinished"),
-            "{command}: {output:?}"
-        );
-        assert!(!sandbox.state().exists(), "{command} opened product state");
-    }
+    let command = "native-mcp-stdio";
+    let output = Command::new(&binary)
+        .env_clear()
+        .env("HOME", sandbox.root.join("home"))
+        .env("PATH", sandbox.root.join("bin"))
+        .arg("--state")
+        .arg(sandbox.state())
+        .args(["--json", command])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{command}: {output:?}");
+    assert!(output.stdout.is_empty(), "{command}: {output:?}");
+    assert!(
+        text(&output.stderr).contains("update is unfinished"),
+        "{command}: {output:?}"
+    );
+    assert!(!sandbox.state().exists(), "{command} opened product state");
 }
 
 #[test]
@@ -1299,26 +1344,18 @@ fn a_shortened_id_from_the_table_resolves_and_login_checks_the_provider_first() 
 #[test]
 fn browser_sign_in_flag_rejects_other_providers_before_setup() {
     let sandbox = Sandbox::new("browser-sign-in-provider");
-    for provider in ["codex", "devin"] {
-        let account = sandbox.add(&[provider]);
-        let output = sandbox.run(&["--json", "accounts", "login", &account, "--browser"], &[]);
-        assert_eq!(output.status.code(), Some(1));
-        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert!(
-            value["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("--browser is only supported for Claude sign-in"),
-            "{value}"
-        );
-        assert!(
-            !sandbox
-                .state()
-                .join("providers")
-                .join(format!("{provider}.json"))
-                .exists()
-        );
-    }
+    let account = sandbox.add(&["codex"]);
+    let output = sandbox.run(&["--json", "accounts", "login", &account, "--browser"], &[]);
+    assert_eq!(output.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("--browser is only supported for Claude sign-in"),
+        "{value}"
+    );
+    assert!(!sandbox.state().join("providers/codex.json").exists());
     let help = text(&plain(&["accounts", "login", "--help"]).stdout);
     assert!(help.contains("--browser"), "{help}");
     assert!(help.contains("Keychain"), "{help}");
@@ -1661,7 +1698,6 @@ fn help_and_everyday_output_avoid_internal_words() {
     std::fs::create_dir_all(&work).unwrap();
     let work = work.to_str().unwrap().to_owned();
     sandbox.fake_provider("codex", "codex-cli 0.0.1");
-    sandbox.fake_provider("devin", "devin 0.0.1 (fixture)");
     let codex = sandbox.add(&["codex", "--plan", "ChatGPT subscription"]);
     sandbox.add(&["claude"]);
     assert!(
@@ -1679,7 +1715,7 @@ fn help_and_everyday_output_avoid_internal_words() {
         vec![],
         vec!["doctor"],
         vec!["accounts"],
-        vec!["setup", "devin"],
+        vec!["setup", "codex"],
         vec!["sessions"],
         vec!["sessions", "prune"],
         vec!["sessions", "rm", "s_missing"],
@@ -1753,30 +1789,26 @@ fn advanced_is_the_same_screen_as_help_advanced() {
     assert!(!sandbox.state().exists(), "the screen opens no state");
 }
 
-/// Setup checks the provider build before any account or sign-in: Devin
-/// gets no empty account, and an unsupported Claude build stops before the
-/// browser sign-in.
+/// Retired providers get no empty account, and an unsupported Claude build
+/// stops before browser sign-in.
+/// Existing account state stays unchanged.
 #[test]
 fn setup_checks_the_build_is_supported_before_sign_in() {
     let sandbox = Sandbox::new("setup-unsupported");
-    sandbox.fake_provider("devin", "devin 0.0.1 (fixture)");
-    let devin = sandbox.run(&["setup", "devin"], &[]);
-    assert_eq!(devin.status.code(), Some(1), "{devin:?}");
-    assert_eq!(text(&devin.stdout), "");
-    let stderr = text(&devin.stderr);
-    assert!(stderr.contains("Devin"), "{stderr}");
-    if cfg!(target_os = "linux") {
-        assert!(stderr.contains("macOS ARM64"), "{stderr}");
-        assert!(stderr.contains("use Claude on Linux"), "{stderr}");
-        assert!(
-            stderr.contains("xcb.sh/docs/providers#claude-on-linux"),
-            "{stderr}"
-        );
-    } else if cfg!(target_os = "macos") {
-        assert!(stderr.contains("0.0.1"), "{stderr}");
-        assert!(stderr.contains("xcb.sh/docs/providers"), "{stderr}");
+    sandbox.fake_provider("devin", "devin 3000.11.3 (fixture)");
+    for args in [
+        &["setup", "devin"][..],
+        &["accounts", "add", "devin"],
+        &["accounts", "import-devin"],
+        &["models", "refresh", "devin"],
+        &["doctor", "--provider", "devin"],
+        &["broker-stdio"],
+    ] {
+        let output = sandbox.run(args, &[]);
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+        assert!(output.stdout.is_empty(), "{args:?}: {output:?}");
+        assert!(!sandbox.state().exists(), "{args:?} opened product state");
     }
-    assert!(!stderr.contains("qualified"), "{stderr}");
     let accounts = sandbox.run(&["--json", "accounts"], &[]);
     let list: serde_json::Value = serde_json::from_slice(&accounts.stdout).unwrap();
     assert_eq!(

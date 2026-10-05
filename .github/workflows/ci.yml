@@ -406,7 +406,15 @@ jobs:
       # its launch arguments. Provision that browser and its system libraries.
       - name: Install pinned Chromium
         working-directory: site
-        run: node node_modules/playwright-core/cli.js install --with-deps --no-shell chromium
+        run: |
+          set -euo pipefail
+          sudo python3 ../scripts/browser_acquisition.py
+          config=/etc/apt/apt.conf.d/99-browser-acquisition
+          sudo test ! -e "$config"
+          sudo test ! -L "$config"
+          trap 'sudo rm -f "$config"' EXIT
+          printf '%s\n' 'Acquire::http::Timeout "20";' 'Acquire::https::Timeout "20";' 'Acquire::Retries "1";' | sudo tee "$config" >/dev/null
+          node node_modules/playwright-core/cli.js install --with-deps --no-shell chromium
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: github.ref == 'refs/heads/main' && steps.chromium-cache.outputs.cache-hit != 'true'
         with:

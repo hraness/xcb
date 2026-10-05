@@ -1328,6 +1328,9 @@ impl CodexProtocol {
             .contains(&method)
             {
                 outgoing.push(json!({"id":value["id"],"error":{"code":-32601,"message":"xcb denies native permission requests"}}));
+                events.push(Event::Diagnostic(crate::runner::Diagnostic::notice(
+                    "Codex requested native permissions outside its admitted tools; xcb denied the request.",
+                )));
                 events.push(Event::Attention);
             } else {
                 require(

@@ -41,7 +41,8 @@ const MAX_TOTAL_MESSAGES: i64 = 200_000;
 const MAX_MAILBOX_MESSAGES: i64 = 4096;
 const MAX_TASK_MAILBOX_MESSAGES: i64 = 256;
 const MAX_PREFERENCES: i64 = 256;
-const MAX_ACTIVE: usize = 4;
+const DEFAULT_ACTIVE_TARGET: usize = 1;
+const CAPACITY_RAMP_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_TASK_ATTEMPTS: u32 = 9;
 const IDLE_EXIT: Duration = Duration::from_secs(30);
 const POLICY: &str = include_str!("../managed-transition.algal.json");
@@ -3127,23 +3128,7 @@ impl ManagedStore {
         };
         let trimmed = text.trim();
         if attachments.is_empty() && offer_question(trimmed) {
-            let root = self.root.parent().ok_or(Error::PrivateState)?;
-            let state = crate::offers::load(root)?;
-            let now = now_ms();
-            let answer = if !state.fresh(now) {
-                "The official model-offer observation is stale or unavailable. XCB refreshes it when the managed supervisor starts; run `xcb offers --refresh` to check now.".into()
-            } else if let Some(offer) = state
-                .offers
-                .iter()
-                .find(|offer| offer.provider == Provider::Devin && now < offer.valid_until_ms)
-            {
-                format!(
-                    "Official Devin offer observed: **{}**. It describes `{}` models through {}. Account entitlement is unverified; this public promotion does not establish free execution or qualify a provider.",
-                    offer.terms, offer.model_prefix, offer.valid_until_ms
-                )
-            } else {
-                "XCB has a fresh official pricing observation but no currently active Devin SWE-2 free offer.".into()
-            };
+            let answer = "Devin support was removed from xcb; use Claude or Codex. Saved offer observations are historical and do not establish current support.".into();
             return self.record_pair(conversation, id, text, answer);
         }
         if attachments.is_empty() && message_question(trimmed) {
@@ -5261,6 +5246,11 @@ struct Supervisor {
     /// the first check so this only matters on long-lived daemons.
     retention_checked: Instant,
     resources: resources::Resources,
+    /// Adaptive global target. Account limits and the durable store remain
+    /// the final custody gates; this only controls how much eligible work the
+    /// supervisor attempts to admit in one pass.
+    active_target: usize,
+    active_target_changed: Instant,
     workspace_refresh: Option<Receiver<Result<()>>>,
     workspace_checked: Option<Instant>,
 }
@@ -5298,6 +5288,8 @@ impl Supervisor {
             progress_at: Instant::now(),
             retention_checked: Instant::now(),
             resources: resources::Resources::default(),
+            active_target: DEFAULT_ACTIVE_TARGET,
+            active_target_changed: Instant::now(),
             workspace_refresh: None,
             workspace_checked: None,
         }
@@ -5500,6 +5492,51 @@ impl Supervisor {
         }
     }
 
+    /// Reconcile the global admission target from durable configuration and
+    /// the latest host observation. The target is deliberately a ramp, never
+    /// a grant: every launch still passes account, workspace, capability,
+    /// quota, and effect-custody checks. Unknown or stale telemetry leaves the
+    /// target unchanged; policy/configuration faults reduce it to the safe
+    /// floor until the next readable observation.
+    fn refresh_active_target(&mut self, queued: usize) {
+        let config = match Config::load(self.store.root()) {
+            Ok((config, _)) => config,
+            Err(error) => {
+                self.active_target = DEFAULT_ACTIVE_TARGET;
+                self.active_target_changed = Instant::now();
+                self.upkeep_fault("adaptive capacity configuration", &error);
+                return;
+            }
+        };
+        let ceiling = config.max_active_runs as usize;
+        if !config.adaptive_parallelism {
+            self.active_target = ceiling;
+            return;
+        }
+        self.active_target = self.active_target.clamp(DEFAULT_ACTIVE_TARGET, ceiling);
+        if self.active_target_changed.elapsed() < CAPACITY_RAMP_INTERVAL {
+            return;
+        }
+        let pressure = self.resources.config_error
+            || self
+                .resources
+                .monitor
+                .assess(&self.resources.policy, self.store.root(), now_ms())
+                .blocked;
+        if pressure {
+            let next = (self.active_target / 2).max(DEFAULT_ACTIVE_TARGET);
+            if next != self.active_target {
+                self.active_target = next;
+                self.active_target_changed = Instant::now();
+            }
+            return;
+        }
+        if queued > self.active.len() && self.active_target < ceiling {
+            self.active_target = (self.active_target.saturating_mul(2)).min(ceiling);
+            self.active_target_changed = Instant::now();
+        }
+    }
+
     /// One supervisor tick. Returns `Err` only for a supervisor-level
     /// failure (the task list itself); every per-task failure is isolated.
     async fn tick(&mut self, draining: bool) -> Result<()> {
@@ -5602,6 +5639,7 @@ impl Supervisor {
         // Sampling never holds up joins or cancellation. Only one collection
         // may be in flight, even if a filesystem stops answering.
         self.refresh_resources(&tasks).await;
+        self.refresh_active_target(tasks.len());
         for task in &tasks {
             if !task.cancel_requested {
                 continue;
@@ -5627,7 +5665,7 @@ impl Supervisor {
                 // A held task waits out its hold and occupies no slot.
                 && task.hold_until_ms.is_none_or(|until| until <= now)
         }) {
-            if self.active.len() >= MAX_ACTIVE {
+            if self.active.len() >= self.active_target {
                 break;
             }
             let task = if task.hold_until_ms.is_some() {
@@ -6244,7 +6282,7 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
             let catalog_root = root.clone();
             let _ =
                 tokio::task::spawn_blocking(move || crate::catalog::refresh(&catalog_root)).await;
-            for provider in xcb_core::Provider::ALL {
+            for provider in xcb_core::Provider::SUPPORTED {
                 let report = crate::process::refresh_provider(&root, provider, None, &home).await;
                 if let Some(detail) = report.detail {
                     record_supervisor_fault(&fault_root, &format!("{provider} refresh: {detail}"));
