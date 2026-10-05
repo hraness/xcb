@@ -500,6 +500,18 @@ function RouteTasks() {
   return (
     <>
       <p><code>xcb --json route</code> lets another program, usually a coding agent, hand xcb one task. xcb picks an account and model that can take it, runs one turn in the project folder you name, and prints one JSON result. For text generation with no tools, use the <a href="/docs/application-api">application API</a> instead.</p>
+      <h2 id="call-from-an-agent">Call from an agent</h2>
+      <p>From Claude Code or Codex, use the agent’s shell tool to call the native <code>xcb</code> CLI. First <a href="/docs/getting-started">install and set up xcb</a>, sign in an account, and check <code>xcb --json doctor</code>. Run a dry run before handing over file changes:</p>
+      <Code>{`$ xcb --json route <<'EOF'
+{
+  "version": 1,
+  "workspace": "/absolute/path/to/project",
+  "task": "Fix the failing parser test and show the diff",
+  "dryRun": true
+}
+EOF`}</Code>
+      <p>Replace the workspace with the existing project folder. A successful preview prints <code>status: &quot;selected&quot;</code> and the chosen provider, account, and model; it starts no provider and changes no project files. If it fails with <code>code: &quot;unavailable&quot;</code>, check account sign-in and the supported provider build in <a href="/docs/troubleshooting">troubleshooting</a> before retrying.</p>
+      <p>After you review the choice and your agent’s shell permission prompt, send the same request with <code>dryRun: false</code> to run one turn. The provider then changes files only inside the named workspace, through xcb’s file tools. Read the response and review the diff: <code>status: &quot;completed&quot;</code> means the turn finished, not that tests passed or the patch is correct. A preview doesn’t reserve the account, so the run can pick a different route unless you pin it with the fields below.</p>
       <h2 id="request">Send a request</h2>
       <p>Write one UTF-8 JSON document to standard input, close it, and read the result from standard output. Only <code>version</code>, <code>workspace</code>, and <code>task</code> are required, and unknown fields are rejected:</p>
       <Code>{`$ xcb --json route <<'EOF'

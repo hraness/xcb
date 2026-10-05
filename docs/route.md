@@ -35,17 +35,17 @@ JSON
 
 Replace the workspace with the existing project folder. A successful preview
 prints `status: "selected"` and the chosen provider, account, and model; it
-starts no provider and changes no project files. If it returns `unavailable`,
-check account sign-in and the supported provider build in
+starts no provider and changes no project files. If it fails with
+`code: "unavailable"`, check account sign-in and the supported provider build in
 [troubleshooting](https://xcb.sh/docs/troubleshooting) before retrying.
 
 After reviewing the choice and your agent's shell permission prompt, repeat
-the request with `dryRun: false` to run one turn. This permits provider file
-tools inside the named workspace. Read the response and review the diff;
-`status: "completed"` confirms the turn finished, not that tests passed or
-the patch is correct. A preview does not reserve the account, so a later run
-can select a different eligible route unless you pin it with the request
-fields below.
+the request with `dryRun: false` to run one turn. The provider then changes
+files only inside the named workspace, through xcb's file tools. Read the
+response and review the diff; `status: "completed"` confirms the turn
+finished, not that tests passed or the patch is correct. A preview does not
+reserve the account, so a later run can select a different eligible route
+unless you pin it with the request fields below.
 
 ## Request
 
