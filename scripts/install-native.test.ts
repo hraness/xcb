@@ -555,15 +555,18 @@ printf '#!/bin/sh\\n# Install native xcb stand-in\\nprintf "%%s\\\\n" "$XCB_VERS
       XCB_VERSION: "0.4.0", XCB_INSTALL_PREFIX: join(root, "prefix"),
       FIXTURE_UNAME_S: system, FIXTURE_UNAME_M: machine, FIXTURE_ASSET_STATUS: assetStatus,
       FIXTURE_CURL_LOG: join(root, "curl.log"), FIXTURE_INSTALLER_LOG: join(root, "installer.log"),
-      FIXTURE_HISTORY_LOG: join(root, "history.log"), XCB_AICHARTS: "no", ...extraEnv,
+      FIXTURE_HISTORY_LOG: join(root, "history.log"), FIXTURE_UPDATE_LOG: join(root, "update.log"),
+      XCB_AICHARTS: "no", ...extraEnv,
     },
   }));
   const read = (name: string) => existsSync(join(root, name)) ? readFileSync(join(root, name), "utf8") : null;
-  return { result, curl: read("curl.log"), installer: read("installer.log"), history: read("history.log"), root };
+  return { result, curl: read("curl.log"), installer: read("installer.log"), history: read("history.log"), update: read("update.log"), root };
 }
 
 // A stand-in aicharts build: reports the pinned version and an off history
-// status, and records each `history enable`.
+// status, and records each `history enable` and `update enable`. Its
+// `update status` answers FIXTURE_UPDATE_STATUS; an empty value stands in for
+// an aicharts released before `aicharts update` existed.
 function aichartsArchive(target = "x86_64-unknown-linux-gnu"): { path: string; sha256: string } {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "xcb-aicharts-")));
   roots.push(root);
@@ -574,6 +577,8 @@ case "$*" in
   --version) echo ran >> "$FIXTURE_HISTORY_LOG.ran"; echo 'aicharts 0.3.1 (0123456789ab)' ;;
   'history status --json') echo '{"data":{"collecting":"off"},"ok":true}' ;;
   'history enable') echo enabled >> "$FIXTURE_HISTORY_LOG" ;;
+  'update status --json') [ -n "$FIXTURE_UPDATE_STATUS" ] || exit 2; printf '%s\\n' "$FIXTURE_UPDATE_STATUS" ;;
+  'update enable') echo enabled >> "$FIXTURE_UPDATE_LOG" ;;
   *) exit 2 ;;
 esac
 `, { mode: 0o755 });
@@ -586,18 +591,42 @@ function aichartsEnv(overrides: Record<string, string> = {}, target?: string) {
   const fixture = aichartsArchive(target);
   return {
     XCB_AICHARTS: "yes", XCB_AICHARTS_BASE_URL: "http://127.0.0.1:9", XCB_AICHARTS_SHA256: fixture.sha256,
-    FIXTURE_AICHARTS_ARCHIVE: fixture.path, ...overrides,
+    FIXTURE_AICHARTS_ARCHIVE: fixture.path, FIXTURE_UPDATE_STATUS: '{"scheduler":"off"}', ...overrides,
   };
 }
 
 test("bootstrap adds the checked aicharts and turns on local usage history on a first install", () => {
-  const { result, curl, history, root } = bootstrap("Linux", "x86_64", "200", aichartsEnv());
+  const { result, curl, history, update, root } = bootstrap("Linux", "x86_64", "200", aichartsEnv());
   expect(result.status).toBe(0);
   expect(curl?.trim().split("\n").at(-1)).toBe("no http://127.0.0.1:9/aicharts-0.3.1-x86_64-unknown-linux-gnu.tar.gz");
   expect(existsSync(join(root, "prefix/bin/aicharts"))).toBe(true);
   expect(result.stdout).toContain("Local usage history is on");
   expect(result.stdout).toContain("aicharts history disable");
   expect(history).toBe("enabled\n");
+  expect(result.stdout).toContain("Daily aicharts updates are on");
+  expect(result.stdout).toContain("aicharts update disable");
+  expect(update).toBe("enabled\n");
+});
+
+test("bootstrap respects the aicharts update choice, ownership, and older builds", () => {
+  const off = bootstrap("Linux", "x86_64", "200", aichartsEnv({ XCB_AICHARTS_UPDATE: "no" }));
+  expect(off.result.status).toBe(0);
+  expect(off.update).toBeNull();
+  expect(off.history).toBe("enabled\n");
+  expect(off.result.stdout).not.toContain("Daily aicharts updates");
+  for (const scheduler of ["on", "not-ours", "unsupported"]) {
+    const kept = bootstrap("Linux", "x86_64", "200",
+      aichartsEnv({ FIXTURE_UPDATE_STATUS: `{"scheduler":"${scheduler}"}` }));
+    expect(kept.result.status).toBe(0);
+    expect(kept.update).toBeNull();
+    expect(kept.result.stdout).not.toContain("Daily aicharts updates are on");
+  }
+  // An aicharts released before `aicharts update` fails its status probe; the
+  // install finishes quietly without warning about updates.
+  const old = bootstrap("Linux", "x86_64", "200", aichartsEnv({ FIXTURE_UPDATE_STATUS: "" }));
+  expect(old.result.status).toBe(0);
+  expect(old.update).toBeNull();
+  expect(old.result.stderr).not.toContain("update");
 });
 
 test("bootstrap renews a connected aicharts tool registration after replacing aicharts", () => {
