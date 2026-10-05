@@ -551,6 +551,99 @@ pub(crate) struct SessionReceipts {
     pub effects: BTreeMap<Id, Vec<ToolEffectRecord>>,
 }
 
+/// Exact, deterministic selectors for the local status projection. Text search
+/// is deliberately absent; greppable output is a rendering concern.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct StatusFilter {
+    pub provider: Option<Provider>,
+    pub account: Option<Id>,
+    pub session: Option<Id>,
+    pub state: Option<State>,
+    pub has_lease: bool,
+    pub unsettled_effects: bool,
+    pub pending_command_custody: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StatusPage {
+    pub limit: u64,
+    pub offset: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct StatusSection<T> {
+    pub matched: u64,
+    pub offset: u64,
+    pub records: Vec<T>,
+}
+
+#[derive(Debug)]
+pub(crate) struct StatusAccount {
+    pub account: Account,
+    pub active_runs: u64,
+    pub lease_held: bool,
+    pub authentication_required: bool,
+    pub remaining_percent: Option<f64>,
+    pub resets_at_ms: Option<u64>,
+    pub quota_blocked_until_ms: Option<u64>,
+}
+
+#[derive(Debug)]
+pub(crate) struct StatusSession {
+    pub session: Session,
+    pub run_count: u64,
+    pub unsettled_run_count: u64,
+    pub effect_count: u64,
+    pub unsettled_effect_count: u64,
+    pub lease_held: bool,
+    pub pending_command_custody: bool,
+    pub capability_process_count: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct StatusRun {
+    pub run: RunRecord,
+    pub provider: Option<Provider>,
+    pub lease_held: bool,
+    pub effect_count: u64,
+    pub unsettled_effect_count: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct StatusEffect {
+    pub session: Option<Id>,
+    pub account: Option<Id>,
+    pub provider: Option<Provider>,
+    pub run: Id,
+    pub call: String,
+    pub operation: String,
+    pub input_digest: String,
+    pub settled: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct StatusTotals {
+    pub accounts: u64,
+    pub sessions: u64,
+    pub runs: u64,
+    pub tool_effects: u64,
+    pub leases: u64,
+    pub held_accounts: u64,
+    pub unsettled_runs: u64,
+    pub unsettled_effects: u64,
+    pub unlinked_tool_effects: u64,
+    pub pending_command_custody: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct StatusSnapshot {
+    pub totals: StatusTotals,
+    pub accounts: StatusSection<StatusAccount>,
+    pub sessions: StatusSection<StatusSession>,
+    pub runs: StatusSection<StatusRun>,
+    pub effects: StatusSection<StatusEffect>,
+}
+
 pub struct Store {
     root: PathBuf,
     /// Test-only count of fsync'd observability commits, proving a batch of
@@ -595,6 +688,19 @@ fn session_from(connection: &Connection, id: &Id) -> Result<Option<Session>> {
         Ok(session)
     })
     .transpose()
+}
+fn state_value(state: State) -> &'static str {
+    match state {
+        State::Idle => "idle",
+        State::Working => "working",
+        State::NeedsAnswer => "needs_answer",
+        State::NeedsAction => "needs_action",
+        State::NeedsApproval => "needs_approval",
+        State::Limited => "limited",
+        State::Failed => "failed",
+        State::Cancelled => "cancelled",
+        State::Uncertain => "uncertain",
+    }
 }
 fn sql(value: u64) -> Result<i64> {
     i64::try_from(value).map_err(|_| xcb_core::Error::Invalid("database integer").into())
@@ -2213,6 +2319,459 @@ impl Store {
         };
         tx.finish()?;
         Ok(receipts)
+    }
+
+    /// One bounded local snapshot for the native status projection. All counts
+    /// and records come from the same deferred transaction; provider processes,
+    /// credentials and model prompts are not consulted.
+    pub(crate) fn native_status(
+        &self,
+        filter: &StatusFilter,
+        page: StatusPage,
+        now: u64,
+    ) -> Result<StatusSnapshot> {
+        if !(1..=256).contains(&page.limit) {
+            return Err(xcb_core::Error::Invalid("status limit").into());
+        }
+        let limit = sql(page.limit)?;
+        let offset = sql(page.offset)?;
+        let provider = filter.provider.map(|provider| provider.as_str().to_owned());
+        let account = filter
+            .account
+            .as_ref()
+            .map(|account| account.as_str().to_owned());
+        let session = filter
+            .session
+            .as_ref()
+            .map(|session| session.as_str().to_owned());
+        let state = filter.state.map(state_value);
+
+        const ACCOUNT_FILTER: &str = "
+            AND (?1 IS NULL OR CASE WHEN json_valid(a.payload) THEN json_extract(a.payload,'$.provider') END = ?1)
+            AND (?2 IS NULL OR a.id = ?2)
+            AND (?3 IS NULL OR EXISTS(SELECT 1 FROM sessions sx WHERE sx.account=a.id AND sx.id=?3))
+            AND (?4 IS NULL OR EXISTS(SELECT 1 FROM sessions sx WHERE sx.account=a.id AND CASE WHEN json_valid(sx.payload) THEN json_extract(sx.payload,'$.state') END = ?4))
+            AND (?5=0 OR EXISTS(SELECT 1 FROM leases l WHERE l.account=a.id))
+            AND (?6=0 OR EXISTS(SELECT 1 FROM runs rx JOIN tool_effects tx ON tx.run=rx.id WHERE rx.account=a.id AND tx.settled=0))
+            AND (?7=0 OR EXISTS(SELECT 1 FROM runs rx WHERE rx.account=a.id AND CASE WHEN json_valid(rx.payload) THEN json_extract(rx.payload,'$.command_custody') IS NOT NULL ELSE 0 END))";
+        const SESSION_FILTER: &str = "
+            AND (?1 IS NULL OR CASE WHEN json_valid(s.payload) THEN json_extract(s.payload,'$.model.provider') END = ?1)
+            AND (?2 IS NULL OR s.account = ?2)
+            AND (?3 IS NULL OR s.id = ?3)
+            AND (?4 IS NULL OR CASE WHEN json_valid(s.payload) THEN json_extract(s.payload,'$.state') END = ?4)
+            AND (?5=0 OR EXISTS(SELECT 1 FROM runs rx JOIN leases l ON l.run=rx.id AND l.account=rx.account WHERE rx.session=s.id))
+            AND (?6=0 OR EXISTS(SELECT 1 FROM runs rx JOIN tool_effects tx ON tx.run=rx.id WHERE rx.session=s.id AND tx.settled=0))
+            AND (?7=0 OR EXISTS(SELECT 1 FROM runs rx WHERE rx.session=s.id AND CASE WHEN json_valid(rx.payload) THEN json_extract(rx.payload,'$.command_custody') IS NOT NULL ELSE 0 END))";
+        const RUN_FILTER: &str = "
+            AND (?1 IS NULL OR COALESCE(
+                CASE WHEN json_valid(s.payload) THEN json_extract(s.payload,'$.model.provider') END,
+                CASE WHEN json_valid(r.payload) THEN json_extract(r.payload,'$.model.provider') END) = ?1)
+            AND (?2 IS NULL OR r.account = ?2)
+            AND (?3 IS NULL OR r.session = ?3)
+            AND (?4 IS NULL OR CASE WHEN json_valid(s.payload) THEN json_extract(s.payload,'$.state') END = ?4)
+            AND (?5=0 OR EXISTS(SELECT 1 FROM leases l WHERE l.run=r.id AND l.account=r.account))
+            AND (?6=0 OR EXISTS(SELECT 1 FROM tool_effects tx WHERE tx.run=r.id AND tx.settled=0))
+            AND (?7=0 OR CASE WHEN json_valid(r.payload) THEN json_extract(r.payload,'$.command_custody') IS NOT NULL ELSE 0 END)";
+        const EFFECT_FILTER: &str = "
+            AND (?1 IS NULL OR COALESCE(
+                CASE WHEN json_valid(s.payload) THEN json_extract(s.payload,'$.model.provider') END,
+                CASE WHEN json_valid(r.payload) THEN json_extract(r.payload,'$.model.provider') END) = ?1)
+            AND (?2 IS NULL OR r.account = ?2)
+            AND (?3 IS NULL OR r.session = ?3)
+            AND (?4 IS NULL OR CASE WHEN json_valid(s.payload) THEN json_extract(s.payload,'$.state') END = ?4)
+            AND (?5=0 OR EXISTS(SELECT 1 FROM leases l WHERE l.run=r.id AND l.account=r.account))
+            AND (?6=0 OR t.settled=0)
+            AND (?7=0 OR CASE WHEN json_valid(r.payload) THEN json_extract(r.payload,'$.command_custody') IS NOT NULL ELSE 0 END)";
+
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let count = |query: &str, params: &[&dyn rusqlite::ToSql]| -> Result<u64> {
+            let count: i64 = tx.query_row(query, params, |row| row.get(0))?;
+            u64::try_from(count).map_err(|_| xcb_core::Error::Invalid("status count").into())
+        };
+        let filter_params: [&dyn rusqlite::ToSql; 7] = [
+            &provider,
+            &account,
+            &session,
+            &state,
+            &filter.has_lease,
+            &filter.unsettled_effects,
+            &filter.pending_command_custody,
+        ];
+        let totals = StatusTotals {
+            accounts: count("SELECT count(*) FROM accounts", &[])?,
+            sessions: count("SELECT count(*) FROM sessions", &[])?,
+            runs: count("SELECT count(*) FROM runs", &[])?,
+            tool_effects: count("SELECT count(*) FROM tool_effects", &[])?,
+            leases: count("SELECT count(*) FROM leases", &[])?,
+            held_accounts: count("SELECT count(DISTINCT account) FROM leases", &[])?,
+            unsettled_runs: count("SELECT count(*) FROM runs WHERE phase!='settled'", &[])?,
+            unsettled_effects: count("SELECT count(*) FROM tool_effects WHERE settled=0", &[])?,
+            unlinked_tool_effects: count(
+                "SELECT count(*) FROM tool_effects t LEFT JOIN runs r ON r.id=t.run WHERE r.id IS NULL",
+                &[],
+            )?,
+            pending_command_custody: count(
+                "SELECT count(*) FROM runs WHERE CASE WHEN json_valid(payload) THEN json_extract(payload,'$.command_custody') IS NOT NULL ELSE 0 END",
+                &[],
+            )?,
+        };
+
+        let accounts = StatusSection {
+            matched: count(
+                &format!("SELECT count(*) FROM accounts a WHERE 1=1 {ACCOUNT_FILTER}"),
+                &filter_params,
+            )?,
+            offset: page.offset,
+            records: {
+                let mut query = tx.prepare(&format!(
+                    "SELECT a.id,a.payload,
+                        (SELECT count(*) FROM runs rx WHERE rx.account=a.id AND rx.phase!='settled'),
+                        EXISTS(SELECT 1 FROM leases l WHERE l.account=a.id)
+                    FROM accounts a WHERE 1=1 {ACCOUNT_FILTER}
+                    ORDER BY a.id LIMIT ?8 OFFSET ?9"
+                ))?;
+                let rows = query.query_map(
+                    params![
+                        provider,
+                        account,
+                        session,
+                        state,
+                        filter.has_lease,
+                        filter.unsettled_effects,
+                        filter.pending_command_custody,
+                        limit,
+                        offset
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, bool>(3)?,
+                        ))
+                    },
+                )?;
+                let mut records = Vec::new();
+                for row in rows {
+                    let (id, payload, active_runs, lease_held) = row?;
+                    let account: Account = decode(&payload)?;
+                    account.validate()?;
+                    if account.id.as_str() != id {
+                        return Err(Error::Conflict("account status identity changed"));
+                    }
+                    let points = current_quota_points_from(&tx, &self.root, &account)?;
+                    let mut by_window: BTreeMap<Id, Vec<QuotaPoint>> = BTreeMap::new();
+                    for point in points.iter().flatten() {
+                        by_window
+                            .entry(point.window.clone())
+                            .or_default()
+                            .push(point.clone());
+                    }
+                    let fresh: Vec<_> = by_window
+                        .values()
+                        .filter_map(|points| points.last())
+                        .filter(|point| point.fresh(now))
+                        .collect();
+                    records.push(StatusAccount {
+                        authentication_required: authentication_required_from(&tx, &account.id)?,
+                        remaining_percent: fresh
+                            .iter()
+                            .map(|point| 100.0 - point.used_percent)
+                            .reduce(f64::min),
+                        resets_at_ms: fresh.iter().map(|point| point.resets_at_ms).min(),
+                        quota_blocked_until_ms: points.as_ref().and_then(|points| {
+                            xcb_core::usage::quota_blocked_until(
+                                points,
+                                &account.quota_pool,
+                                account.provider,
+                                now,
+                            )
+                        }),
+                        active_runs: u64::try_from(active_runs)
+                            .map_err(|_| xcb_core::Error::Invalid("status run count"))?,
+                        lease_held,
+                        account,
+                    });
+                }
+                records
+            },
+        };
+
+        let sessions = StatusSection {
+            matched: count(
+                &format!("SELECT count(*) FROM sessions s WHERE 1=1 {SESSION_FILTER}"),
+                &filter_params,
+            )?,
+            offset: page.offset,
+            records: {
+                let mut query = tx.prepare(&format!(
+                    "SELECT s.id,s.account,s.payload,
+                        (SELECT count(*) FROM runs rx WHERE rx.session=s.id),
+                        (SELECT count(*) FROM runs rx WHERE rx.session=s.id AND rx.phase!='settled'),
+                        (SELECT count(*) FROM tool_effects tx JOIN runs rx ON rx.id=tx.run WHERE rx.session=s.id),
+                        (SELECT count(*) FROM tool_effects tx JOIN runs rx ON rx.id=tx.run WHERE rx.session=s.id AND tx.settled=0),
+                        EXISTS(SELECT 1 FROM runs rx JOIN leases l ON l.run=rx.id AND l.account=rx.account WHERE rx.session=s.id),
+                        EXISTS(SELECT 1 FROM runs rx WHERE rx.session=s.id AND CASE WHEN json_valid(rx.payload) THEN json_extract(rx.payload,'$.command_custody') IS NOT NULL ELSE 0 END),
+                        (SELECT count(*) FROM runs rx JOIN json_each(rx.payload,'$.capability_processes') capability ON json_valid(rx.payload) AND json_type(rx.payload,'$.capability_processes')='object' WHERE rx.session=s.id)
+                    FROM sessions s WHERE 1=1 {SESSION_FILTER}
+                    ORDER BY s.last_active DESC,s.id LIMIT ?8 OFFSET ?9"
+                ))?;
+                let rows = query.query_map(
+                    params![
+                        provider,
+                        account,
+                        session,
+                        state,
+                        filter.has_lease,
+                        filter.unsettled_effects,
+                        filter.pending_command_custody,
+                        limit,
+                        offset
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, i64>(4)?,
+                            row.get::<_, i64>(5)?,
+                            row.get::<_, i64>(6)?,
+                            row.get::<_, bool>(7)?,
+                            row.get::<_, bool>(8)?,
+                            row.get::<_, i64>(9)?,
+                        ))
+                    },
+                )?;
+                let mut records = Vec::new();
+                for row in rows {
+                    let (
+                        id,
+                        account,
+                        payload,
+                        run_count,
+                        unsettled_run_count,
+                        effect_count,
+                        unsettled_effect_count,
+                        lease_held,
+                        pending_command_custody,
+                        capability_process_count,
+                    ) = row?;
+                    let session: Session = decode(&payload)?;
+                    session.validate()?;
+                    if session.id.as_str() != id || session.account.as_str() != account {
+                        return Err(Error::Conflict("session status identity changed"));
+                    }
+                    records.push(StatusSession {
+                        session,
+                        run_count: u64::try_from(run_count)
+                            .map_err(|_| xcb_core::Error::Invalid("status run count"))?,
+                        unsettled_run_count: u64::try_from(unsettled_run_count)
+                            .map_err(|_| xcb_core::Error::Invalid("status run count"))?,
+                        effect_count: u64::try_from(effect_count)
+                            .map_err(|_| xcb_core::Error::Invalid("status effect count"))?,
+                        unsettled_effect_count: u64::try_from(unsettled_effect_count)
+                            .map_err(|_| xcb_core::Error::Invalid("status effect count"))?,
+                        lease_held,
+                        pending_command_custody,
+                        capability_process_count: u64::try_from(capability_process_count)
+                            .map_err(|_| xcb_core::Error::Invalid("status process count"))?,
+                    });
+                }
+                records
+            },
+        };
+
+        let run_provider = "
+            COALESCE(
+                CASE WHEN json_valid(s.payload) THEN json_extract(s.payload,'$.model.provider') END,
+                CASE WHEN json_valid(r.payload) THEN json_extract(r.payload,'$.model.provider') END)";
+        let stored_provider = |value: Option<String>| -> Result<Option<Provider>> {
+            value
+                .map(|value| {
+                    serde_json::from_value::<Provider>(serde_json::Value::String(value))
+                        .map_err(Error::from)
+                })
+                .transpose()
+        };
+        let runs = StatusSection {
+            matched: count(
+                &format!(
+                    "SELECT count(*) FROM runs r LEFT JOIN sessions s ON s.id=r.session WHERE 1=1 {RUN_FILTER}"
+                ),
+                &filter_params,
+            )?,
+            offset: page.offset,
+            records: {
+                let mut query = tx.prepare(&format!(
+                    "SELECT r.id,r.session,r.payload,{run_provider},
+                        EXISTS(SELECT 1 FROM leases l WHERE l.run=r.id AND l.account=r.account),
+                        (SELECT count(*) FROM tool_effects tx WHERE tx.run=r.id),
+                        (SELECT count(*) FROM tool_effects tx WHERE tx.run=r.id AND tx.settled=0)
+                    FROM runs r LEFT JOIN sessions s ON s.id=r.session
+                    WHERE 1=1 {RUN_FILTER}
+                    ORDER BY r.rowid DESC LIMIT ?8 OFFSET ?9"
+                ))?;
+                let rows = query.query_map(
+                    params![
+                        provider,
+                        account,
+                        session,
+                        state,
+                        filter.has_lease,
+                        filter.unsettled_effects,
+                        filter.pending_command_custody,
+                        limit,
+                        offset
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, bool>(4)?,
+                            row.get::<_, i64>(5)?,
+                            row.get::<_, i64>(6)?,
+                        ))
+                    },
+                )?;
+                let mut records = Vec::new();
+                for row in rows {
+                    let (id, session, payload, provider, lease_held, effects, unsettled) = row?;
+                    let run: RunRecord = decode(&payload)?;
+                    run.validate()?;
+                    if run.id.as_str() != id
+                        || run.session.as_ref().map(Id::as_str) != session.as_deref()
+                    {
+                        return Err(Error::Conflict("run status identity changed"));
+                    }
+                    records.push(StatusRun {
+                        run,
+                        provider: stored_provider(provider)?,
+                        lease_held,
+                        effect_count: u64::try_from(effects)
+                            .map_err(|_| xcb_core::Error::Invalid("status effect count"))?,
+                        unsettled_effect_count: u64::try_from(unsettled)
+                            .map_err(|_| xcb_core::Error::Invalid("status effect count"))?,
+                    });
+                }
+                records
+            },
+        };
+
+        let effects = StatusSection {
+            matched: count(
+                &format!(
+                    "SELECT count(*) FROM tool_effects t LEFT JOIN runs r ON r.id=t.run LEFT JOIN sessions s ON s.id=r.session WHERE 1=1 {EFFECT_FILTER}"
+                ),
+                &filter_params,
+            )?,
+            offset: page.offset,
+            records: {
+                let mut query = tx.prepare(&format!(
+                    "SELECT t.run,t.call,t.operation,t.input_digest,t.settled,
+                        r.session,r.account,r.payload,{run_provider}
+                    FROM tool_effects t
+                    LEFT JOIN runs r ON r.id=t.run
+                    LEFT JOIN sessions s ON s.id=r.session
+                    WHERE 1=1 {EFFECT_FILTER}
+                    ORDER BY r.rowid DESC,t.call LIMIT ?8 OFFSET ?9"
+                ))?;
+                let rows = query.query_map(
+                    params![
+                        provider,
+                        account,
+                        session,
+                        state,
+                        filter.has_lease,
+                        filter.unsettled_effects,
+                        filter.pending_command_custody,
+                        limit,
+                        offset
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, i64>(4)?,
+                            row.get::<_, Option<String>>(5)?,
+                            row.get::<_, Option<String>>(6)?,
+                            row.get::<_, Option<String>>(7)?,
+                            row.get::<_, Option<String>>(8)?,
+                        ))
+                    },
+                )?;
+                let mut records = Vec::new();
+                for row in rows {
+                    let (
+                        run_id,
+                        call,
+                        operation,
+                        input_digest,
+                        settled,
+                        session,
+                        account,
+                        payload,
+                        provider,
+                    ) = row?;
+                    let (session, account, run) = match payload {
+                        Some(payload) => {
+                            let run: RunRecord = decode(&payload)?;
+                            run.validate()?;
+                            if run.id.as_str() != run_id
+                                || run.session.as_ref().map(Id::as_str) != session.as_deref()
+                                || Some(run.account.as_str()) != account.as_deref()
+                            {
+                                return Err(Error::Conflict("tool status run changed"));
+                            }
+                            (run.session.clone(), Some(run.account.clone()), run.id)
+                        }
+                        None => {
+                            if session.is_some() || account.is_some() {
+                                return Err(Error::Conflict("tool status run changed"));
+                            }
+                            (
+                                None,
+                                None,
+                                Id::new(&run_id)
+                                    .map_err(|_| Error::Conflict("tool status run changed"))?,
+                            )
+                        }
+                    };
+                    label(&call, 160)?;
+                    xcb_core::bounded_text(&operation, 160)?;
+                    xcb_core::bounded_text(&input_digest, 160)?;
+                    if !matches!(settled, 0 | 1) {
+                        return Err(Error::Conflict("tool status settlement changed"));
+                    }
+                    records.push(StatusEffect {
+                        session,
+                        account,
+                        provider: stored_provider(provider)?,
+                        run,
+                        call,
+                        operation,
+                        input_digest,
+                        settled: settled == 1,
+                    });
+                }
+                records
+            },
+        };
+
+        let snapshot = StatusSnapshot {
+            totals,
+            accounts,
+            sessions,
+            runs,
+            effects,
+        };
+        tx.finish()?;
+        Ok(snapshot)
     }
 
     pub fn unsettled_runs(&self) -> Result<Vec<RunRecord>> {
@@ -5009,6 +5568,128 @@ mod tests {
                 .as_ref(),
             Some(&custody)
         );
+    }
+
+    #[test]
+    fn native_status_fails_closed_on_changed_run_or_tool_record() {
+        let dir = root();
+        let base = xcb_core::canonical(dir.path()).unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Test", 1, None)
+            .unwrap();
+        let session = store
+            .create_session(&account.id, choice(), &base.join("work"), 2)
+            .unwrap();
+        let run = store.prepare_run(&session.id, session.revision, 3).unwrap();
+        let page = StatusPage {
+            limit: 64,
+            offset: 0,
+        };
+
+        let mut forged = run.clone();
+        forged.id = Id::new("r_forged").unwrap();
+        store
+            .db()
+            .unwrap()
+            .execute(
+                "UPDATE runs SET payload=?1 WHERE id=?2",
+                params![serde_json::to_string(&forged).unwrap(), run.id.as_str()],
+            )
+            .unwrap();
+        assert!(
+            store
+                .native_status(&StatusFilter::default(), page, 4)
+                .is_err()
+        );
+
+        store
+            .db()
+            .unwrap()
+            .execute(
+                "UPDATE runs SET payload=?1 WHERE id=?2",
+                params![serde_json::to_string(&run).unwrap(), run.id.as_str()],
+            )
+            .unwrap();
+        store
+            .begin_tool(&run, "call", "operation", "digest")
+            .unwrap();
+        store
+            .db()
+            .unwrap()
+            .execute(
+                "UPDATE tool_effects SET settled=2 WHERE run=?1 AND call='call'",
+                [run.id.as_str()],
+            )
+            .unwrap();
+        assert!(
+            store
+                .native_status(&StatusFilter::default(), page, 4)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn native_status_counts_tool_rows_without_a_parent_run_separately() {
+        let dir = root();
+        let store = Store::open(&xcb_core::canonical(dir.path()).unwrap().join("state")).unwrap();
+        store
+            .db()
+            .unwrap()
+            .execute_batch(
+                "PRAGMA foreign_keys=OFF;
+                INSERT INTO tool_effects(run,call,operation,input_digest,settled)
+                VALUES('r_missing','call','operation','digest',0);
+                PRAGMA foreign_keys=ON;",
+            )
+            .unwrap();
+        let status = store
+            .native_status(
+                &StatusFilter::default(),
+                StatusPage {
+                    limit: 64,
+                    offset: 0,
+                },
+                1,
+            )
+            .unwrap();
+        assert_eq!(status.totals.tool_effects, 1);
+        assert_eq!(status.totals.unlinked_tool_effects, 1);
+        assert_eq!(status.totals.unsettled_effects, 1);
+        assert_eq!(status.effects.matched, 1);
+        assert_eq!(status.effects.records.len(), 1);
+        assert_eq!(status.effects.records[0].session, None);
+        assert_eq!(status.effects.records[0].account, None);
+        assert_eq!(status.effects.records[0].provider, None);
+        assert_eq!(status.effects.records[0].run.as_str(), "r_missing");
+        let unfinished = store
+            .native_status(
+                &StatusFilter {
+                    unsettled_effects: true,
+                    ..StatusFilter::default()
+                },
+                StatusPage {
+                    limit: 64,
+                    offset: 0,
+                },
+                1,
+            )
+            .unwrap();
+        assert_eq!(unfinished.effects.matched, 1);
+        let codex = store
+            .native_status(
+                &StatusFilter {
+                    provider: Some(Provider::Codex),
+                    ..StatusFilter::default()
+                },
+                StatusPage {
+                    limit: 64,
+                    offset: 0,
+                },
+                1,
+            )
+            .unwrap();
+        assert_eq!(codex.effects.matched, 0);
     }
 }
 

@@ -107,6 +107,35 @@ identity, malformed run payloads, invalid tool rows, or an out-of-bounds
 receipt field fail the inspection rather than produce a partially trusted
 result.
 
+`xcb native status` is the bounded fleet view for agents. One deferred local
+read produces account, session, run and tool-effect sections with matched
+counts, returned counts, truncation and an offset `nextCursor`. Historical
+tool rows without a parent run remain returned with `null` run linkage and
+counted as `unlinkedToolEffects`. Exact filters
+cover provider, account, session, session state, held account slots,
+unfinished tool work and pending command custody. `--json` returns the
+versioned envelope; `--jsonl --section <accounts|sessions|runs|effects>`
+emits one typed record per line for `rg`, `awk` and `jq` pipelines. Session
+state uses `--session-state`; the global `--state` option still selects the
+xcb state root.
+
+```sh
+xcb native status --json |
+  jq '.sessions.records[] | select(.effects.unsettled > 0)'
+xcb native status --jsonl --section sessions |
+  rg 'uncertain|limited'
+xcb native status --jsonl --section effects |
+  rg 'workspace_native_exec'
+```
+
+The status projection starts no provider, attaches to none, submits no model
+prompt, and refreshes no credential or quota data. It reports local account
+metadata, session/run custody facts, stored quota observations and method
+coverage. Session titles and transcript-derived prompt text are excluded;
+free-text search is intentionally left to the caller's JSONL tools and is not
+an xcb query language. Missing or malformed custody evidence fails the
+snapshot rather than producing a recovery decision.
+
 ## Codex integration methods
 
 Codex inspection returns the checked executable identity, available

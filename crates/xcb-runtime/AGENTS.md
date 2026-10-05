@@ -50,6 +50,12 @@
   command-custody, capability-process and tool-effect receipts only. It must
   not attach to or start a provider process, and a missing record is never
   evidence that a provider effect completed.
+- `xcb native status` reads one bounded local account/session/run/tool
+  snapshot for exact filters, JSON and JSONL output. It starts or attaches no
+  provider, refreshes no credential or quota data, submits no prompt, and
+  makes no recovery decision. Use `--session-state`; the global `--state`
+  remains the state-root option. Session titles and transcript-derived prompt
+  text stay out of the projection.
 - Claude cooperative interruption is one-shot and only for an active turn.
   It does not replace process-group join, tool-effect settlement or retained
   account custody. Session/MCP/settings mutators require separate host-owned

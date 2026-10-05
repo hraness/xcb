@@ -3,11 +3,14 @@ use crate::{
     config::Config,
     private,
     process::Pin,
-    store::{RunRecord, Store},
+    store::{RunRecord, StatusFilter, StatusPage, StatusSection as StoreStatusSection, Store},
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use xcb_core::{Provider, session::TaskRequirements};
+use xcb_core::{
+    Provider,
+    session::{State, TaskRequirements},
+};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -413,6 +416,270 @@ pub fn status(provider: Provider) -> NativeBackendStatus {
         fallback_permitted: false,
         required_cases: ACCEPTANCE_CASES,
     }
+}
+
+/// Exact selectors for the read-only local status projection. Free-text search
+/// stays outside this contract; consumers can grep the JSONL rendering while
+/// these filters remain the reliable API.
+#[derive(Debug, Clone)]
+pub struct StatusQuery {
+    pub provider: Option<Provider>,
+    pub account: Option<xcb_core::Id>,
+    pub session: Option<xcb_core::Id>,
+    pub state: Option<State>,
+    pub has_lease: bool,
+    pub unsettled_effects: bool,
+    pub pending_command_custody: bool,
+    /// Applies independently to accounts, sessions, runs and tool effects.
+    pub limit: u64,
+    /// Stable offset cursor into each deterministic result order.
+    pub cursor: u64,
+}
+
+impl Default for StatusQuery {
+    fn default() -> Self {
+        Self {
+            provider: None,
+            account: None,
+            session: None,
+            state: None,
+            has_lease: false,
+            unsettled_effects: false,
+            pending_command_custody: false,
+            limit: 64,
+            cursor: 0,
+        }
+    }
+}
+
+fn status_section<T>(
+    section: &StoreStatusSection<T>,
+    render: impl Fn(&T) -> Result<serde_json::Value>,
+) -> Result<serde_json::Value> {
+    let mut records = Vec::with_capacity(section.records.len());
+    for record in &section.records {
+        records.push(render(record)?);
+    }
+    let returned = u64::try_from(records.len())
+        .map_err(|_| xcb_core::Error::Invalid("status record count"))?;
+    let next = section.offset.saturating_add(returned);
+    let truncated = next < section.matched;
+    Ok(serde_json::json!({
+        "matched": section.matched,
+        "cursor": section.offset,
+        "returned": returned,
+        "truncated": truncated,
+        "nextCursor": truncated.then_some(next),
+        "records": records,
+    }))
+}
+
+/// Local records for agent status checks. This projection never starts or
+/// attaches to a provider, submits no prompt, and does not refresh quota or
+/// credentials. It is a bounded snapshot, not a recovery decision.
+pub fn status_snapshot(store: &Store, query: StatusQuery) -> Result<serde_json::Value> {
+    if !(1..=256).contains(&query.limit) {
+        return Err(xcb_core::Error::Invalid("status limit").into());
+    }
+    let now = crate::now_ms();
+    let snapshot = store.native_status(
+        &StatusFilter {
+            provider: query.provider,
+            account: query.account.clone(),
+            session: query.session.clone(),
+            state: query.state,
+            has_lease: query.has_lease,
+            unsettled_effects: query.unsettled_effects,
+            pending_command_custody: query.pending_command_custody,
+        },
+        StatusPage {
+            limit: query.limit,
+            offset: query.cursor,
+        },
+        now,
+    )?;
+    let (config, _) = Config::load(store.root())?;
+    let command_qualified = require_qualification(store.root()).is_ok();
+    let backends: Vec<_> = Provider::SUPPORTED
+        .into_iter()
+        .map(|provider| {
+            let mut status = status(provider);
+            status.qualified = require_provider_qualification(store.root(), provider, false)
+                .is_ok()
+                && Pin::load(store.root(), provider)
+                    .is_ok_and(|pin| crate::runner::provider_admitted(store.root(), &pin));
+            status
+        })
+        .collect();
+    let service = match xcb_core::home_dir() {
+        Some(home) => match crate::habitat_service::status(store.root(), &home) {
+            Ok(status) => serde_json::json!({
+                "available": true,
+                "installed": status.installed,
+                "registered": status.registered,
+                "supervisorRunning": status.supervisor_running,
+                "supervisorHealth": {
+                    "state": status.supervisor_health.state,
+                    "heartbeatAgeSeconds": status.supervisor_health.heartbeat_age_seconds,
+                },
+                "watchdogEnabled": status.watchdog_enabled,
+                "supervisorWatched": status.supervisor_watched,
+                "label": status.service.as_ref().map(|service| &service.label),
+            }),
+            Err(error) => serde_json::json!({
+                "available": false,
+                "diagnostic": xcb_core::display_text(&error.to_string(), 256),
+            }),
+        },
+        None => serde_json::json!({
+            "available": false,
+            "diagnostic": "home directory is unknown",
+        }),
+    };
+    let mut coverage = serde_json::Map::new();
+    for provider in Provider::SUPPORTED {
+        coverage.insert(provider.as_str().to_owned(), method_coverage(provider)?);
+    }
+
+    let accounts = status_section(&snapshot.accounts, |record| {
+        let account = &record.account;
+        Ok(serde_json::json!({
+            "id": &account.id,
+            "provider": account.provider,
+            "name": account.name(),
+            "email": &account.email,
+            "subscription": &account.subscription,
+            "enabled": account.enabled,
+            "authenticationRequired": record.authentication_required,
+            "credentialsPresent": crate::auth::has_credentials(store, &account.id).unwrap_or(false),
+            "busy": record.active_runs > 0,
+            "activeRuns": record.active_runs,
+            "leaseHeld": record.lease_held,
+            "quota": {
+                "remainingPercent": record.remaining_percent,
+                "resetsAtMs": record.resets_at_ms,
+                "blockedUntilMs": record.quota_blocked_until_ms,
+            },
+        }))
+    })?;
+    let sessions = status_section(&snapshot.sessions, |record| {
+        let session = &record.session;
+        Ok(serde_json::json!({
+            "id": &session.id,
+            "provider": session.model.provider,
+            "account": &session.account,
+            "model": &session.model,
+            "workspace": &session.workspace,
+            "state": session.state,
+            "revision": session.revision,
+            "routePins": &session.route_pins,
+            "requirements": &session.requirements,
+            "managedTask": &session.managed_task,
+            "createdAtMs": session.created_at_ms,
+            "lastActiveAtMs": session.last_active_at_ms,
+            "runs": {
+                "count": record.run_count,
+                "unsettled": record.unsettled_run_count,
+            },
+            "effects": {
+                "count": record.effect_count,
+                "unsettled": record.unsettled_effect_count,
+            },
+            "leaseHeld": record.lease_held,
+            "pendingCommandCustody": record.pending_command_custody,
+            "capabilityProcessCount": record.capability_process_count,
+        }))
+    })?;
+    let runs = status_section(&snapshot.runs, |record| {
+        let run = &record.run;
+        Ok(serde_json::json!({
+            "id": &run.id,
+            "session": &run.session,
+            "account": &run.account,
+            "provider": record.provider.or(run.model.as_ref().map(|model| model.provider)),
+            "phase": &run.phase,
+            "revision": run.revision,
+            "createdAtMs": run.created_at_ms,
+            "model": &run.model,
+            "leaseHeld": record.lease_held,
+            "owner": run.owner.as_ref().map(|owner| serde_json::json!({
+                "instance": &owner.instance,
+                "pid": owner.pid,
+                "alive": crate::os::process_exists(owner.pid),
+            })),
+            "processGroup": run.pid,
+            "commandCustody": &run.command_custody,
+            "capabilityProcesses": &run.capability_processes,
+            "effects": {
+                "count": record.effect_count,
+                "unsettled": record.unsettled_effect_count,
+            },
+        }))
+    })?;
+    let effects = status_section(&snapshot.effects, |record| {
+        Ok(serde_json::json!({
+            "session": &record.session,
+            "account": &record.account,
+            "provider": record.provider,
+            "run": &record.run,
+            "call": &record.call,
+            "operation": &record.operation,
+            "inputDigest": &record.input_digest,
+            "settled": record.settled,
+        }))
+    })?;
+
+    Ok(serde_json::json!({
+        "version": 1,
+        "generatedAtMs": now,
+        "inspection": {
+            "localOnly": true,
+            "providerAttached": false,
+            "providerProcessesStarted": 0,
+            "promptSubmitted": false,
+            "resetCreditsConsumed": 0,
+            "snapshot": "one deferred read transaction for local records",
+        },
+        "service": service,
+        "native": {
+            "commandQualified": command_qualified,
+            "backends": backends,
+            "workspaceGrantCount": config.native_execution.scopes.len(),
+            "workspaceGrants": config.native_execution.scopes,
+        },
+        "methodCoverage": serde_json::Value::Object(coverage),
+        "totals": {
+            "accounts": snapshot.totals.accounts,
+            "sessions": snapshot.totals.sessions,
+            "runs": snapshot.totals.runs,
+            "toolEffects": snapshot.totals.tool_effects,
+            "leases": snapshot.totals.leases,
+            "heldAccounts": snapshot.totals.held_accounts,
+            "unsettledRuns": snapshot.totals.unsettled_runs,
+            "unsettledEffects": snapshot.totals.unsettled_effects,
+            "unlinkedToolEffects": snapshot.totals.unlinked_tool_effects,
+            "pendingCommandCustody": snapshot.totals.pending_command_custody,
+        },
+        "filters": {
+            "provider": query.provider,
+            "account": query.account,
+            "session": query.session,
+            "state": query.state,
+            "hasLease": query.has_lease,
+            "unsettledEffects": query.unsettled_effects,
+            "pendingCommandCustody": query.pending_command_custody,
+        },
+        "pagination": {
+            "limit": query.limit,
+            "cursor": query.cursor,
+            "cursorKind": "offset",
+            "stableOrder": true,
+        },
+        "accounts": accounts,
+        "sessions": sessions,
+        "runs": runs,
+        "effects": effects,
+    }))
 }
 
 pub fn inspect_session(store: &Store, id: &xcb_core::Id) -> Result<serde_json::Value> {
@@ -834,6 +1101,246 @@ mod tests {
         assert_eq!(receipt["toolEffects"][0]["settled"], true);
         assert!(receipt["commandCustody"].is_null());
         assert_eq!(receipt["capabilityProcesses"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn native_status_reports_bounded_local_records_and_exact_filters() {
+        use xcb_core::{
+            Id, Provider,
+            models::{Mode, ModelChoice},
+            session::State,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        let workspace = crate::private::directory(&root.join("workspace")).unwrap();
+        let store = Store::open(&root.join("state")).unwrap();
+        let model = |provider: Provider| ModelChoice {
+            provider,
+            id: Id::new(format!("fixture-{provider}")).unwrap(),
+            label: "Fixture".into(),
+            mode: Mode::Fixed,
+            resolved: None,
+            effort: None,
+            observed_at_ms: 1,
+        };
+        let codex = store
+            .add_account(Provider::Codex, "Fixture", 1, None)
+            .unwrap();
+        let claude = store
+            .add_account(Provider::Claude, "Fixture", 1, None)
+            .unwrap();
+        let codex_session = store
+            .create_session(&codex.id, model(Provider::Codex), &workspace, 1)
+            .unwrap();
+        let claude_session = store
+            .create_session(&claude.id, model(Provider::Claude), &workspace, 2)
+            .unwrap();
+        let run = store
+            .prepare_run(&codex_session.id, codex_session.revision, 3)
+            .unwrap();
+        let custody = crate::command::CommandCustody {
+            version: 1,
+            command_id: Id::new("cmd_synthetic").unwrap(),
+            run_id: run.id.clone(),
+            workspace_id: "a".repeat(64),
+            snapshot_sha256: "b".repeat(64),
+            request_sha256: "c".repeat(64),
+            backend_sha256: "d".repeat(64),
+            boot_id: "00000000-0000-0000-0000-000000000001".into(),
+        };
+        store.record_command_custody(&run, &custody).unwrap();
+        store.mark_capability_starting(&run, "browser").unwrap();
+        store
+            .mark_capability_spawned(&run, "browser", i32::MAX as u32)
+            .unwrap();
+        let run = store.run(&run.id).unwrap().unwrap();
+        store
+            .begin_tool(
+                &run,
+                "native-call",
+                "workspace_native_exec",
+                "synthetic-digest",
+            )
+            .unwrap();
+
+        let status = status_snapshot(&store, StatusQuery::default()).unwrap();
+        assert_eq!(status["inspection"]["localOnly"], true);
+        assert_eq!(status["inspection"]["providerAttached"], false);
+        assert_eq!(status["inspection"]["providerProcessesStarted"], 0);
+        assert_eq!(status["inspection"]["promptSubmitted"], false);
+        assert_eq!(status["totals"]["accounts"], 2);
+        assert_eq!(status["totals"]["sessions"], 2);
+        assert_eq!(status["totals"]["runs"], 1);
+        assert_eq!(status["totals"]["toolEffects"], 1);
+        assert_eq!(status["totals"]["leases"], 1);
+        assert_eq!(status["totals"]["unsettledEffects"], 1);
+        assert_eq!(status["totals"]["unlinkedToolEffects"], 0);
+        assert_eq!(status["accounts"]["matched"], 2);
+        assert_eq!(status["sessions"]["matched"], 2);
+        assert_eq!(status["runs"]["matched"], 1);
+        assert_eq!(status["effects"]["matched"], 1);
+        let account = status["accounts"]["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|record| record["id"] == codex.id.as_str())
+            .unwrap();
+        assert_eq!(account["provider"], "codex");
+        assert_eq!(account["leaseHeld"], true);
+        assert_eq!(account["busy"], true);
+        assert_eq!(account["activeRuns"], 1);
+        assert_eq!(account["credentialsPresent"], false);
+        let session = status["sessions"]["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|record| record["id"] == codex_session.id.as_str())
+            .unwrap();
+        assert!(session.get("title").is_none());
+        assert_eq!(session["provider"], "codex");
+        assert_eq!(session["state"], "working");
+        assert_eq!(session["leaseHeld"], true);
+        assert_eq!(session["pendingCommandCustody"], true);
+        assert_eq!(session["capabilityProcessCount"], 1);
+        assert_eq!(session["effects"]["unsettled"], 1);
+        let run_record = &status["runs"]["records"][0];
+        assert_eq!(run_record["id"], run.id.as_str());
+        assert_eq!(run_record["provider"], "codex");
+        assert_eq!(run_record["leaseHeld"], true);
+        assert_eq!(run_record["owner"]["alive"], true);
+        assert_eq!(run_record["commandCustody"]["commandId"], "cmd_synthetic");
+        assert_eq!(run_record["effects"]["unsettled"], 1);
+        let effect = &status["effects"]["records"][0];
+        assert_eq!(effect["session"], codex_session.id.as_str());
+        assert_eq!(effect["run"], run.id.as_str());
+        assert_eq!(effect["settled"], false);
+        let serialized = serde_json::to_string(&status).unwrap();
+        for forbidden in [
+            "providerHome",
+            "provider_home",
+            "credentialSource",
+            "authToken",
+            "accessToken",
+            "refreshToken",
+            "rawPrompt",
+            "agentPrompt",
+            "argv",
+        ] {
+            assert!(!serialized.contains(forbidden), "{forbidden}");
+        }
+
+        let claude_only = status_snapshot(
+            &store,
+            StatusQuery {
+                provider: Some(Provider::Claude),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(claude_only["accounts"]["matched"], 1);
+        assert_eq!(claude_only["sessions"]["matched"], 1);
+        assert_eq!(claude_only["runs"]["matched"], 0);
+        assert_eq!(claude_only["effects"]["matched"], 0);
+
+        let account_only = status_snapshot(
+            &store,
+            StatusQuery {
+                account: Some(codex.id.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(account_only["accounts"]["matched"], 1);
+        assert_eq!(account_only["sessions"]["matched"], 1);
+        assert_eq!(account_only["runs"]["matched"], 1);
+
+        let session_only = status_snapshot(
+            &store,
+            StatusQuery {
+                session: Some(codex_session.id.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(session_only["accounts"]["matched"], 1);
+        assert_eq!(session_only["sessions"]["matched"], 1);
+        assert_eq!(session_only["runs"]["matched"], 1);
+        assert_eq!(session_only["effects"]["matched"], 1);
+
+        let working = status_snapshot(
+            &store,
+            StatusQuery {
+                state: Some(State::Working),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(working["sessions"]["matched"], 1);
+        assert_eq!(working["runs"]["matched"], 1);
+
+        for query in [
+            StatusQuery {
+                has_lease: true,
+                ..Default::default()
+            },
+            StatusQuery {
+                unsettled_effects: true,
+                ..Default::default()
+            },
+            StatusQuery {
+                pending_command_custody: true,
+                ..Default::default()
+            },
+        ] {
+            let status = status_snapshot(&store, query).unwrap();
+            assert_eq!(status["accounts"]["matched"], 1);
+            assert_eq!(status["sessions"]["matched"], 1);
+            assert_eq!(status["runs"]["matched"], 1);
+        }
+
+        let first = status_snapshot(
+            &store,
+            StatusQuery {
+                limit: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(first["sessions"]["matched"], 2);
+        assert_eq!(first["sessions"]["returned"], 1);
+        assert_eq!(first["sessions"]["truncated"], true);
+        assert_eq!(first["sessions"]["nextCursor"], 1);
+        let first_id = first["sessions"]["records"][0]["id"].clone();
+        let second = status_snapshot(
+            &store,
+            StatusQuery {
+                limit: 1,
+                cursor: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second["sessions"]["cursor"], 1);
+        assert_eq!(second["sessions"]["returned"], 1);
+        assert_ne!(second["sessions"]["records"][0]["id"], first_id);
+        assert!(
+            status["sessions"]["records"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|record| record["id"] == claude_session.id.as_str())
+        );
+        assert!(
+            status_snapshot(
+                &store,
+                StatusQuery {
+                    limit: 0,
+                    ..Default::default()
+                },
+            )
+            .is_err()
+        );
     }
 
     #[test]

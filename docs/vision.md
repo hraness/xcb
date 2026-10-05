@@ -236,8 +236,11 @@ Codex wire schema and all 29 pinned Claude SDK Query methods. Claude can
 request summary-only context and redacted MCP status for its metadata
 connection; this is not inspection of an active coding task. Codex metadata
 inspection creates no thread, submits no prompt, and consumes no reset
-credit. Offline tests check method drift and refusal before execution;
-method accounting does not establish exhaustive live acceptance. Session,
+credit. `xcb native status` adds a bounded local account/session/run/tool
+projection with exact filters, versioned JSON, JSONL records and cursors,
+while excluding transcript-derived titles and prompt text. Offline tests
+check method drift and refusal before execution; method accounting does not
+establish exhaustive live acceptance. Session,
 MCP, settings, and rewind controls retain separate scope, inventory, and
 recovery gates. These additions do not qualify Claude
 while subscription usage is exhausted or replace the validated live daemon.
