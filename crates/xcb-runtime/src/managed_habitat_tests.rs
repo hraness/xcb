@@ -881,6 +881,13 @@ async fn worker_in_a_cannot_get_update_complete_or_search_memory_of_b() {
             .iter()
             .all(|task| task["workspace"] == json!(text(&a)))
     );
+    // A provider may ignore the advertised schema bound. The worker clamps
+    // the request and keeps the unattended turn alive instead of returning a
+    // harmless validation error.
+    let oversized = call("xcb_backlog_list", json!({"limit": 1_000_000}))
+        .await
+        .unwrap();
+    assert!(oversized["tasks"].as_array().unwrap().len() <= 64);
     let done_b = f
         .managed
         .enqueue_backlog_at(

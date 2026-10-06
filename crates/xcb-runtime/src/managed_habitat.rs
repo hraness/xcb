@@ -1715,11 +1715,12 @@ impl ManagedStore {
             let result = (|| {
                 let page: Page = serde_json::from_value(input.clone())?;
                 if name == "xcb_backlog_list" {
-                    if !(1..=64).contains(&page.limit) {
-                        return Err(xcb_core::Error::Invalid("backlog limit").into());
-                    }
+                    // Providers occasionally ignore the JSON schema upper bound. Keep
+                    // this inspection bounded and fail soft instead of stranding an
+                    // unattended turn on a harmless backlog request.
+                    let limit = page.limit.clamp(1, 64);
                     Ok(
-                        json!({"conversation":source.conversation,"workspace":source.workspace,"tasks":self.backlog_in(&source.workspace,page.limit)?.iter().map(compact_task).collect::<Vec<_>>()}),
+                        json!({"conversation":source.conversation,"workspace":source.workspace,"tasks":self.backlog_in(&source.workspace,limit)?.iter().map(compact_task).collect::<Vec<_>>()}),
                     )
                 } else {
                     Ok(
