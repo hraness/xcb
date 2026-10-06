@@ -10,6 +10,14 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.19.5 - 2026-10-06
+
+xcb keeps Codex-backed unattended herds moving when display-only protocol updates arrive during initialization or after a managed turn.
+
+- Accept bounded, thread- and turn-bound display observations across the provider turn lifecycle without treating timing as a fatal protocol error.
+- Keep native execution, filesystem changes, reroutes, authentication recovery, and provider process events fail-closed.
+- Add regression coverage for pre-turn and post-turn informational notifications.
+
 ## 0.19.4 - 2026-10-06
 
 xcb keeps Codex-backed unattended herds moving when display-only protocol updates arrive during a managed turn.
