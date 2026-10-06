@@ -695,6 +695,35 @@ fn known_display_notifications_do_not_strand_an_admitted_turn() {
 }
 
 #[test]
+fn known_display_notifications_are_tolerated_across_turn_lifecycle() {
+    // Display-only notices may arrive while initialization is settling or
+    // after the turn has completed. They cannot create tools, change
+    // authority, or complete a turn, so lifecycle timing alone must not
+    // strand an otherwise valid provider session.
+    let mut before_turn = codec();
+    for method in ["warning", "thread/name/updated", "model/verification"] {
+        let (events, replies) = before_turn
+            .accept(json!({"method":method,"params":{"opaque":"display-only"}}))
+            .unwrap();
+        assert!(events.is_empty() && replies.is_empty(), "{method}");
+    }
+
+    let mut after_turn = started();
+    after_turn.completed = true;
+    let (events, replies) = after_turn
+        .accept(json!({"method":"warning","params":{"threadId":"thread1","turnId":"turn1"}}))
+        .unwrap();
+    assert!(events.is_empty() && replies.is_empty());
+
+    let mut foreign = started();
+    assert!(
+        foreign
+            .accept(json!({"method":"warning","params":{"threadId":"foreign","turnId":"turn1"}}))
+            .is_err()
+    );
+}
+
+#[test]
 fn execution_and_authority_notifications_remain_fail_closed() {
     for method in [
         "item/commandExecution/outputDelta",
