@@ -2113,6 +2113,11 @@ mod tests {
             run("sleep 5", 1024, 100).await,
             CommandOutcome::Interrupted
         ));
+        let missing = Command::new("/nonexistent/xcb-command");
+        match capture_command(missing, 1024, Duration::from_secs(1), cancel, |_| Ok(())).await {
+            CommandOutcome::NeverStarted(Error::LaunchNotStarted(_)) => (),
+            _ => panic!("a command that cannot start must say so"),
+        }
     }
 
     #[tokio::test]
