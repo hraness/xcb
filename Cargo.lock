@@ -3199,7 +3199,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "xcb-cli"
-version = "0.19.4"
+version = "0.19.5"
 dependencies = [
  "clap",
  "clap_complete",
@@ -3217,7 +3217,7 @@ dependencies = [
 
 [[package]]
 name = "xcb-core"
-version = "0.19.4"
+version = "0.19.5"
 dependencies = [
  "proptest",
  "serde",
@@ -3228,7 +3228,7 @@ dependencies = [
 
 [[package]]
 name = "xcb-platform"
-version = "0.19.4"
+version = "0.19.5"
 dependencies = [
  "tempfile",
  "windows-sys 0.61.2",
@@ -3236,7 +3236,7 @@ dependencies = [
 
 [[package]]
 name = "xcb-runtime"
-version = "0.19.4"
+version = "0.19.5"
 dependencies = [
  "aes-gcm",
  "aicharts-core",
