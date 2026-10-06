@@ -4263,6 +4263,21 @@ impl ManagedStore {
                 }
             }
         }
+        // Release runs a dead owner left holding custody, on the same proof
+        // `xcb recover --yes` requires: owner, provider and tool groups gone,
+        // no command custody and no unsettled credential receipt. Uncertain
+        // receipts stay recorded. Any refusal keeps the run held as before.
+        for run in &unsettled {
+            if run.command_custody.is_some()
+                || run.verify_recovery_stop().is_err()
+                || !matches!(store.has_pending_credential_receipts(&run.id), Ok(false))
+            {
+                continue;
+            }
+            if let Ok(Some((_, digest))) = store.recovery_candidate(&run.id) {
+                let _ = store.recover_run(&run.id, &digest, now_ms());
+            }
+        }
         // Sweep orphan native sessions: sessions the managed harness created
         // (proven by the atomic `managed_task` marker) that never reached
         // `prepare` because the supervisor died or preparation failed. A
@@ -8650,6 +8665,71 @@ mod tests {
         assert_eq!(task.state, TaskState::Uncertain);
         assert!(task.detail.contains("explicit recovery"));
         assert_eq!(xcb.unsettled_runs().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn startup_releases_a_dead_owners_run_but_keeps_its_task_uncertain() {
+        use xcb_core::models::{Mode, ModelChoice};
+        let state_root = root();
+        let workspace_root = root();
+        let state = private::directory(
+            &xcb_core::canonical(state_root.path())
+                .unwrap()
+                .join("state"),
+        )
+        .unwrap();
+        let workspace = xcb_core::canonical(workspace_root.path()).unwrap();
+        let managed = ManagedStore::open(&state).unwrap();
+        let xcb = Store::open(&state).unwrap();
+        let account = xcb
+            .add_account(Provider::Claude, "Max", now_ms(), None)
+            .unwrap();
+        let model = ModelChoice {
+            provider: Provider::Claude,
+            id: Id::new("sonnet").unwrap(),
+            label: "Sonnet".into(),
+            mode: Mode::Fixed,
+            resolved: None,
+            effort: Some(Id::new("high").unwrap()),
+            observed_at_ms: now_ms(),
+        };
+        xcb.set_models(Provider::Claude, std::slice::from_ref(&model))
+            .unwrap();
+        let session = xcb
+            .create_session(&account.id, model, &workspace, now_ms())
+            .unwrap();
+        let chat = conversation(&managed, &workspace).await;
+        let task = managed
+            .create_task(
+                &chat,
+                message("m_stale"),
+                "do work".into(),
+                vec![],
+                &workspace,
+            )
+            .await
+            .unwrap();
+        let mut uncertain = task.clone();
+        uncertain.session = Some(session.id.clone());
+        uncertain.state = TaskState::Uncertain;
+        uncertain.detail = "worker settlement is uncertain; no retry will be launched".into();
+        uncertain.revision += 1;
+        uncertain.updated_at_ms = now_ms();
+        managed.transition(&task, uncertain, None).await.unwrap();
+        let prepared = xcb
+            .prepare_run(&session.id, session.revision, now_ms())
+            .unwrap();
+        // Neither the owner nor the provider group (i32::MAX) exists.
+        xcb.orphan_run_for_test(&xcb.mark_spawned(&prepared, i32::MAX as u32).unwrap());
+        assert!(workspace_busy(&xcb, workspace.to_str().unwrap()).unwrap());
+
+        managed.reconcile_startup(&xcb).await.unwrap();
+        assert!(xcb.unsettled_runs().unwrap().is_empty());
+        assert!(!workspace_busy(&xcb, workspace.to_str().unwrap()).unwrap());
+        assert_eq!(
+            managed.task(&task.id).unwrap().unwrap().state,
+            TaskState::Uncertain
+        );
     }
 
     #[tokio::test]

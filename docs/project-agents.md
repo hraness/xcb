@@ -30,7 +30,14 @@ xcb backlog complete <deferred-task-id> "Already covered by the passing parser t
 xcb attention
 xcb backlog reply <task-id> "Use the existing project conventions"
 xcb backlog reconcile <uncertain-task-id> --revision 4
+xcb backlog dismiss <uncertain-task-id> --revision 4
 ```
+
+`backlog reconcile` closes uncertain work only when xcb kept proof of how it
+ended. When there is no proof, check the project yourself, then
+`backlog dismiss` the task: it is marked failed, nothing is retried, and the
+project's schedules can start again. Dismissal waits until the task's worker
+has stopped.
 
 `xcb backlog --workspace <dir>` lists work in that directory from every
 conversation; `--conversation <conversation-id>` filters by one

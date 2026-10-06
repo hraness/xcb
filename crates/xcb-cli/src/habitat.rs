@@ -76,6 +76,14 @@ pub enum BacklogCommand {
         #[arg(long)]
         revision: u64,
     },
+    /// Close uncertain work you have checked yourself; it fails without a retry.
+    Dismiss {
+        /// Uncertain task from `xcb attention`.
+        id: Id,
+        /// Current task revision; a stale dismissal is rejected.
+        #[arg(long)]
+        revision: u64,
+    },
     /// Hold work for later; --ready releases it immediately.
     Add {
         /// Conversation id from `xcb conversations`, or a project directory or
@@ -1054,6 +1062,11 @@ pub async fn backlog(
             let task = store.reconcile_uncertain(&runs, &id, revision).await?;
             runnable = true;
             task
+        }
+        Some(BacklogCommand::Dismiss { id, revision }) => {
+            let id = store.resolve_task(&id)?;
+            let runs = xcb_runtime::store::Store::open(root)?;
+            store.dismiss_uncertain(&runs, &id, revision).await?
         }
         None => {
             let tasks = match workspace {

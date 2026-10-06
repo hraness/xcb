@@ -10,6 +10,16 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.19.7 - 2026-10-06
+
+xcb keeps unattended workers moving when a native command fails or a worker ends with an uncertain result.
+
+- Return a native command's exit status, output and error output when it fails, instead of marking the task uncertain. Only a timeout, cancellation or unconfirmed process exit is still treated as uncertain.
+- Clip long native command output instead of discarding it.
+- Release the account and project as soon as an uncertain worker's processes have exited. The task stays uncertain and is not retried.
+- At startup, release runs left behind by a stopped xcb process, using the same checks as `xcb recover --yes`.
+- Add `xcb backlog dismiss` to close uncertain work you have checked yourself. It is marked failed and is not retried, so it no longer stops the project's schedules.
+
 ## 0.19.6 - 2026-10-06
 
 xcb keeps unattended herds moving when provider tool calls exceed their declared bounds.

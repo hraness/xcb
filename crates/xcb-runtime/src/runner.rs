@@ -3665,6 +3665,17 @@ pub(crate) async fn run_prepared<P: Protocol>(
                 now_ms(),
             )?;
             launch.artifacts.release_after_join(joined, effects);
+        } else if joined && !store.has_pending_credential_receipts(&run.id)? {
+            // Every provider, tool and command group is proven joined, so the
+            // account and workspace turn are free. The uncertain receipts stay
+            // unsettled and the session uncertain, with no outcome to replay.
+            // A refused release keeps the hold for explicit recovery.
+            if let Err(error) = store.settle(&run, State::Uncertain, now_ms()) {
+                observer(Progress::Notice(format!(
+                    "uncertain run kept its account hold: {}",
+                    Diagnostic::from_error(&error).as_str()
+                )));
+            }
         }
     }
     Ok(outcome)

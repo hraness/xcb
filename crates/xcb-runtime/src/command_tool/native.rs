@@ -212,7 +212,7 @@ async fn prepare_and_execute(
             return Err(error);
         }
     };
-    let outcome = process::capture_supervised(
+    let outcome = process::capture_command(
         command,
         32 * 1024,
         Duration::from_millis(u64::from(request.timeout_ms)),
@@ -221,34 +221,40 @@ async fn prepare_and_execute(
     )
     .await;
     let (output, effects, joined) = match outcome {
-        process::CaptureOutcome::NeverStarted(_) => (
-            Err(Error::Unavailable("native command did not start")),
-            EffectState::None,
-            true,
-        ),
-        process::CaptureOutcome::Joined(Ok(bytes)) if !*cancel.borrow() => {
-            let text = zeroize::Zeroizing::new(String::from_utf8_lossy(&bytes).into_owned());
-            let text = if token.is_empty() {
-                text.to_string()
-            } else {
-                text.replace(token.as_str(), "[credential redacted]")
+        process::CommandOutcome::NeverStarted(error) => (Err(error), EffectState::None, true),
+        // A command that ran to its own exit has a known result whatever its
+        // status: return it so the worker can read the failure and continue.
+        process::CommandOutcome::Exited {
+            code,
+            stdout,
+            stderr,
+            truncated,
+        } if !*cancel.borrow() => {
+            let redact = |bytes: &[u8]| {
+                let text = zeroize::Zeroizing::new(String::from_utf8_lossy(bytes).into_owned());
+                let text = if token.is_empty() {
+                    text.to_string()
+                } else {
+                    text.replace(token.as_str(), "[credential redacted]")
+                };
+                xcb_core::display_text(&text, 16384)
             };
             (
                 Ok(
-                    json!({"stdout":xcb_core::display_text(&text,16384),"exitCode":0,"network":"https","joined":true,"published":true,"sandbox":"native-workspace"}),
+                    json!({"stdout":redact(&stdout),"stderr":redact(&stderr),"exitCode":code,"truncated":truncated,"network":"https","joined":true,"published":true,"sandbox":"native-workspace"}),
                 ),
                 EffectState::Settled,
                 true,
             )
         }
-        process::CaptureOutcome::Joined(_) => (
+        process::CommandOutcome::Exited { .. } | process::CommandOutcome::Interrupted => (
             Err(Error::Unavailable(
-                "native command failed, timed out or was cancelled; reconcile effects before retrying",
+                "native command timed out or was cancelled; reconcile effects before retrying",
             )),
             EffectState::Uncertain,
             true,
         ),
-        process::CaptureOutcome::Unproven => {
+        process::CommandOutcome::Unproven => {
             (Err(Error::CleanupUnproven), EffectState::Uncertain, false)
         }
     };
