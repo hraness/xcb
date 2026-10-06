@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.19.3 - 2026-10-06
+
+xcb keeps unattended herds moving when host pressure or verbose worker reports would otherwise strand them.
+
+- Use a throughput-oriented disk reserve and reclaim only proven disposable caches and stale browser code-sign clones.
+- Compact oversized managed-worker handoffs while retaining the exact child report receipt and digest.
+- Harden unattended maintenance and recovery evidence without weakening custody or approval gates.
+
+
 Release notes for the `v<version>` tag channel. Published GitHub Release
 assets, not this file, are the evidence that a version shipped; see
 [docs/publishing.md](docs/publishing.md).
