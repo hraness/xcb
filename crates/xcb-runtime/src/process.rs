@@ -1805,6 +1805,7 @@ pub(crate) async fn capture_supervised_interactive_diagnosed(
     CaptureOutcome::Joined(result)
 }
 
+#[cfg(any(target_os = "macos", all(test, unix)))]
 /// One worker command's outcome. `Exited` means the command ran to its own
 /// exit (any status), both streams reached EOF and the group is proven
 /// absent: the result is known, not interrupted. No Debug or Serialize:
@@ -1823,6 +1824,7 @@ pub(crate) enum CommandOutcome {
     Unproven,
 }
 
+#[cfg(any(target_os = "macos", all(test, unix)))]
 /// Retain the first `max` bytes and keep draining, so a long listing is
 /// clipped instead of turning a finished command into an interrupted one.
 async fn read_clipped(
@@ -1843,6 +1845,7 @@ async fn read_clipped(
     }
 }
 
+#[cfg(any(target_os = "macos", all(test, unix)))]
 /// Capture one worker command under caller-owned durable custody, keeping
 /// stdout, stderr and the exit status. `started` runs immediately after spawn.
 pub(crate) async fn capture_command(
