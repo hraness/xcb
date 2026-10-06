@@ -54,6 +54,15 @@ fn disabled_policy_does_not_change_existing_admission() {
 }
 
 #[test]
+fn default_policy_keeps_a_throughput_reserve() {
+    let policy = ResourcePolicy::default();
+    assert_eq!(policy.warn_disk_bytes, 24 * 1024 * 1024 * 1024);
+    assert_eq!(policy.pause_disk_bytes, 8 * 1024 * 1024 * 1024);
+    assert_eq!(policy.resume_disk_bytes, 12 * 1024 * 1024 * 1024);
+    assert!(policy.validate().is_ok());
+}
+
+#[test]
 fn policy_requires_ordered_thresholds_and_bounded_cadence() {
     assert!(policy().validate().is_ok());
     let mut invalid = policy();
@@ -74,7 +83,7 @@ fn policy_requires_ordered_thresholds_and_bounded_cadence() {
 #[test]
 fn disk_pauses_immediately_at_boundary_and_recovers_after_three_distinct_samples() {
     let mut monitor = Monitor::new();
-    assert!(assess(&mut monitor, 1_000, MemoryPressure::Normal, 24 * GIB).blocked);
+    assert!(assess(&mut monitor, 1_000, MemoryPressure::Normal, 8 * GIB).blocked);
     assert!(assess(&mut monitor, 31_000, MemoryPressure::Normal, 40 * GIB).blocked);
     for _ in 0..30 {
         assert!(
@@ -93,12 +102,12 @@ fn disk_must_recover_above_resume_not_at_boundary() {
     let mut monitor = Monitor::new();
     assert!(assess(&mut monitor, 1_000, MemoryPressure::Normal, GIB).blocked);
     for at in [31_000, 61_000, 91_000] {
-        assert!(assess(&mut monitor, at, MemoryPressure::Normal, 32 * GIB).blocked);
+        assert!(assess(&mut monitor, at, MemoryPressure::Normal, 12 * GIB).blocked);
     }
     assert!(assess(&mut monitor, 121_000, MemoryPressure::Normal, 40 * GIB).blocked);
     assert!(assess(&mut monitor, 151_000, MemoryPressure::Normal, 30 * GIB).blocked);
-    assert!(assess(&mut monitor, 181_000, MemoryPressure::Normal, 40 * GIB).blocked);
-    assert!(assess(&mut monitor, 211_000, MemoryPressure::Normal, 40 * GIB).blocked);
+    assert!(!assess(&mut monitor, 181_000, MemoryPressure::Normal, 40 * GIB).blocked);
+    assert!(!assess(&mut monitor, 211_000, MemoryPressure::Normal, 40 * GIB).blocked);
     assert!(!assess(&mut monitor, 241_000, MemoryPressure::Normal, 40 * GIB).blocked);
 }
 
@@ -246,7 +255,7 @@ fn rotated_workspace_keeps_conservative_recovery_without_unbounded_path_history(
     );
     assert!(assess(&mut monitor, 61_000, MemoryPressure::Normal, 28 * GIB).blocked);
     assert!(assess(&mut monitor, 91_000, MemoryPressure::Normal, 40 * GIB).blocked);
-    assert!(assess(&mut monitor, 121_000, MemoryPressure::Normal, 40 * GIB).blocked);
+    assert!(!assess(&mut monitor, 121_000, MemoryPressure::Normal, 40 * GIB).blocked);
     assert!(!assess(&mut monitor, 151_000, MemoryPressure::Normal, 40 * GIB).blocked);
     assert_eq!(monitor.disks.len(), 3);
 }

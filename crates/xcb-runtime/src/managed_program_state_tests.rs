@@ -1033,7 +1033,7 @@ async fn admission_rejects_overlapping_controllers_but_preserves_deferred_work()
 }
 
 #[tokio::test]
-async fn complete_oversized_child_reports_stop_without_truncation_and_do_not_block_cancel() {
+async fn complete_oversized_child_reports_are_compacted_without_stranding_the_parent() {
     for cancel in [false, true] {
         let f = fixture().await;
         let (parent, child) = waiting(&f, 1).await;
@@ -1047,17 +1047,17 @@ async fn complete_oversized_child_reports_stop_without_truncation_and_do_not_blo
             f.managed.transition(&parent, next, None).await.unwrap();
         }
         f.managed.tick_programs(&f.store, true).await.unwrap();
+        f.managed.tick_programs(&f.store, true).await.unwrap();
         let terminal = f.managed.task(&parent.id).unwrap().unwrap();
-        assert_eq!(
-            terminal.state,
-            if cancel {
-                TaskState::Cancelled
-            } else {
-                TaskState::Failed
-            }
-        );
-        if !cancel {
-            assert!(terminal.detail.contains("report exceeds"));
+        if cancel {
+            assert_eq!(terminal.state, TaskState::Cancelled);
+        } else {
+            // The compacted report is a durable continuation input. The
+            // supervisor dispatches this queued resume on its next tick.
+            assert_eq!(terminal.state, TaskState::Queued);
+            assert!(!terminal.program_waiting);
+            assert!(terminal.detail.contains("resuming pinned ALGAL program"));
+            assert!(!terminal.next_prompt.is_empty());
         }
         let recorded = f.managed.task(&child.id).unwrap().unwrap();
         assert!(recorded.last_output.as_ref().unwrap().len() <= MAX_SUMMARY_BYTES);
@@ -1072,13 +1072,11 @@ async fn complete_oversized_child_reports_stop_without_truncation_and_do_not_blo
                 .text,
             report
         );
-        assert!(
-            read_execution(&f.managed.db().unwrap(), &parent.id)
-                .unwrap()
-                .unwrap()
-                .response
-                .is_none()
-        );
+        let response = read_execution(&f.managed.db().unwrap(), &parent.id)
+            .unwrap()
+            .unwrap()
+            .response;
+        assert_eq!(response.is_some(), !cancel);
     }
 }
 
@@ -1225,8 +1223,10 @@ async fn escaped_child_report_uses_encoding_bound_without_clipping_or_stalling()
     settle_child(&f, &child, &report).await;
     f.managed.tick_programs(&f.store, true).await.unwrap();
     let stopped = f.managed.task(&parent.id).unwrap().unwrap();
-    assert_eq!(stopped.state, TaskState::Failed);
-    assert!(stopped.detail.contains("report exceeds"));
+    assert_eq!(stopped.state, TaskState::Queued);
+    assert!(!stopped.program_waiting);
+    assert!(stopped.detail.contains("resuming pinned ALGAL program"));
+    assert!(!stopped.next_prompt.is_empty());
     assert_eq!(
         f.managed
             .task(&child.id)
@@ -1241,7 +1241,7 @@ async fn escaped_child_report_uses_encoding_bound_without_clipping_or_stalling()
             .unwrap()
             .unwrap()
             .response
-            .is_none()
+            .is_some()
     );
 }
 

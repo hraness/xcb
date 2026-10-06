@@ -46,7 +46,8 @@ class MaintenanceTests(unittest.TestCase):
                        "model": "gpt-6.1-sol", "reasoning": "high", "reviews_enabled": True,
                        "review_interval_s": 3600, "incident_cooldown_s": 1800, "deadline_s": 600,
                        "max_reviews_day": 36, "disk_warning_bytes": 60 * m.GIB,
-                       "disk_critical_bytes": 20 * m.GIB}
+                       "disk_critical_bytes": 20 * m.GIB, "cleanup_enabled": True,
+                       "cleanup_trigger_bytes": 24 * m.GIB, "cleanup_target_bytes": 36 * m.GIB}
 
     def tearDown(self):
         self.temp.cleanup()
@@ -405,7 +406,38 @@ class MaintenanceTests(unittest.TestCase):
             m.main(["rebind", "--config", str(config_path)])
         self.assertFalse(m.config_read(config_path)["reviews_enabled"])
         self.assertEqual(m.load(state_path / "reviews.json", None)["pending"], pending)
-        self.assertEqual(len(list(self.root.glob("*.plist"))), 2)
+        self.assertEqual(len(list(self.root.glob("*.plist"))), 3)
+
+    def test_cleanup_removes_only_old_exact_cache_when_lsof_proves_idle(self):
+        cache = self.root / ".bun/install/cache"
+        cache.mkdir(parents=True)
+        payload = cache / "artifact.tgz"
+        payload.write_bytes(b"reproducible")
+        old = 10000 - m.CLEANUP_MIN_AGE_S - 1
+        os.utime(cache, (old, old))
+        os.utime(payload, (old, old))
+        with patch.object(m, "_directory_free_bytes", side_effect=[10 * m.GIB, 40 * m.GIB, 40 * m.GIB]), \
+             patch.object(m, "_lsof_clear", return_value=True):
+            result = m.cleanup_tick(self.config, 10000)
+        self.assertEqual(result["cleanup"], "completed")
+        self.assertFalse(cache.exists())
+        self.assertGreater(result["removed_bytes"], 0)
+
+    def test_cleanup_refuses_recent_or_open_cache(self):
+        cache = self.root / ".cache/ms-playwright"
+        cache.mkdir(parents=True)
+        (cache / "profile").write_bytes(b"keep")
+        with patch.object(m, "_directory_free_bytes", side_effect=[10 * m.GIB, 10 * m.GIB, 10 * m.GIB]), \
+             patch.object(m, "_lsof_clear", return_value=False):
+            result = m.cleanup_tick(self.config, 10000)
+        self.assertEqual(result["cleanup"], "completed")
+        self.assertTrue(cache.exists())
+        self.assertIn(result["results"][0]["outcome"], ("too_new", "in_use_or_unverifiable"))
+
+    def test_cleanup_plist_is_bounded_and_installed_separately(self):
+        plist = m.launchd(self.root / "config.json", self.config, "cleanup")
+        self.assertEqual(plist["StartInterval"], m.CLEANUP_INTERVAL_S)
+        self.assertEqual(plist["ProgramArguments"][2], "cleanup")
 
     def test_command_timeout_signals_only_its_synthetic_child_group(self):
         class Stream:
