@@ -68,7 +68,11 @@ fn status(provider: Provider, direction: &str, method: &str) -> &'static str {
                 _ => "rejected",
             },
             "ServerNotification" => match method {
-                "account/updated"
+                "app/list/updated"
+                | "configWarning"
+                | "deprecationNotice"
+                | "guardianWarning"
+                | "account/updated"
                 | "account/rateLimits/updated"
                 | "error"
                 | "remoteControl/status/changed"
@@ -78,6 +82,7 @@ fn status(provider: Provider, direction: &str, method: &str) -> &'static str {
                 | "thread/tokenUsage/updated"
                 | "turn/started"
                 | "turn/completed"
+                | "turn/plan/updated"
                 | "item/started"
                 | "item/completed"
                 | "item/agentMessage/delta"
@@ -87,10 +92,41 @@ fn status(provider: Provider, direction: &str, method: &str) -> &'static str {
                 | "item/autoApprovalReview/started"
                 | "item/autoApprovalReview/completed"
                 | "item/mcpToolCall/progress"
+                | "item/plan/delta"
+                | "model/safetyBuffering/updated"
+                | "model/verification"
+                | "project/changed"
+                | "skills/changed"
+                | "thread/archived"
+                | "thread/attachment/updated"
+                | "thread/closed"
+                | "thread/compacted"
+                | "thread/environment/connected"
+                | "thread/environment/disconnected"
+                | "thread/goal/cleared"
+                | "thread/goal/updated"
+                | "thread/name/updated"
+                | "thread/project/updated"
+                | "thread/queue/changed"
+                | "turn/moderationMetadata"
+                | "warning"
                 | "mcpServer/startupStatus/updated" => "validatedObservation",
-                _ if ["model/", "account/", "item/", "turn/"]
-                    .iter()
-                    .any(|prefix| method.starts_with(prefix)) =>
+                _ if [
+                    "model/",
+                    "modelProvider/",
+                    "account/",
+                    "item/",
+                    "turn/",
+                    "command/",
+                    "process/",
+                    "fs/",
+                    "hook/",
+                    "mcpServer/",
+                    "serverRequest/",
+                    "externalAgentConfig/",
+                ]
+                .iter()
+                .any(|prefix| method.starts_with(prefix)) =>
                 {
                     "rejected"
                 }

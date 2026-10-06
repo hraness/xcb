@@ -1,14 +1,5 @@
 # Changelog
 
-## 0.19.3 - 2026-10-06
-
-xcb keeps unattended herds moving when host pressure or verbose worker reports would otherwise strand them.
-
-- Use a throughput-oriented disk reserve and reclaim only proven disposable caches and stale browser code-sign clones.
-- Compact oversized managed-worker handoffs while retaining the exact child report receipt and digest.
-- Harden unattended maintenance and recovery evidence without weakening custody or approval gates.
-
-
 Release notes for the `v<version>` tag channel. Published GitHub Release
 assets, not this file, are the evidence that a version shipped; see
 [docs/publishing.md](docs/publishing.md).
@@ -18,6 +9,22 @@ holds a summary paragraph followed by a bulleted list of changes. The release
 workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
+
+## 0.19.4 - 2026-10-06
+
+xcb keeps Codex-backed unattended herds moving when display-only protocol updates arrive during a managed turn.
+
+- Accept bounded, thread-bound plan and lifecycle observations without treating them as executable authority.
+- Keep native execution, filesystem changes, reroutes, authentication recovery, and provider process events fail-closed.
+- Restore a publishable changelog section so the verified release workflow can complete.
+
+## 0.19.3 - 2026-10-06
+
+xcb keeps unattended herds moving when host pressure or verbose worker reports would otherwise strand them.
+
+- Use a throughput-oriented disk reserve and reclaim only proven disposable caches and stale browser code-sign clones.
+- Compact oversized managed-worker handoffs while retaining the exact child report receipt and digest.
+- Harden unattended maintenance and recovery evidence without weakening custody or approval gates.
 
 ## 0.19.2 - 2026-10-05
 
