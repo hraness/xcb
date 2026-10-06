@@ -1426,6 +1426,34 @@ impl ManagedStore {
         next.updated_at_ms = now_ms().max(task.updated_at_ms);
         self.transition(task, next, None).await
     }
+    /// Program inputs have a bounded resume envelope, while the complete
+    /// provider report remains in the child session receipt. Compact only the
+    /// VM handoff so an enthusiastic worker cannot strand its parent.
+    fn resume_summary(summary: &str) -> String {
+        let fits = summary.len() <= MAX_SUMMARY_BYTES
+            && algal::canonical::canonical(&json!(summary))
+                .is_ok_and(|encoded| encoded.len() <= 16_384);
+        if fits {
+            return summary.to_owned();
+        }
+        let marker = format!(
+            "\n[child report compacted; full report digest sha256:{}]\n",
+            digest(summary.as_bytes())
+        );
+        let budget = MAX_SUMMARY_BYTES.saturating_sub(marker.len());
+        let head_budget = budget / 2;
+        let tail_budget = budget.saturating_sub(head_budget);
+        let head = xcb_core::display_text(summary, head_budget);
+        let mut tail = String::new();
+        for ch in summary.chars().rev() {
+            if tail.len() + ch.len_utf8() > tail_budget {
+                break;
+            }
+            tail.insert(0, ch);
+        }
+        format!("{head}{marker}{tail}")
+    }
+
     pub(super) fn child_settlement(
         &self,
         store: &Store,
@@ -1470,14 +1498,14 @@ impl ManagedStore {
         if !retained {
             return Err(Error::Conflict("program child receipt missing"));
         }
-        // Preserve the complete report. Provenance and status live alongside
-        // it in the indexed call receipt; never acknowledge clipped content.
-        // ManagedTask.last_output is a bounded display projection. The exact
-        // terminal outcome is the source for VM resumption and size admission.
-        let summary = outcome.as_ref().map_or_else(
+        // Preserve the complete report in the child session receipt. The VM
+        // receives only the bounded handoff above, with a digest marker, so a
+        // verbose worker cannot strand its parent on a size limit.
+        let full_summary = outcome.as_ref().map_or_else(
             || child.work_summary().to_owned(),
             |outcome| outcome.text.clone(),
         );
+        let summary = Self::resume_summary(&full_summary);
         let outcome_digest = outcome
             .as_ref()
             .map(|outcome| serde_json::to_string(outcome).map(digest))

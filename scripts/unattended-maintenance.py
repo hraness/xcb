@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded host sampling and opt-in Codex maintenance; no destructive janitor code."""
+"""Bounded host sampling, safe cache reclamation, and opt-in Codex maintenance."""
 import argparse
 import contextlib
 import fcntl
@@ -11,6 +11,7 @@ import plistlib
 import pwd
 import re
 import selectors
+import shutil
 import signal
 import stat
 import subprocess
@@ -31,6 +32,18 @@ PINNED_TOOLS = ("xcb", "codex", "scheduler", "skill", "python", "script", "bun")
 REVIEW_TOOLS = ("codex", "scheduler", "skill", "bun")
 TOOL_SCOPES = {"all": PINNED_TOOLS, "monitor": ("python", "script", "xcb"),
                "heartbeat": ("python", "script")}
+CLEANUP_INTERVAL_S = 300
+CLEANUP_MIN_AGE_S = 600
+CLEANUP_MAX_CANDIDATES = 64
+CACHE_RELATIVE_PATHS = (
+    ".bun/install/cache",
+    ".cache/ms-playwright",
+    "Library/Caches/ms-playwright",
+    "Library/Caches/com.microsoft.Playwright",
+    "Library/Caches/node-gyp",
+    "Library/Caches/Homebrew",
+    "Library/Caches/pip",
+)
 
 
 def require(condition, message):
@@ -203,6 +216,13 @@ def config_read(path, verify=True, check_heartbeat=True, tool_scope="all"):
                               ("disk_critical_bytes", GIB, 1024 * GIB)):
         require(numeric(config.get(key)) and lower <= config[key] <= upper, "invalid setting: " + key)
     require(config["disk_critical_bytes"] < config["disk_warning_bytes"], "disk thresholds out of order")
+    require(type(config.get("cleanup_enabled", False)) is bool, "invalid cleanup setting")
+    trigger = config.get("cleanup_trigger_bytes", 24 * GIB)
+    target = config.get("cleanup_target_bytes", 36 * GIB)
+    for key, value, lower, upper in (("cleanup_trigger_bytes", trigger, GIB, 1024 * GIB),
+                                     ("cleanup_target_bytes", target, GIB, 1024 * GIB)):
+        require(numeric(value) and lower <= value <= upper, "invalid setting: " + key)
+    require(trigger < target, "cleanup thresholds out of order")
     if check_heartbeat:
         validate_heartbeat_config(config.get("heartbeat"))
     return config
@@ -406,6 +426,140 @@ def incident_codes(config, history):
     if current["health"] == "stale" or (current["health"] in ("missing", "stopped") and current.get("supervisor_running")):
         codes.append("supervisor_unhealthy")
     return sorted(codes)
+
+
+def _directory_free_bytes(path):
+    try:
+        return shutil.disk_usage(path).free
+    except OSError:
+        return None
+
+
+def _candidate_is_owned_cache(path, home):
+    """Return a fresh, exact cache directory or refuse it."""
+    try:
+        path = Path(path)
+        home = Path(home)
+        resolved = path.resolve(strict=True)
+        if resolved != path or not path.is_dir() or path.is_symlink():
+            return None
+        if path.stat().st_uid != os.getuid():
+            return None
+        if not any(path == home / relative for relative in CACHE_RELATIVE_PATHS):
+            return None
+        return path
+    except (OSError, RuntimeError):
+        return None
+
+
+def _lsof_clear(path):
+    """Require lsof to prove that no process has the candidate open."""
+    try:
+        result = subprocess.run(["/usr/sbin/lsof", "-n", "-t", "+D", str(path)],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, timeout=3, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 1 and not result.stdout.strip()
+
+
+def _remove_cache(path, home, now_s):
+    candidate = _candidate_is_owned_cache(path, home)
+    if candidate is None:
+        return {"path": str(path), "outcome": "refused"}
+    try:
+        if now_s - int(candidate.stat().st_mtime) < CLEANUP_MIN_AGE_S:
+            return {"path": str(candidate), "outcome": "too_new"}
+        if not _lsof_clear(candidate):
+            return {"path": str(candidate), "outcome": "in_use_or_unverifiable"}
+        # Re-resolve immediately before deletion; a replacement or symlink is
+        # refused rather than followed.
+        if _candidate_is_owned_cache(candidate, home) != candidate or not _lsof_clear(candidate):
+            return {"path": str(candidate), "outcome": "changed_or_in_use"}
+        size = sum(item.stat().st_size for item in candidate.rglob("*") if item.is_file())
+        shutil.rmtree(candidate)
+        return {"path": str(candidate), "outcome": "removed", "bytes": size}
+    except (OSError, ValueError, RuntimeError):
+        return {"path": str(candidate), "outcome": "error"}
+
+
+def _chrome_clone_candidates(now_s):
+    roots = []
+    for root in (Path("/var/folders"), Path("/private/var/folders")):
+        if root.is_dir():
+            roots.append(root)
+    found = []
+    seen = set()
+    # macOS code-sign clones are directly below the per-user temporary roots;
+    # bounded globbing avoids walking an unbounded cache tree.
+    for root in roots:
+        for pattern in ("*/*/*/com.google.Chrome.code_sign_clone",
+                        "*/*/*/*/com.google.Chrome.code_sign_clone"):
+            try:
+                paths = root.glob(pattern)
+            except OSError:
+                continue
+            for path in paths:
+                if len(found) >= CLEANUP_MAX_CANDIDATES:
+                    return found
+                try:
+                    resolved = path.resolve(strict=True)
+                    info = path.lstat()
+                    if (resolved == path and path not in seen and path.is_dir()
+                            and not path.is_symlink() and info.st_uid == os.getuid()
+                            and now_s - int(info.st_mtime) >= CLEANUP_MIN_AGE_S):
+                        seen.add(path)
+                        found.append(path)
+                except (OSError, RuntimeError):
+                    continue
+    return found
+
+
+def cleanup_tick(config, at_s=None):
+    """Reclaim only known, reproducible caches when the volume is low."""
+    at_s = int(time.time()) if at_s is None else at_s
+    if not config.get("cleanup_enabled", False):
+        return {"cleanup": "disabled"}
+    state_dir = Path(config["state_dir"])
+    with owner(state_dir, "cleanup"):
+        free = _directory_free_bytes(Path(config["home"]))
+        trigger = config.get("cleanup_trigger_bytes", config["disk_warning_bytes"])
+        target = config.get("cleanup_target_bytes", trigger + 8 * GIB)
+        if free is None:
+            return {"cleanup": "telemetry_unavailable"}
+        if free >= trigger:
+            return {"cleanup": "not_needed", "free_bytes": free}
+        results = []
+        home = Path(config["home"])
+        for relative in CACHE_RELATIVE_PATHS:
+            path = home / relative
+            if not path.exists():
+                continue
+            if len(results) >= CLEANUP_MAX_CANDIDATES:
+                break
+            result = _remove_cache(path, home, at_s)
+            results.append(result)
+            if (_directory_free_bytes(home) or 0) >= target:
+                break
+        for path in _chrome_clone_candidates(at_s):
+            if len(results) >= CLEANUP_MAX_CANDIDATES or (_directory_free_bytes(home) or 0) >= target:
+                break
+            try:
+                if not _lsof_clear(path):
+                    results.append({"path": str(path), "outcome": "in_use_or_unverifiable"})
+                    continue
+                if path.resolve(strict=True) != path or path.stat().st_uid != os.getuid() or not _lsof_clear(path):
+                    results.append({"path": str(path), "outcome": "changed_or_in_use"})
+                    continue
+                size = sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+                shutil.rmtree(path)
+                results.append({"path": str(path), "outcome": "removed", "bytes": size})
+            except OSError:
+                results.append({"path": str(path), "outcome": "error"})
+        final_free = _directory_free_bytes(home)
+        return {"cleanup": "completed", "free_before_bytes": free, "free_after_bytes": final_free,
+                "removed_bytes": sum(item.get("bytes", 0) for item in results if item.get("outcome") == "removed"),
+                "results": results[:CLEANUP_MAX_CANDIDATES]}
 
 
 def sample_tick(config, at_s=None, runner=command, review_binding_warnings=None):
@@ -744,7 +898,8 @@ def heartbeat_tick(config, config_path, at_s=None, runner=command):
 def launchd(config_path, config, kind):
     return {"Label": "com.hraness.xcb-maintenance." + kind,
             "ProgramArguments": [config["python"], config["script"], kind, "--config", str(config_path)],
-            "WorkingDirectory": config["workspace"], "RunAtLoad": True, "StartInterval": 60,
+            "WorkingDirectory": config["workspace"], "RunAtLoad": True,
+            "StartInterval": CLEANUP_INTERVAL_S if kind == "cleanup" else 60,
             "ProcessType": "Background", "LowPriorityIO": True, "Nice": 10,
             "EnvironmentVariables": environment(config), "StandardOutPath": "/dev/null", "StandardErrorPath": "/dev/null"}
 
@@ -759,7 +914,7 @@ def main(argv=None):
     init.add_argument("--reasoning", default="high")
     init.add_argument("--heartbeat-url")
     init.add_argument("--heartbeat-token-file")
-    for action in ("sample", "review", "status", "plan", "enable", "disable", "install", "reconcile", "rebind", "heartbeat-send", "heartbeat-configure", "heartbeat-disable"):
+    for action in ("sample", "review", "cleanup", "status", "plan", "enable", "disable", "install", "reconcile", "rebind", "heartbeat-send", "heartbeat-configure", "heartbeat-disable"):
         cmd = sub.add_parser(action)
         cmd.add_argument("--config", required=True)
         if action == "heartbeat-configure":
@@ -788,8 +943,9 @@ def main(argv=None):
                       home=str(Path.home().resolve()), state_dir=str(directory))
         config = {"version": VERSION, **values, "model": args.model, "reasoning": args.reasoning,
                   "reviews_enabled": False, "review_interval_s": 3600, "incident_cooldown_s": 1800,
-                  "deadline_s": 600, "max_reviews_day": 36, "disk_warning_bytes": 60 * GIB,
-                  "disk_critical_bytes": 20 * GIB,
+                  "deadline_s": 600, "max_reviews_day": 36, "disk_warning_bytes": 24 * GIB,
+                  "disk_critical_bytes": 8 * GIB, "cleanup_enabled": True,
+                  "cleanup_trigger_bytes": 24 * GIB, "cleanup_target_bytes": 36 * GIB,
                   "targets": {key: str(Path(values[key]).resolve(strict=True)) for key in ("xcb", "codex", "scheduler", "skill", "python", "script", "bun")},
                   "sha256": {key: sha_file(Path(values[key]).resolve(strict=True)) for key in ("xcb", "codex", "scheduler", "skill", "python", "script", "bun")}}
         require(bool(args.heartbeat_url) == bool(args.heartbeat_token_file), "supply both heartbeat URL and token file")
@@ -846,6 +1002,8 @@ def main(argv=None):
         result = {"heartbeat_enabled": bool(config.get("heartbeat", {}).get("enabled"))}
     elif args.action == "review":
         result = review_tick(config)
+    elif args.action == "cleanup":
+        result = cleanup_tick(config)
     elif args.action == "status":
         samples = load(directory / "samples.json", None)
         state = load(directory / "reviews.json", review_default())
@@ -866,11 +1024,11 @@ def main(argv=None):
         result = {"reviews_enabled": config["reviews_enabled"], "heartbeat_enabled": bool(config.get("heartbeat", {}).get("enabled")),
                   "argv": review_argv(config, None), "review_binding_warnings": review_binding_issues(config),
                   "prompt": prompt(config, load(directory / "samples.json", None)),
-                  "launchd": {kind: launchd(path, config, kind) for kind in ("sample", "review")}}
+                  "launchd": {kind: launchd(path, config, kind) for kind in ("sample", "review", "cleanup")}}
     elif args.action == "install":
         output = physical(args.output_dir, directory=True, private=True)
         paths = []
-        for kind in ("sample", "review"):
+        for kind in ("sample", "review", "cleanup"):
             target = output / ("com.hraness.xcb-maintenance." + kind + ".plist")
             fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
             with os.fdopen(fd, "wb") as stream:

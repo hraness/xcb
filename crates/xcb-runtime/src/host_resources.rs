@@ -43,9 +43,13 @@ impl Default for ResourcePolicy {
             enabled: false,
             sample_interval_secs: 30,
             stale_after_secs: 120,
-            warn_disk_bytes: 60 * GIB,
-            pause_disk_bytes: 24 * GIB,
-            resume_disk_bytes: 32 * GIB,
+            // Keep a useful working reserve without idling the herd on a
+            // nearly-full development volume.  The supervisor still fails
+            // closed below 8 GiB and requires three samples above 12 GiB
+            // before resuming; 24 GiB is telemetry-only warning territory.
+            warn_disk_bytes: 24 * GIB,
+            pause_disk_bytes: 8 * GIB,
+            resume_disk_bytes: 12 * GIB,
             pressure_sustain_secs: 60,
             recovery_samples: 3,
         }

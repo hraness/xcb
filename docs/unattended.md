@@ -55,7 +55,7 @@ Edit the `resources` section of the private `config.json` to adjust thresholds.
 The supervisor reloads it every five seconds. Thresholds must preserve
 `0 < pause_disk_bytes < resume_disk_bytes <= warn_disk_bytes`. Choose a reserve
 that covers the largest expected job and the repository's required floor;
-the default is not an allocation estimate for every project.
+the default is a throughput-oriented 8 GiB pause / 12 GiB resume / 24 GiB warning band, not an allocation estimate for every project.
 
 ```sh
 xcb resources disable

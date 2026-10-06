@@ -58,7 +58,7 @@ python3 scripts/unattended-maintenance.py install \
   --output-dir /ABSOLUTE/maintenance-plists
 ```
 
-`install` only writes the plists. It does not copy them into `~/Library/LaunchAgents`, load them, change login settings, or run a model. Each plist uses `RunAtLoad` and a 60-second interval. One invokes `sample`; the other invokes `review`, which returns immediately when no review is due. After inspecting the files, install and bootstrap them through the usual user LaunchAgent procedure. They start after the user logs in. A pre-login FileVault unlock remains a separate requirement.
+`install` only writes the three plists. It does not copy them into `~/Library/LaunchAgents`, load them, change login settings, or run a model. The sample and review plists use a 60-second interval; cleanup uses a five-minute interval. One invokes `sample`; the other invokes `review`, which returns immediately when no review is due. After inspecting the files, install and bootstrap them through the usual user LaunchAgent procedure. They start after the user logs in. A pre-login FileVault unlock remains a separate requirement.
 
 Use `disable` with the configuration path to pause future model reviews while sampling continues. An existing review holds its lock until it exits; disabling does not kill a review in progress.
 
@@ -156,7 +156,7 @@ This file is an operator attestation, not a process-exit detector. Use `outcome:
 
 ## Allowed remediation
 
-The review prompt permits diagnosis, supported messages to affected agents, and xcb task cancellation only when a supported command checks the task's current revision. It forbids raw workload PID killing, account release after an uncertain exit, invented messaging commands, and changes to security or scheduling settings.
+The review prompt permits diagnosis, supported messages to affected agents, and xcb task cancellation only when a supported command checks the task's current revision. It forbids raw workload PID killing, account release after an uncertain exit, invented messaging commands, and changes to security or scheduling settings. Cleanup is deterministic and separate from the model: it only considers the exact cache paths in the runner, requires the owner, age, path, and `lsof` checks immediately before removal, and stops when any proof is unavailable.
 
 Cleanup follows the exact installed local-efficiency skill. Every candidate requires fresh proof of its exact location, ownership, reproducibility, absence of live users or open handles, and absence of protected state. A report-only janitor's candidate list supplies no deletion proof. Dirty or unmerged worktrees, source, credentials, databases, sessions, provider evidence, FIFOs, and ambiguous data stay protected. Actions run under the owning scheduler, and the reviewer measures settled physical free space after each cleanup.
 

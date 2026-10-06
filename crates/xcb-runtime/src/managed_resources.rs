@@ -291,8 +291,8 @@ mod tests {
         let snapshot = sample(
             &supervisor,
             &task,
-            48 * 1024_u64.pow(3),
-            48 * 1024_u64.pow(3),
+            16 * 1024_u64.pow(3),
+            16 * 1024_u64.pow(3),
         );
         supervisor.resources.monitor.observe(snapshot);
         let warning = supervisor.resource_admission(&task).unwrap().unwrap();
