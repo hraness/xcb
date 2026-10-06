@@ -840,6 +840,54 @@ impl ManagedStore {
         self.transition_habitat(&task, next, Some(message), &[], mutation)
             .await
     }
+    /// The owner closes uncertain work no retained evidence can reconcile.
+    /// The task fails without a retry; its runs must already be settled, and
+    /// their unsettled receipts stay recorded for inspection.
+    pub async fn dismiss_uncertain(
+        &self,
+        store: &Store,
+        id: &Id,
+        expected_revision: u64,
+    ) -> Result<ManagedTask> {
+        let task = self
+            .task(id)?
+            .ok_or(Error::Unavailable("managed task not found"))?;
+        if task.state != TaskState::Uncertain || task.revision != expected_revision {
+            return Err(Error::Conflict(
+                "task is not the current uncertain revision",
+            ));
+        }
+        if store.unsettled_runs()?.iter().any(|run| {
+            run.session.as_ref().is_some_and(|s| {
+                task.session.as_ref() == Some(s) || task.worker_sessions.contains(s)
+            })
+        }) {
+            return Err(Error::Conflict(
+                "worker process or effects still require recovery",
+            ));
+        }
+        if self.inbox_batch(&task.id)?.is_some() {
+            return Err(Error::Conflict(
+                "a delivered reply still requires reconciliation",
+            ));
+        }
+        let mut next = task.clone();
+        next.state = TaskState::Failed;
+        next.attention = None;
+        next.cancel_requested = false;
+        next.next_prompt.clear();
+        next.attachments.clear();
+        next.detail = "dismissed by the owner with unreconciled effects; no retry launched".into();
+        next.revision += 1;
+        next.updated_at_ms = now_ms().max(task.updated_at_ms);
+        let message = Self::assistant(
+            format!("**{}** · {}", next.title, next.detail),
+            Some(id),
+            next.revision,
+        );
+        self.transition(&task, next, Some(message)).await
+    }
+
     pub async fn reconcile_uncertain(
         &self,
         store: &Store,

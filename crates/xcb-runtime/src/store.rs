@@ -93,6 +93,7 @@ impl ModelCatalog {
 }
 const MAX_SESSIONS: i64 = 10_000;
 const MAX_MESSAGES: i64 = 10_000;
+const PENDING_CREDENTIAL_RECEIPTS: &str = "SELECT call,operation,input_digest FROM tool_effects WHERE run=?1 AND settled=0 AND (operation LIKE 'host_auth_%' OR call LIKE 'xcb_auth_%' OR call LIKE 'xcb_devin_auth_%')";
 pub(crate) const AUTHENTICATION_REQUIRED: &str = "account authentication or subscription access failed; restore account access (administrator action may be needed), then reconnect before running tasks";
 
 #[path = "store_overview.rs"]
@@ -1971,6 +1972,30 @@ impl Store {
         self.settle_inner(run, state, now, None, None)
     }
 
+    /// Point a run's owner at a pid that names no process, as if its
+    /// supervisor had died.
+    #[cfg(test)]
+    pub(crate) fn orphan_run_for_test(&self, run: &RunRecord) -> RunRecord {
+        let mut run = run.clone();
+        run.owner.as_mut().unwrap().pid = i32::MAX as u32;
+        self.db()
+            .unwrap()
+            .execute(
+                "UPDATE runs SET payload=?1 WHERE id=?2",
+                params![serde_json::to_string(&run).unwrap(), run.id.as_str()],
+            )
+            .unwrap();
+        run
+    }
+
+    /// Whether a run still holds an unsettled credential receipt; only those
+    /// need reconciliation before custody may be released.
+    pub(crate) fn has_pending_credential_receipts(&self, run: &Id) -> Result<bool> {
+        let db = self.db()?;
+        let mut query = db.prepare(PENDING_CREDENTIAL_RECEIPTS)?;
+        Ok(query.exists([run.as_str()])?)
+    }
+
     #[cfg(test)]
     pub(crate) fn settle_outcome(
         &self,
@@ -2881,7 +2906,7 @@ impl Store {
         }
         run.verify_recovery_stop()?;
         let pending_auth: Vec<(String, String, String)> = {
-            let mut query = tx.prepare("SELECT call,operation,input_digest FROM tool_effects WHERE run=?1 AND settled=0 AND (operation LIKE 'host_auth_%' OR call LIKE 'xcb_auth_%' OR call LIKE 'xcb_devin_auth_%')")?;
+            let mut query = tx.prepare(PENDING_CREDENTIAL_RECEIPTS)?;
             query
                 .query_map([run_id.as_str()], |row| {
                     Ok((row.get(0)?, row.get(1)?, row.get(2)?))
@@ -3690,17 +3715,7 @@ mod tests {
     }
 
     fn orphaned(store: &Store, run: &RunRecord) -> RunRecord {
-        let mut run = run.clone();
-        run.owner.as_mut().unwrap().pid = i32::MAX as u32;
-        store
-            .db()
-            .unwrap()
-            .execute(
-                "UPDATE runs SET payload=?1 WHERE id=?2",
-                params![serde_json::to_string(&run).unwrap(), run.id.as_str()],
-            )
-            .unwrap();
-        run
+        store.orphan_run_for_test(run)
     }
 
     fn recovery_codex_auth(account: &str, access: &str) -> Vec<u8> {
@@ -4669,6 +4684,54 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "group never left");
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn a_joined_uncertain_run_releases_custody_but_keeps_its_receipt() {
+        let dir = root();
+        let base = xcb_core::canonical(dir.path()).unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
+        let session = store
+            .create_session(&account.id, choice(), &base.join("work"), 2)
+            .unwrap();
+        let prepared = store.prepare_run(&session.id, session.revision, 3).unwrap();
+        store
+            .begin_tool(
+                &prepared,
+                "native-call",
+                "workspace_native_exec",
+                &digest("{}"),
+            )
+            .unwrap();
+        assert!(!store.has_pending_credential_receipts(&prepared.id).unwrap());
+
+        store.settle(&prepared, State::Uncertain, 4).unwrap();
+
+        assert!(store.unsettled_runs().unwrap().is_empty());
+        let session = store.session(&session.id).unwrap().unwrap();
+        assert_eq!(session.state, State::Uncertain);
+        let settled: i64 = store
+            .db()
+            .unwrap()
+            .query_row(
+                "SELECT settled FROM tool_effects WHERE run=?1",
+                [prepared.id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(settled, 0);
+
+        let next = store.prepare_run(&session.id, session.revision, 5).unwrap();
+        store
+            .begin_tool(
+                &next,
+                "xcb_auth_snapshot",
+                "host_auth_refresh",
+                &digest("{}"),
+            )
+            .unwrap();
+        assert!(store.has_pending_credential_receipts(&next.id).unwrap());
     }
 
     #[test]

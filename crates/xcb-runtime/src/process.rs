@@ -1805,6 +1805,139 @@ pub(crate) async fn capture_supervised_interactive_diagnosed(
     CaptureOutcome::Joined(result)
 }
 
+#[cfg(any(target_os = "macos", all(test, unix)))]
+/// One worker command's outcome. `Exited` means the command ran to its own
+/// exit (any status), both streams reached EOF and the group is proven
+/// absent: the result is known, not interrupted. No Debug or Serialize:
+/// output may contain a credential the caller must redact.
+pub(crate) enum CommandOutcome {
+    NeverStarted(Error),
+    Exited {
+        code: Option<i32>,
+        stdout: zeroize::Zeroizing<Vec<u8>>,
+        stderr: zeroize::Zeroizing<Vec<u8>>,
+        truncated: bool,
+    },
+    /// Timeout, cancellation or a read failure stopped the command; its
+    /// group was then proven absent, but its effects are unknown.
+    Interrupted,
+    Unproven,
+}
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
+/// Retain the first `max` bytes and keep draining, so a long listing is
+/// clipped instead of turning a finished command into an interrupted one.
+async fn read_clipped(
+    mut source: impl AsyncRead + Unpin,
+    bytes: &mut zeroize::Zeroizing<Vec<u8>>,
+    max: usize,
+) -> std::io::Result<bool> {
+    let mut buffer = zeroize::Zeroizing::new([0u8; 4096]);
+    let mut truncated = false;
+    loop {
+        let n = source.read(&mut *buffer).await?;
+        if n == 0 {
+            return Ok(truncated);
+        }
+        let kept = n.min(max.saturating_sub(bytes.len()));
+        bytes.extend_from_slice(&buffer[..kept]);
+        truncated |= kept < n;
+    }
+}
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
+/// Capture one worker command under caller-owned durable custody, keeping
+/// stdout, stderr and the exit status. `started` runs immediately after spawn.
+pub(crate) async fn capture_command(
+    mut command: Command,
+    max: usize,
+    deadline: Duration,
+    mut cancel: tokio::sync::watch::Receiver<bool>,
+    started: impl FnOnce(u32) -> Result<()>,
+) -> CommandOutcome {
+    if max == 0 || max > 64 * 1024 || deadline.is_zero() || deadline > Duration::from_secs(600) {
+        return CommandOutcome::NeverStarted(Error::Unavailable(
+            "invalid supervised capture bounds",
+        ));
+    }
+    if *cancel.borrow() {
+        return CommandOutcome::NeverStarted(Error::Unavailable("command cancelled before launch"));
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    Group::prepare(&mut command);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => return CommandOutcome::NeverStarted(Error::LaunchNotStarted(error)),
+    };
+    drop(command);
+    let Some(group) = Group::adopt(&mut child) else {
+        return CommandOutcome::Unproven;
+    };
+    let pid = group.pid();
+    let mut custody = CaptureGroup(Some(group.clone()));
+    let recorded = started(pid);
+    let (Some(mut stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take()) else {
+        return CommandOutcome::Unproven;
+    };
+    // Reserve the full bound so growth cannot leave an unwiped copy behind.
+    let mut out = zeroize::Zeroizing::new(Vec::with_capacity(max));
+    let mut err = zeroize::Zeroizing::new(Vec::with_capacity(max));
+    let read = match recorded {
+        Err(_) => None,
+        Ok(()) => {
+            let execution = async {
+                tokio::try_join!(
+                    read_clipped(&mut stdout, &mut out, max),
+                    read_clipped(&mut stderr, &mut err, max)
+                )
+            };
+            tokio::select! {
+                biased;
+                _ = async { if !*cancel.borrow() { let _ = cancel.changed().await; } } => None,
+                result = tokio::time::timeout(deadline, execution) => match result {
+                    Ok(Ok((out_cut, err_cut))) => Some(out_cut || err_cut),
+                    _ => None,
+                },
+            }
+        }
+    };
+    if read.is_none() {
+        if child.id() == Some(pid) {
+            let _ = group.kill();
+        }
+        custody.0 = None;
+    }
+    let cleanup = tokio::time::timeout(Duration::from_secs(5), async {
+        let exit = async {
+            let status = child.wait().await;
+            // No await between reaping and disarming (see capture_supervised).
+            custody.0 = None;
+            status
+        };
+        tokio::join!(exit, drain_to_eof(&mut stdout), drain_to_eof(&mut stderr))
+    })
+    .await;
+    let Ok((Ok(status), stdout_rest, stderr_rest)) = cleanup else {
+        return CommandOutcome::Unproven;
+    };
+    if !stdout_rest.complete || !stderr_rest.complete || !group_absent(&group).await {
+        return CommandOutcome::Unproven;
+    }
+    match read {
+        Some(truncated) => CommandOutcome::Exited {
+            code: status.code(),
+            stdout: out,
+            stderr: err,
+            truncated,
+        },
+        None => CommandOutcome::Interrupted,
+    }
+}
+
 pub async fn capture(mut command: Command, max: usize, deadline: Duration) -> Result<Vec<u8>> {
     command
         .stdin(Stdio::null())
@@ -1922,6 +2055,68 @@ mod tests {
                 _ => panic!("capture did not preserve join and result distinction"),
             }
             assert!(prove_process_group_absent(pid).is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn command_capture_keeps_failed_exits_and_interrupts_only_on_deadline() {
+        let (_sender, cancel) = tokio::sync::watch::channel(false);
+        let run = |script: &'static str, max: usize, deadline: u64| {
+            let cancel = cancel.clone();
+            async move {
+                let mut command = Command::new("/bin/sh");
+                command.args(["-c", script]);
+                let mut pid = 0;
+                let outcome = capture_command(
+                    command,
+                    max,
+                    Duration::from_millis(deadline),
+                    cancel,
+                    |started| {
+                        pid = started;
+                        Ok(())
+                    },
+                )
+                .await;
+                assert!(prove_process_group_absent(pid).is_ok());
+                outcome
+            }
+        };
+        match run(
+            "printf out; printf 'fatal: not a git repository' >&2; exit 128",
+            1024,
+            5000,
+        )
+        .await
+        {
+            CommandOutcome::Exited {
+                code: Some(128),
+                stdout,
+                stderr,
+                truncated: false,
+            } => {
+                assert_eq!(&**stdout, b"out");
+                assert_eq!(&**stderr, b"fatal: not a git repository");
+            }
+            _ => panic!("a failed exit must keep its status and both streams"),
+        }
+        match run("printf 0123456789", 4, 5000).await {
+            CommandOutcome::Exited {
+                code: Some(0),
+                stdout,
+                truncated: true,
+                ..
+            } => assert_eq!(&**stdout, b"0123"),
+            _ => panic!("long output must be clipped, not interrupted"),
+        }
+        assert!(matches!(
+            run("sleep 5", 1024, 100).await,
+            CommandOutcome::Interrupted
+        ));
+        let missing = Command::new("/nonexistent/xcb-command");
+        match capture_command(missing, 1024, Duration::from_secs(1), cancel, |_| Ok(())).await {
+            CommandOutcome::NeverStarted(Error::LaunchNotStarted(_)) => (),
+            _ => panic!("a command that cannot start must say so"),
         }
     }
 

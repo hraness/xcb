@@ -1564,3 +1564,71 @@ async fn month_long_grant_accepts_explicit_child_budget_and_preserves_spend() {
             .is_empty()
     );
 }
+#[tokio::test]
+async fn the_owner_dismisses_uncertainty_only_after_its_run_is_released() {
+    use xcb_core::models::{Mode, ModelChoice};
+    let f = fixture().await;
+    let account = f
+        .store
+        .add_account(Provider::Codex, "Fixture", now_ms(), None)
+        .unwrap();
+    let model = ModelChoice {
+        provider: Provider::Codex,
+        id: Id::new("fixture").unwrap(),
+        label: "Fixture".into(),
+        mode: Mode::Fixed,
+        resolved: None,
+        effort: None,
+        observed_at_ms: now_ms(),
+    };
+    let session = f
+        .store
+        .create_session(&account.id, model, &f.workspace, now_ms())
+        .unwrap();
+    let task = enqueue(&f, "Unprovable work", false).await;
+    let running = f
+        .managed
+        .prepare(
+            &task,
+            session.id.clone(),
+            "fixture".into(),
+            "fixture".into(),
+            0,
+            String::new(),
+        )
+        .await
+        .unwrap();
+    let uncertain = state(&f, &running, TaskState::Uncertain).await;
+    let run = f
+        .store
+        .prepare_run(&session.id, session.revision, now_ms())
+        .unwrap();
+    let held = f
+        .managed
+        .dismiss_uncertain(&f.store, &uncertain.id, uncertain.revision)
+        .await;
+    assert!(matches!(held, Err(Error::Conflict(_))));
+    assert!(
+        f.managed
+            .dismiss_uncertain(&f.store, &uncertain.id, uncertain.revision + 1)
+            .await
+            .is_err()
+    );
+    f.store
+        .settle(&run, xcb_core::session::State::Uncertain, now_ms())
+        .unwrap();
+    let dismissed = f
+        .managed
+        .dismiss_uncertain(&f.store, &uncertain.id, uncertain.revision)
+        .await
+        .unwrap();
+    assert_eq!(dismissed.state, TaskState::Failed);
+    assert_eq!(dismissed.attempts, uncertain.attempts);
+    assert!(dismissed.detail.contains("no retry"));
+    assert!(
+        f.managed
+            .dismiss_uncertain(&f.store, &dismissed.id, dismissed.revision)
+            .await
+            .is_err()
+    );
+}

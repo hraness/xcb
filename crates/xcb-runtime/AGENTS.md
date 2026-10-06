@@ -20,6 +20,13 @@
   supported providers. It requires current OS and provider checks for the exact
   executable, a matching workspace/provider grant, and a persisted native task
   requirement. It never substitutes offline replay or legacy host commands.
+  A native command that runs to its own exit, with any status, after its group
+  is proven absent returns its exit code, stdout and stderr as a settled result.
+  Only a timeout, cancellation or unproven join retains uncertain effects.
+- A run whose provider, tool and command groups are all proven joined
+  releases its account lease even with uncertain effects: the session stays
+  uncertain, the receipts stay unsettled and nothing is replayed. Startup
+  releases a dead owner's run only on the `xcb recover --yes` proof.
 - Native GitHub checks must cover the login-service environment as well as the
   interactive CLI. Trusted credential helper lookup completes system-only PATH
   with standard absolute toolchain directories; worker command PATH remains
