@@ -666,6 +666,54 @@ fn unknown_non_executable_items_become_one_bounded_diagnostic() {
 }
 
 #[test]
+fn known_display_notifications_do_not_strand_an_admitted_turn() {
+    for method in [
+        "item/plan/delta",
+        "turn/plan/updated",
+        "thread/goal/updated",
+        "model/verification",
+        "warning",
+    ] {
+        let mut c = started();
+        let params = if method.starts_with("item/") || method.starts_with("turn/") {
+            json!({"threadId":"thread1","turnId":"turn1","opaque":"display-only"})
+        } else {
+            json!({"threadId":"thread1","opaque":"display-only"})
+        };
+        let (events, replies) = c.accept(json!({"method":method,"params":params})).unwrap();
+        assert!(replies.is_empty(), "{method}");
+        assert!(events.is_empty(), "{method}");
+        assert!(!c.completed, "{method}");
+    }
+    let mut c = started();
+    assert!(
+        c.accept(
+            json!({"method":"item/plan/delta","params":{"threadId":"foreign","turnId":"turn1"}})
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn execution_and_authority_notifications_remain_fail_closed() {
+    for method in [
+        "item/commandExecution/outputDelta",
+        "item/fileChange/patchUpdated",
+        "model/rerouted",
+        "modelProvider/authRecoveryStarted",
+        "process/outputDelta",
+        "turn/diff/updated",
+    ] {
+        assert!(
+            started()
+                .accept(json!({"method":method,"params":{"threadId":"thread1","turnId":"turn1"}}))
+                .is_err(),
+            "{method}"
+        );
+    }
+}
+
+#[test]
 fn interruption_names_only_the_admitted_turn() {
     // Turn RPC minted but not yet admitted: the provider owns nothing to
     // interrupt, so the runner's stdin-close grace is the whole signal.

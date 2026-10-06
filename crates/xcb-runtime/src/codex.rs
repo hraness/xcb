@@ -1162,6 +1162,35 @@ impl CodexProtocol {
             "Codex thread scope",
         )
     }
+    /// Display-only provider notices are allowed only by an exact method
+    /// allowlist in `provider_methods`. They can never create a tool call,
+    /// alter routing, grant permissions, or complete a turn. When a notice
+    /// carries scope, bind it to this admitted thread/turn; scope-free
+    /// notices remain bounded opaque observations.
+    fn informational_notice(&self, params: &Value) -> Result<()> {
+        require(
+            self.ready && !self.completed,
+            "Codex informational notification outside active turn",
+        )?;
+        require(
+            serde_json::to_vec(params)?.len() <= MAX_JSON_BYTES,
+            "Codex informational notification bound",
+        )?;
+        for key in ["threadId", "turnId"] {
+            require(
+                params[key].is_null() || params[key].as_str().is_some(),
+                "Codex informational notification scope",
+            )?;
+        }
+        if !params["threadId"].is_null() {
+            if !params["turnId"].is_null() {
+                self.scope(params)?;
+            } else {
+                self.thread_scope(params)?;
+            }
+        }
+        Ok(())
+    }
     fn tool_item(&mut self, item: &Value, completed: bool) -> Result<()> {
         closed(
             item,
@@ -1413,6 +1442,29 @@ impl CodexProtocol {
                 )?;
                 text(&p["message"], MAX_TEXT_BYTES)?;
             }
+            "app/list/updated"
+            | "configWarning"
+            | "deprecationNotice"
+            | "guardianWarning"
+            | "item/plan/delta"
+            | "turn/plan/updated"
+            | "model/safetyBuffering/updated"
+            | "model/verification"
+            | "project/changed"
+            | "skills/changed"
+            | "thread/archived"
+            | "thread/attachment/updated"
+            | "thread/closed"
+            | "thread/compacted"
+            | "thread/environment/connected"
+            | "thread/environment/disconnected"
+            | "thread/goal/cleared"
+            | "thread/goal/updated"
+            | "thread/name/updated"
+            | "thread/project/updated"
+            | "thread/queue/changed"
+            | "turn/moderationMetadata"
+            | "warning" => self.informational_notice(p)?,
             "turn/started" => {
                 self.thread_scope(p)?;
                 let id = identity(&p["turn"]["id"])?;
@@ -1734,9 +1786,22 @@ impl CodexProtocol {
             // cannot request anything, so it is reported as drift instead of
             // failing a turn whose tools may already have run.
             _ => {
-                if ["model/", "account/", "item/", "turn/"]
-                    .iter()
-                    .any(|prefix| method.starts_with(prefix))
+                if [
+                    "model/",
+                    "modelProvider/",
+                    "account/",
+                    "item/",
+                    "turn/",
+                    "command/",
+                    "process/",
+                    "fs/",
+                    "hook/",
+                    "mcpServer/",
+                    "serverRequest/",
+                    "externalAgentConfig/",
+                ]
+                .iter()
+                .any(|prefix| method.starts_with(prefix))
                 {
                     return Err(Error::CodexNotification {
                         method_sha256: crate::digest(method.as_bytes()),
