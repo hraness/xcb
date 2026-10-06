@@ -1169,10 +1169,6 @@ impl CodexProtocol {
     /// notices remain bounded opaque observations.
     fn informational_notice(&self, params: &Value) -> Result<()> {
         require(
-            self.ready && !self.completed,
-            "Codex informational notification outside active turn",
-        )?;
-        require(
             serde_json::to_vec(params)?.len() <= MAX_JSON_BYTES,
             "Codex informational notification bound",
         )?;
@@ -1183,10 +1179,24 @@ impl CodexProtocol {
             )?;
         }
         if !params["threadId"].is_null() {
+            if let Some(thread) = &self.thread_id {
+                require(
+                    params["threadId"].as_str() == Some(thread),
+                    "Codex informational notification thread scope",
+                )?;
+            }
             if !params["turnId"].is_null() {
-                self.scope(params)?;
-            } else {
-                self.thread_scope(params)?;
+                if let Some(turn) = &self.turn_id {
+                    require(
+                        params["turnId"].as_str() == Some(turn),
+                        "Codex informational notification turn scope",
+                    )?;
+                } else if let Some(turn) = &self.early_turn {
+                    require(
+                        params["turnId"].as_str() == Some(turn),
+                        "Codex informational notification turn scope",
+                    )?;
+                }
             }
         }
         Ok(())
