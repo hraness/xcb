@@ -10,6 +10,14 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.19.6 - 2026-10-06
+
+xcb keeps unattended herds moving when provider tool calls exceed their declared bounds.
+
+- Clamp oversized backlog inspection requests to the bounded 64-item page instead of stranding a worker turn.
+- Guide managed Codex workers toward short native commands and preserve uncertainty after interrupted execution.
+- Add regression coverage for oversized backlog input.
+
 ## 0.19.5 - 2026-10-06
 
 xcb keeps Codex-backed unattended herds moving when display-only protocol updates arrive during initialization or after a managed turn.
