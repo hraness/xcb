@@ -10,6 +10,16 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.20.3 - 2026-10-07
+
+Native commands in different workspaces no longer block each other.
+
+- The supervisor's in-process writer lock is now scoped to one workspace. A
+  long native command in one workspace no longer makes native commands in
+  every other workspace fail after five seconds with "workspace writer is
+  busy; retry", which stalled concurrent unattended schedules. One workspace
+  still runs one writer at a time (#480).
+
 ## 0.20.2 - 2026-10-07
 
 Signing in loads the account's models, and native grants can let workspace
