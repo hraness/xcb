@@ -699,7 +699,7 @@ fn generation(
 }
 
 #[cfg(all(test, unix))]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde_json::{Value, json};
     use std::fs;
@@ -759,8 +759,6 @@ mod tests {
             let root = private::directory(&xcb_core::canonical(temp.path()).unwrap().join("state"))
                 .unwrap();
             let account = Id::new("a_synthetic").unwrap();
-            let account_dir =
-                private::directory(&root.join("accounts").join(account.as_str())).unwrap();
             let binding = Binding {
                 runtime_version: env!("CARGO_PKG_VERSION").into(),
                 runtime_sha256: "1".repeat(64),
@@ -775,58 +773,7 @@ mod tests {
                 credential_generation: "5".repeat(64),
                 models: vec!["claude/synthetic-model".into()],
             };
-            write_private(
-                &account_dir.join("application-generation.json"),
-                &serde_json::to_vec(&CredentialGeneration {
-                    version: 1,
-                    account,
-                    generation: binding.credential_generation.clone(),
-                })
-                .unwrap(),
-            );
-            let directory = private::directory(
-                &root
-                    .join("qualification/application-v1")
-                    .join(binding.account.as_str()),
-            )
-            .unwrap();
-            private::directory(&directory.join("artifacts")).unwrap();
-            let source = artifact(&directory, b"synthetic final source gate output\n");
-            let unit = artifact(&directory, &test_output(UNIT_CASES));
-            let contract = artifact(&directory, &test_output(CONTRACT_CASES));
-            let native = artifact(
-                &directory,
-                br#"{"synthetic":"provider confinement artifact"}"#,
-            );
-            let binding_hash = digest(serde_json::to_vec(&binding).unwrap());
-            let boundary = BoundaryEvidence {
-                version: 1,
-                binding_sha256: binding_hash.clone(),
-                started_at_ms: NOW - 100,
-                finished_at_ms: NOW - 50,
-                source_gate: gate(source),
-                application_unit: gate(unit),
-                application_contract: gate(contract),
-                provider_boundary_sha256: native,
-            };
-            let boundary_sha256 = artifact(&directory, &serde_json::to_vec(&boundary).unwrap());
-            let nonce = "a".repeat(64);
-            let live = LiveEvidence {
-                version: 1,
-                binding_sha256: binding_hash,
-                started_at_ms: NOW - 40,
-                finished_at_ms: NOW - 10,
-                model: binding.models[0].clone(),
-                nonce: nonce.clone(),
-                response_json: json!({
-                    "version":1,"status":"completed","requestId":"application_synthetic",
-                    "account":binding.account,"model":binding.models[0],
-                    "text":format!("xcb-application-v1:{nonce}"),
-                    "outcome":{"terminal":"completed","joined":true,"effects":"none"}
-                })
-                .to_string(),
-            };
-            let live_hash = artifact(&directory, &serde_json::to_vec(&live).unwrap());
+            let (directory, receipt) = write_synthetic_receipt(&root, &binding, NOW);
             let pin = Pin {
                 provider: binding.provider,
                 executable: root.join("missing-synthetic-provider"),
@@ -834,14 +781,6 @@ mod tests {
                 version: binding.provider_version.clone(),
                 host_sha256: binding.runtime_sha256.clone(),
                 observed_at_ms: NOW - 100,
-            };
-            let receipt = Receipt {
-                version: 1,
-                binding: binding.clone(),
-                observed_at_ms: NOW - 100,
-                expires_at_ms: NOW + 1000,
-                boundary_sha256,
-                live_sha256: vec![live_hash],
             };
             let fixture = Self {
                 _temp: temp,
@@ -897,6 +836,94 @@ mod tests {
             self.publish();
         }
     }
+    /// The production reader without the live Pin byte check, which synthetic
+    /// pins can't pass. Everything else about the receipt is verified.
+    pub(crate) fn load_synthetic(
+        root: &Path,
+        expected: &Expected<'_>,
+        now: u64,
+    ) -> Result<Admission> {
+        load_verified(root, expected, now)
+    }
+
+    /// Writes a complete strict receipt for `binding`, as the manual
+    /// `qualify-application --evidence` path publishes it, collected at `now`.
+    /// Synthetic: it passes the reader, never production Pin verification.
+    pub(crate) fn write_synthetic_receipt(
+        root: &Path,
+        binding: &Binding,
+        now: u64,
+    ) -> (PathBuf, Receipt) {
+        let account_dir =
+            private::directory(&root.join("accounts").join(binding.account.as_str())).unwrap();
+        let account = binding.account.clone();
+        write_private(
+            &account_dir.join("application-generation.json"),
+            &serde_json::to_vec(&CredentialGeneration {
+                version: 1,
+                account,
+                generation: binding.credential_generation.clone(),
+            })
+            .unwrap(),
+        );
+        let directory = private::directory(
+            &root
+                .join("qualification/application-v1")
+                .join(binding.account.as_str()),
+        )
+        .unwrap();
+        private::directory(&directory.join("artifacts")).unwrap();
+        let source = artifact(&directory, b"synthetic final source gate output\n");
+        let unit = artifact(&directory, &test_output(UNIT_CASES));
+        let contract = artifact(&directory, &test_output(CONTRACT_CASES));
+        let native = artifact(
+            &directory,
+            br#"{"synthetic":"provider confinement artifact"}"#,
+        );
+        let binding_hash = digest(serde_json::to_vec(&binding).unwrap());
+        let boundary = BoundaryEvidence {
+            version: 1,
+            binding_sha256: binding_hash.clone(),
+            started_at_ms: now - 100,
+            finished_at_ms: now - 50,
+            source_gate: gate(source),
+            application_unit: gate(unit),
+            application_contract: gate(contract),
+            provider_boundary_sha256: native,
+        };
+        let boundary_sha256 = artifact(&directory, &serde_json::to_vec(&boundary).unwrap());
+        let nonce = "a".repeat(64);
+        let live = LiveEvidence {
+            version: 1,
+            binding_sha256: binding_hash,
+            started_at_ms: now - 40,
+            finished_at_ms: now - 10,
+            model: binding.models[0].clone(),
+            nonce: nonce.clone(),
+            response_json: json!({
+                "version":1,"status":"completed","requestId":"application_synthetic",
+                "account":binding.account,"model":binding.models[0],
+                "text":format!("xcb-application-v1:{nonce}"),
+                "outcome":{"terminal":"completed","joined":true,"effects":"none"}
+            })
+            .to_string(),
+        };
+        let live_hash = artifact(&directory, &serde_json::to_vec(&live).unwrap());
+        let receipt = Receipt {
+            version: 1,
+            binding: binding.clone(),
+            observed_at_ms: now - 100,
+            expires_at_ms: now + 1000,
+            boundary_sha256,
+            live_sha256: vec![live_hash],
+        };
+        write_private(
+            &directory.join("receipt.json"),
+            &serde_json::to_vec(&receipt).unwrap(),
+        );
+        (directory, receipt)
+    }
+
     fn write_private(path: &Path, bytes: &[u8]) {
         fs::write(path, bytes).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();

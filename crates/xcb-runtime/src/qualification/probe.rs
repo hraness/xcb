@@ -453,6 +453,14 @@ const ISOLATION_FIELDS: &[&str] = &[
     "netDenied",
     "pidIsolated",
 ];
+const SEATBELT_FIELDS: &[&str] = &[
+    "ownWrite",
+    "foreignReadDenied",
+    "foreignWriteDenied",
+    "foreignDirDenied",
+    "netDenied",
+];
+
 const EGRESS_FIELDS: &[&str] = &[
     "bridgeConnect",
     "connectEstablished",
@@ -554,6 +562,10 @@ pub fn inside(args: &[String]) -> i32 {
             (egress_inside(socket, absent), EGRESS_FIELDS)
         }
         [kind] if kind == "loopback" => (loopback_inside(), LOOPBACK_FIELDS),
+        [kind, own, canary, foreign_write, port, foreign_dir] if kind == "seatbelt" => (
+            seatbelt_inside(own, canary, foreign_write, port, foreign_dir),
+            SEATBELT_FIELDS,
+        ),
         _ => {
             eprintln!("sandbox-probe: unknown probe");
             return 2;
@@ -593,6 +605,22 @@ fn isolation(own: &str, canary: &str, foreign_write: &str, port: &str, foreign_d
         "netDenied": net_denied,
         "pidIsolated": pid_isolated(),
     })
+}
+
+/// macOS has no PID or network namespace: the seatbelt half checks file
+/// confinement and that a live host loopback listener is unreachable.
+fn seatbelt_inside(
+    own: &str,
+    canary: &str,
+    foreign_write: &str,
+    port: &str,
+    foreign_dir: &str,
+) -> Value {
+    let mut report = isolation(own, canary, foreign_write, port, foreign_dir);
+    if let Some(object) = report.as_object_mut() {
+        object.remove("pidIsolated");
+    }
+    report
 }
 
 fn egress_inside(socket: &str, absent: &str) -> Value {
@@ -684,9 +712,138 @@ fn pid_isolated() -> bool {
     std::process::id() <= 2
 }
 
+/// The automatic macOS boundary probe behind application admission. This
+/// xcb binary runs its confined half under the exact Seatbelt profile the
+/// provider launcher generates for `provider`, standing in for the provider
+/// executable. It needs no credentials, account, model or provider binary, and
+/// a host where `sandbox-exec` can't apply the profile simply fails.
+#[cfg(target_os = "macos")]
+pub async fn seatbelt(provider: xcb_core::Provider) -> ProbeEvidence {
+    const NAME: &str = "macos-seatbelt";
+    let prepared = (|| -> Result<_> {
+        let xcb = xcb_core::canonical(std::env::current_exe()?)?;
+        let work = tempfile::Builder::new()
+            .prefix("xcb-seatbelt-test-")
+            .tempdir()?;
+        let base = xcb_core::canonical(work.path())?;
+        let make = |name: &str| -> Result<PathBuf> {
+            use std::os::unix::fs::DirBuilderExt;
+            let path = base.join(name);
+            std::fs::DirBuilder::new().mode(0o700).create(&path)?;
+            Ok(path)
+        };
+        let scratch = make("scratch")?;
+        let foreign = make("foreign")?;
+        let canary = foreign.join("canary");
+        std::fs::write(&canary, CANARY)?;
+        let policy = match provider {
+            xcb_core::Provider::Claude => sandbox::seatbelt(&xcb, &scratch)?,
+            xcb_core::Provider::Codex => {
+                let profile = scratch.join("profile");
+                std::fs::create_dir(&profile)?;
+                let config = profile.join("config.toml");
+                std::fs::write(&config, "")?;
+                let catalog = base.join("catalog.json");
+                std::fs::write(&catalog, "{}")?;
+                let ca_bundle = base.join("ca.pem");
+                std::fs::write(&ca_bundle, "")?;
+                sandbox::codex_seatbelt(&xcb, &scratch, &profile, &config, &catalog, &ca_bundle)?
+            }
+            xcb_core::Provider::Devin => {
+                return Err(Error::Unavailable("Devin support was removed"));
+            }
+        };
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+        Ok((work, xcb, scratch, foreign, canary, policy, listener))
+    })();
+    let (work, xcb, scratch, foreign, canary, policy, listener) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => return failed(NAME, error),
+    };
+    let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
+    let policy_sha256 = Some(crate::digest(&policy));
+    let mut command = tokio::process::Command::new("/usr/bin/sandbox-exec");
+    command
+        .arg("-p")
+        .arg(&policy)
+        .arg(&xcb)
+        .args(probe_args(
+            "seatbelt",
+            &[
+                &scratch.join("own"),
+                &canary,
+                &foreign.join("write"),
+                Path::new(&port.to_string()),
+                &foreign,
+            ],
+        ))
+        .env_clear()
+        .envs(inner_env(&scratch))
+        .current_dir(&scratch)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let ran = match command.spawn() {
+        Ok(child) => match tokio::time::timeout(PROBE_TIMEOUT, child.wait_with_output()).await {
+            Ok(Ok(output)) => Ran {
+                code: output.status.code().unwrap_or(-1),
+                observed: last_json_line(&output.stdout),
+                stderr: bounded(&output.stderr),
+                policy_sha256,
+            },
+            Ok(Err(error)) => Ran {
+                code: -1,
+                observed: Value::Null,
+                stderr: format!("probe wait failed: {error}"),
+                policy_sha256,
+            },
+            Err(_) => Ran {
+                code: -1,
+                observed: Value::Null,
+                stderr: "probe timed out".into(),
+                policy_sha256,
+            },
+        },
+        Err(error) => Ran {
+            code: -1,
+            observed: Value::Null,
+            stderr: format!("sandbox-exec could not start: {error}"),
+            policy_sha256,
+        },
+    };
+    drop(listener);
+    let canary_intact = std::fs::read_to_string(&canary).is_ok_and(|text| text == CANARY);
+    let foreign_untouched = !foreign.join("write").exists();
+    drop(work);
+    let host = json!({"canaryIntact": canary_intact, "foreignUntouched": foreign_untouched});
+    let passed = ran.code == 0
+        && all_true(&ran.observed, SEATBELT_FIELDS)
+        && canary_intact
+        && foreign_untouched;
+    evidence(NAME, passed, ran, host)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_seatbelt_probe_fails_on_an_unconfined_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let canary = dir.path().join("canary");
+        std::fs::write(&canary, CANARY).unwrap();
+        let report = seatbelt_inside(
+            dir.path().join("own").to_str().unwrap(),
+            canary.to_str().unwrap(),
+            dir.path().join("write").to_str().unwrap(),
+            "1",
+            dir.path().to_str().unwrap(),
+        );
+        assert!(report.get("pidIsolated").is_none());
+        assert_eq!(report["foreignReadDenied"], false);
+        assert!(!all_true(&report, SEATBELT_FIELDS));
+    }
 
     #[test]
     fn unknown_probe_kinds_are_refused() {

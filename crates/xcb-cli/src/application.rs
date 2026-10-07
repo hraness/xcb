@@ -6,11 +6,57 @@ use std::{
     sync::Arc,
 };
 use tokio::sync::watch;
+use xcb_core::Id;
 use xcb_runtime::{
     Result,
     application::{self, FailureCode, GenerateFailure, GenerateRequest},
+    application_admission::Access,
     store::Store,
 };
+
+/// The owner kill switch for application access.
+#[derive(clap::Subcommand, Debug, Clone)]
+pub enum AccessCommand {
+    /// Refuse application requests, for every account or only `--account`.
+    Disable {
+        /// Only this account; omitted turns application access off globally.
+        #[arg(long)]
+        account: Option<Id>,
+    },
+    /// Allow application requests again, globally or for `--account`.
+    Enable {
+        /// Only this account; omitted clears the global switch.
+        #[arg(long)]
+        account: Option<Id>,
+    },
+    /// Show the current application access setting.
+    Status,
+}
+
+/// Owner-only: runs from the terminal, never through the application protocol.
+pub fn access_dispatch(root: &Path, command: &AccessCommand, as_json: bool) -> Result<i32> {
+    let access = match command {
+        AccessCommand::Status => Access::load(root)?,
+        AccessCommand::Disable { account } => {
+            if let Some(account) = account {
+                Store::open(root)?.account(account)?;
+            }
+            Access::set(root, account.as_ref(), false)?
+        }
+        AccessCommand::Enable { account } => Access::set(root, account.as_ref(), true)?,
+    };
+    if as_json {
+        emit(&access)?;
+    } else if access.disabled {
+        println!("application access: off for every account");
+    } else if access.disabled_accounts.is_empty() {
+        println!("application access: on for every signed-in account");
+    } else {
+        let ids: Vec<_> = access.disabled_accounts.iter().map(Id::as_str).collect();
+        println!("application access: on, except {}", ids.join(", "));
+    }
+    Ok(0)
+}
 
 fn emit(value: &impl serde::Serialize) -> Result<()> {
     println!("{}", serde_json::to_string(value)?);

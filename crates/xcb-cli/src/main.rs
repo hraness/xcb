@@ -133,6 +133,12 @@ enum Commands {
         #[arg(long)]
         inspect: bool,
     },
+    /// Turn application access (`xcb --json generate`) off or on, for every
+    /// account or one account, and show the current setting.
+    Application {
+        #[command(subcommand)]
+        command: application::AccessCommand,
+    },
     /// Run one headless task in the current workspace and print the result.
     Run {
         /// Require access to the user’s existing signed-in browser (Codex only).
@@ -1671,6 +1677,9 @@ async fn dispatch_inner(
     if matches!(&cli.command, Some(Commands::Route)) {
         return route::dispatch(&root, cli.json).await;
     }
+    if let Some(Commands::Application { command }) = &cli.command {
+        return application::access_dispatch(&root, command, cli.json);
+    }
     if let Some(Commands::ApplicationDiagnostic { account, request }) = &cli.command {
         return application::diagnostic_dispatch(&root, account, request, cli.json);
     }
@@ -1753,6 +1762,7 @@ async fn dispatch_inner(
         )),
         Some(
             Commands::Generate { .. }
+            | Commands::Application { .. }
             | Commands::ApplicationDiagnostic { .. }
             | Commands::QualifyApplication { .. }
             | Commands::ManagedDaemon

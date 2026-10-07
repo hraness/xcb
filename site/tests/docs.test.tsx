@@ -170,14 +170,15 @@ describe("organized documentation", () => {
     expect(application).toContain("1 MiB");
     expect(application).toContain("1,000 to 300,000 milliseconds");
     expect(application).toContain("1 to 262,144 bytes");
-    expect(application).toContain("24 hours");
+    expect(application).toContain("admission: &quot;pending&quot;");
+    expect(application).toContain("xcb application disable");
     expect(application).toContain("close stdin");
     expect(application).toContain("90 seconds is a practical desktop integration recommendation");
     expect(application).toContain("not a protocol timing guarantee");
     expect(application).toContain("drain stdout and stderr");
     expect(application).toContain("HOME");
     expect(application).toContain("XCB_STATE");
-    expect(application).toContain("never extends their lifetime");
+    expect(application).toContain("never saves your prompts or replies");
   });
 
   test("documents pane controls, extensions, and the turn deadline", async () => {
