@@ -73,8 +73,10 @@ build, settings and sign-in:
 | `qualified` | A strict manual qualification covers it (see below). |
 
 The account-level `admission` is the best value among its models, or `null`
-whenever the account is unavailable (`reason` says why). A `pending` model must have been
-seen in the last 24 hours; `xcb accounts refresh <account>` obtains fresh
+whenever the account is unavailable (`reason` says why). On an unavailable
+account, a model's `admission` is `null` too unless a strict qualification
+covers it, so `pending` never appears beside a reason. A `pending` model must
+have been seen in the last 24 hours; `xcb accounts refresh <account>` obtains fresh
 provider metadata. Once admitted or qualified, a model stays listed without
 further catalog refreshes.
 
@@ -197,11 +199,13 @@ request:
    after the check, which has its own 60-second limit.
 
 Only one check runs per account at a time. Other calls for that account wait
-for it, then return `busy` if it's still running. If the provider answers but
-the reply is wrong, the model stays unavailable (`admission_failed`, and
-`generate` returns `unavailable`) for 15 minutes or until something it covers
-changes. A deadline, cancellation or local failure records nothing, so the next
-call checks again.
+for it, then return `busy` if it's still running. If the model answers with the
+wrong text, or more than the check allows, the model stays unavailable
+(`admission_failed`, and `generate` returns `unavailable`) for 15 minutes or
+until something it covers changes. A provider error (such as a rate limit), a
+deadline, cancellation or local failure records nothing, so the next call checks
+again. Each xcb build keeps its own results, so two xcb executables sharing one
+state folder don't undo each other's checks.
 
 A check covers one account and model for the exact xcb executable, provider
 build, platform, application policy and configuration, and the account's
@@ -263,7 +267,9 @@ are now proved once, where they belong:
 
 - **Build facts are proved with the build.** A release binary comes from a
   `main` commit whose required checks ran the workspace tests, and carries a
-  build-provenance attestation bound to its digest. Provider builds run only
+  build-provenance attestation bound to its digest. A build from source carries
+  only what its builder checked; xcb doesn't verify that attestation at run
+  time, so the runtime controls below are what protect every build. Provider builds run only
   when xcb's source or its reviewed catalog names their exact digest, and that
   admission already checks tools, configuration isolation and file access.
 - **Host facts are proved automatically.** The sandbox check above runs without
@@ -282,8 +288,10 @@ payloads. The owner switch above turns access off at any time.
 
 Discovery emits models only when they are qualified, admitted, or pending for
 that account. The complete response is limited to 128 accounts, 64 models per
-account, 1,024 models total, and 2 MiB. An oversized inventory makes discovery
-fail rather than be silently truncated. These cardinalities also keep the closed
+account, 1,024 models total, and 2 MiB. Qualified and admitted models count
+first; pending models fill the remaining room in catalog order, and any beyond
+it are left out until earlier ones are admitted. Otherwise an oversized
+inventory makes discovery fail rather than be silently truncated. These cardinalities also keep the closed
 version-one schema below 131,072 JSON tokens.
 
 Trusted qualification tooling can read the executable's exact binding without

@@ -178,14 +178,48 @@ fn auto_dir(root: &Path) -> PathBuf {
     root.join(AUTO_DIR)
 }
 
-fn host_path(root: &Path, provider: Provider) -> PathBuf {
-    auto_dir(root).join(format!("host-{}.json", provider.as_str()))
+/// How many builds' records are kept per provider or account/model, so two xcb
+/// binaries sharing one state (an app's bundled copy and the installed one, or
+/// old and new during an update) don't keep overwriting each other.
+const KEPT_BUILDS: usize = 4;
+
+/// Records are keyed by build so a second binary on the same state keeps its own.
+fn build_key(runtime_sha256: &str, provider_sha256: &str) -> String {
+    digest(format!("{runtime_sha256}:{provider_sha256}"))[..32].to_owned()
+}
+
+fn host_path(root: &Path, pin: &Pin) -> PathBuf {
+    auto_dir(root).join(format!(
+        "host-{}-{}.json",
+        pin.provider.as_str(),
+        build_key(&pin.host_sha256, "")
+    ))
+}
+
+/// Best effort: drop all but the newest `KEPT_BUILDS` records sharing `prefix`.
+fn prune(directory: &Path, prefix: &str) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    let mut records: Vec<_> = entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(prefix) && name.ends_with(".json")
+        })
+        .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+        .collect();
+    records.sort_by_key(|record| std::cmp::Reverse(record.0));
+    for (_, path) in records.into_iter().skip(KEPT_BUILDS) {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// The cached host verdict for this exact xcb digest, provider and policy.
 /// `None` means not yet probed (or probed for different bytes). Read-only.
 pub(crate) fn cached_host_boundary(root: &Path, pin: &Pin, policy_sha256: &str) -> Option<bool> {
-    let bytes = private::read(&host_path(root, pin.provider), MAX_RECORD).ok()?;
+    let bytes = private::read(&host_path(root, pin), MAX_RECORD).ok()?;
     let record: HostBoundary = serde_json::from_slice(&bytes).ok()?;
     if !record.matches(pin, policy_sha256) || record.observed_at_ms > now_ms() {
         return None;
@@ -218,7 +252,9 @@ pub(crate) async fn host_boundary(
         ..HostBoundary::expected(pin, policy_sha256, passed)
     };
     // Recording is best effort: an unrecorded verdict is probed again next time.
-    let _ = write_record(&host_path(root, pin.provider), &record);
+    if write_record(&host_path(root, pin), &record).is_ok() {
+        prune(&auto_dir(root), &format!("host-{}-", pin.provider.as_str()));
+    }
     passed
 }
 
@@ -335,8 +371,16 @@ fn account_dir(root: &Path, account: &Id) -> PathBuf {
     auto_dir(root).join("accounts").join(account.as_str())
 }
 
-fn record_path(root: &Path, account: &Id, model: &str) -> PathBuf {
-    account_dir(root, account).join(format!("{}.json", digest(model)))
+fn model_prefix(model: &str) -> String {
+    format!("{}-", &digest(model)[..32])
+}
+
+fn record_path(root: &Path, binding: &AutoBinding) -> PathBuf {
+    account_dir(root, &binding.account).join(format!(
+        "{}{}.json",
+        model_prefix(&binding.model),
+        build_key(&binding.runtime_sha256, &binding.provider_sha256)
+    ))
 }
 
 /// Read-only: no directory, generation or record is created.
@@ -345,10 +389,7 @@ pub(crate) fn state(root: &Path, context: &Context<'_>, now: u64) -> AdmissionSt
         return AdmissionState::Pending;
     };
     let wanted = context.binding(generation);
-    let Ok(bytes) = private::read(
-        &record_path(root, context.account, &wanted.model),
-        MAX_RECORD,
-    ) else {
+    let Ok(bytes) = private::read(&record_path(root, &wanted), MAX_RECORD) else {
         return AdmissionState::Pending;
     };
     let Ok(record) = serde_json::from_slice::<AutoRecord>(&bytes) else {
@@ -450,6 +491,10 @@ where
             Err(code) => return Err(code),
         }
     };
+    // The owner may have switched access off while we waited.
+    if !Access::allows(store.root(), context.account) {
+        return Err(FailureCode::Unavailable);
+    }
     // Another caller may have finished while we waited for the lock.
     match state(store.root(), context, now_ms()) {
         AdmissionState::Admitted => return Ok(AdmissionState::Admitted),
@@ -488,9 +533,10 @@ where
         Ok(text) if text == wanted => Outcome::Admitted,
         Ok(_) => Outcome::Failed,
         Err(failure) => match failure.code {
-            // The provider answered and the answer was not usable.
-            FailureCode::ProviderError | FailureCode::OutputLimit => Outcome::Failed,
-            // Transient or local: record nothing so the next call retries.
+            // The model answered, but past the challenge's tiny output bound.
+            FailureCode::OutputLimit => Outcome::Failed,
+            // Transient (including provider errors such as rate limits) or
+            // local: record nothing so the next call retries.
             code => return Err(code),
         },
     };
@@ -536,11 +582,12 @@ fn publish(
             &digest(&bytes),
         )?;
         started = true;
-        write_bytes(
-            &record_path(store.root(), context.account, &binding.model),
-            &bytes,
-        )?;
+        write_bytes(&record_path(store.root(), binding), &bytes)?;
         store.settle_tool(&run, "xcb_application_admission")?;
+        prune(
+            &account_dir(store.root(), context.account),
+            &model_prefix(&binding.model),
+        );
         Ok(())
     })();
     match result {
@@ -615,6 +662,7 @@ mod tests {
         Echo,
         Wrong,
         Transient,
+        ProviderError,
     }
 
     struct Harness {
@@ -747,6 +795,9 @@ mod tests {
                             (_, Answer::Transient) => {
                                 return Err(GenerateFailure::unstarted(FailureCode::Deadline));
                             }
+                            (_, Answer::ProviderError) => {
+                                return Err(GenerateFailure::unstarted(FailureCode::ProviderError));
+                            }
                             (Some(wanted), Answer::Echo) => wanted,
                             (Some(_), Answer::Wrong) => "not the challenge".into(),
                             (None, _) => SECRET_REPLY.into(),
@@ -785,12 +836,15 @@ mod tests {
             generate_with(self.store.clone(), self.request(), cancel, &self.hooks()).await
         }
 
-        fn row(&self) -> serde_json::Value {
+        fn capabilities(&self) -> serde_json::Value {
             let value =
                 serde_json::to_value(capabilities_with(&self.store, &self.hooks()).unwrap())
                     .unwrap();
             assert_eq!(value["version"], 1);
-            value["accounts"][0].clone()
+            value
+        }
+        fn row(&self) -> serde_json::Value {
+            self.capabilities()["accounts"][0].clone()
         }
 
         fn idle(&self) {
@@ -891,16 +945,53 @@ mod tests {
     #[tokio::test]
     async fn a_transient_challenge_failure_records_nothing() {
         let harness = Harness::new();
-        *harness.answer.lock().unwrap() = Answer::Transient;
-        assert_eq!(
-            harness.generate().await.unwrap_err().code,
-            FailureCode::Deadline
-        );
-        harness.idle();
-        assert_eq!(harness.row()["admission"], "pending");
+        // A deadline, and a provider error such as a rate limit, are transient.
+        for (answer, code) in [
+            (Answer::Transient, FailureCode::Deadline),
+            (Answer::ProviderError, FailureCode::ProviderError),
+        ] {
+            *harness.answer.lock().unwrap() = answer;
+            assert_eq!(harness.generate().await.unwrap_err().code, code);
+            harness.idle();
+            assert_eq!(harness.row()["admission"], "pending");
+        }
         *harness.answer.lock().unwrap() = Answer::Echo;
         harness.generate().await.unwrap();
+        assert_eq!(harness.challenges.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn two_builds_sharing_state_keep_their_own_admission() {
+        let harness = Harness::new();
+        let first = harness.pin.lock().unwrap().clone();
+        harness.generate().await.unwrap();
+        // A second xcb (say an app's bundled copy) on the same state.
+        harness.pin.lock().unwrap().host_sha256 = "5".repeat(64);
+        harness.generate().await.unwrap();
         assert_eq!(harness.challenges.load(Ordering::SeqCst), 2);
+        // Switching back finds the first build's record intact.
+        *harness.pin.lock().unwrap() = first;
+        assert_eq!(harness.row()["admission"], "admitted");
+        harness.generate().await.unwrap();
+        assert_eq!(harness.challenges.load(Ordering::SeqCst), 2);
+
+        // Records for old builds are bounded.
+        for index in 0..(KEPT_BUILDS + 3) {
+            harness.pin.lock().unwrap().host_sha256 = format!("{index:x}").repeat(64)[..64].into();
+            harness.generate().await.unwrap();
+        }
+        let records = std::fs::read_dir(account_dir(harness.store.root(), &harness.account))
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".json")
+            })
+            .count();
+        assert!(records <= KEPT_BUILDS, "{records} records");
     }
 
     #[tokio::test]
@@ -957,8 +1048,11 @@ mod tests {
         let row = harness.row();
         assert_eq!(row["available"], false);
         assert_eq!(row["reason"], "application_disabled");
-        // Never `pending` beside a refusal.
+        // Never `pending` beside a refusal, on the account or its models.
         assert_eq!(row["admission"], serde_json::Value::Null);
+        assert_eq!(row["models"][0]["admission"], serde_json::Value::Null);
+        assert_eq!(row["models"][0]["key"], harness.model.key());
+        assert_eq!(harness.capabilities()["supported"], false);
         assert_eq!(harness.challenges.load(Ordering::SeqCst), 0);
         Access::set(root, None, true).unwrap();
         harness.generate().await.unwrap();

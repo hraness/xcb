@@ -326,6 +326,16 @@ class RenewalTests(unittest.TestCase):
         row["qualification"]["expiresAt"] = r.now_ms() + r.DAY_MS
         with query(), self.assertRaises(ValueError):
             r.capabilities(self.binding)
+        row["qualification"]["expiresAt"] = expiry
+        # A receipt for another model plus an automatically admitted or pending
+        # bound model is not a strict qualification of the bound model.
+        for admission in ("pending", "admitted"):
+            row["models"] = [{"key": "claude/sonnet/low", "admission": admission}]
+            with query(), self.assertRaises(ValueError, msg=admission):
+                r.capabilities(self.binding, True)
+        row["models"] = [{"key": "claude/sonnet/low", "admission": "qualified"}]
+        with query():
+            self.assertEqual(r.capabilities(self.binding, True)["expiresAt"], expiry)
 
     def busy_qualified_row(self, expiry, evidence_digest):
         return {"id": "a_synthetic", "provider": "claude", "enabled": True, "connected": True,

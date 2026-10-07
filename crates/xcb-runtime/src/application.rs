@@ -257,8 +257,10 @@ pub struct ApplicationModel {
     pub key: String,
     pub label: String,
     pub observed_at_ms: u64,
-    /// Added in 0.20: `qualified`, `admitted` or `pending`.
-    pub admission: AdmissionState,
+    /// Added in 0.20: `qualified`, `admitted` or `pending`. Only `qualified`
+    /// survives on an unavailable account row; the others become `null` so
+    /// `pending` never appears beside a `reason`.
+    pub admission: Option<AdmissionState>,
 }
 
 pub fn empty_capabilities() -> Capabilities {
@@ -330,6 +332,10 @@ pub(crate) fn capabilities_with(store: &Store, hooks: &AdmissionHooks) -> Result
                 {
                     AdmissionState::Qualified
                 } else {
+                    // An unproven host serves only receipt-covered models.
+                    if host.flatten() == Some(false) {
+                        return None;
+                    }
                     let pin = pin.as_ref()?;
                     auto_state(store, pin, &account.id, model, &policy, &config, now)?
                 };
@@ -337,7 +343,7 @@ pub(crate) fn capabilities_with(store: &Store, hooks: &AdmissionHooks) -> Result
                     key: model.key(),
                     label: model.label.clone(),
                     observed_at_ms: model.observed_at_ms,
-                    admission: state,
+                    admission: Some(state),
                 })
             })
             .collect();
@@ -376,6 +382,19 @@ pub(crate) fn capabilities_with(store: &Store, hooks: &AdmissionHooks) -> Result
         };
         let reason = row.reason();
         result.supported |= row.supported();
+        let admission = if reason.is_some() {
+            None
+        } else {
+            row.admission()
+        };
+        let mut models = models;
+        if reason.is_some() {
+            for model in &mut models {
+                if model.admission != Some(AdmissionState::Qualified) {
+                    model.admission = None;
+                }
+            }
+        }
         result.accounts.push(ApplicationAccount {
             name: account.name(),
             email: account.email.clone(),
@@ -389,11 +408,7 @@ pub(crate) fn capabilities_with(store: &Store, hooks: &AdmissionHooks) -> Result
             reason,
             // Never `pending` beside a reason: a consumer that treats pending
             // as usable must not bypass the kill switch or a refusal.
-            admission: if reason.is_some() {
-                None
-            } else {
-                row.admission()
-            },
+            admission,
             models,
             qualification: qualified.map(|proof| proof.public()),
         });
@@ -477,13 +492,16 @@ impl AccountFacts<'_> {
             AdmissionState::Pending,
         ]
         .into_iter()
-        .find(|state| self.models.iter().any(|model| model.admission == *state))
+        .find(|state| {
+            self.models
+                .iter()
+                .any(|model| model.admission == Some(*state))
+        })
     }
     pub(crate) fn supported(&self) -> bool {
-        self.any_qualified
-            || (self.access == Some(true)
-                && self.runtime_admitted
-                && self.host_boundary != Some(false))
+        // The owner switch wins even over a strict receipt.
+        self.access == Some(true)
+            && (self.any_qualified || (self.runtime_admitted && self.host_boundary != Some(false)))
     }
 }
 
@@ -493,7 +511,7 @@ impl AccountFacts<'_> {
 fn cap_pending(models: Vec<ApplicationModel>, budget: &mut usize) -> Vec<ApplicationModel> {
     let firm = models
         .iter()
-        .filter(|model| model.admission != AdmissionState::Pending)
+        .filter(|model| model.admission != Some(AdmissionState::Pending))
         .count();
     *budget = budget.saturating_sub(firm);
     let mut room = MAX_ACCOUNT_CAPABILITY_MODELS
@@ -503,7 +521,7 @@ fn cap_pending(models: Vec<ApplicationModel>, budget: &mut usize) -> Vec<Applica
     let kept: Vec<_> = models
         .into_iter()
         .filter(|model| {
-            if model.admission != AdmissionState::Pending {
+            if model.admission != Some(AdmissionState::Pending) {
                 return true;
             }
             let fits = room > 0;
@@ -1674,7 +1692,7 @@ mod tests {
                 key: format!("claude/fixture-{index}"),
                 label: "Synthetic".into(),
                 observed_at_ms: 1,
-                admission: AdmissionState::Pending,
+                admission: Some(AdmissionState::Pending),
             });
             if index + 1 == MAX_CAPABILITY_MODELS {
                 assert!(validate_capability_bounds(&value).is_ok());
