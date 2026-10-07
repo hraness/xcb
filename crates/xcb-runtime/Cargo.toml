@@ -33,8 +33,8 @@ tempfile = "=3.27.0"
 thiserror = "=2.0.21"
 time = { version = "=0.3.55", features = ["parsing"] }
 tokio = { version = "=1.47.1", features = ["rt-multi-thread", "macros", "process", "io-util", "io-std", "net", "sync", "time", "signal"] }
-tokio-rustls = { version = "=0.26.5", default-features = false, features = ["ring", "tls12"] }
-uuid = { version = "=1.26.1", features = ["v4", "v7", "serde"] }
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring", "tls12"] }
+uuid = { version = "=1.27.0", features = ["v4", "v7", "serde"] }
 webpki-roots = "=1.0.9"
 xcb-core = { version = "0.19.8", path = "../xcb-core" }
 zeroize = "=1.9.0"
