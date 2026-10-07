@@ -6,9 +6,7 @@
 > Personally, I like asking my agent to create long-running jobs that scale
 > parallelism based on load and available usage. xcb exposes pretty much every
 > feature in Claude Code and Codex, so you can create whatever custom setup
-> you want (you can even build apps on top of it). I’m going to China for a
-> month, and I plan to leave several herds of agents running on one of my
-> laptops, shepherded by xcb.
+> you want (you can even build apps on top of it).
 >
 > Tell your agent to set it up: https://xcb.sh
 >
