@@ -1,44 +1,77 @@
 use crate::{Error, Result, digest, os, private};
 use rusqlite::{Connection, OpenFlags};
 use std::{
+    collections::HashMap,
     fs::OpenOptions,
     path::{Path, PathBuf},
-    sync::{Condvar, Mutex, OnceLock},
+    sync::{Arc, Condvar, Mutex, OnceLock, Weak},
     time::{Duration, Instant},
 };
 
-/// In-process serialization around coordination database setup and use. A
-/// flag under a mutex with a condition variable gives waiters a bounded,
-/// wake-on-release wait instead of a sleep loop.
-static LOCAL_WRITER: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+/// In-process serialization around one workspace's coordination database
+/// setup and use. A flag under a mutex with a condition variable gives
+/// waiters a bounded, wake-on-release wait instead of a sleep loop. The flag
+/// is scoped like the lock database it guards: every `Coordination` for the
+/// same workspace and root shares one, and different workspaces never
+/// contend, so a long native command in one workspace cannot make another
+/// workspace's writers report busy. Cross-process exclusion stays with the
+/// per-workspace SQLite `BEGIN IMMEDIATE` lock.
+#[derive(Default)]
+struct LocalWriter {
+    held: Mutex<bool>,
+    released: Condvar,
+}
 const WAIT: Duration = Duration::from_secs(5);
 
-struct LocalGuard;
-impl Drop for LocalGuard {
-    fn drop(&mut self) {
-        if let Ok(mut held) = LOCAL_WRITER.0.lock() {
-            *held = false;
-        }
-        LOCAL_WRITER.1.notify_one();
-    }
-}
-fn local_writer(deadline: Instant) -> Result<LocalGuard> {
-    let (flag, released) = &LOCAL_WRITER;
-    let mut held = flag
+/// Live writer flags keyed by (coordination root, workspace). Entries are
+/// weak so a workspace's flag is freed once its last `Coordination` drops.
+type Writers = Mutex<HashMap<(PathBuf, PathBuf), Weak<LocalWriter>>>;
+static LOCAL_WRITERS: OnceLock<Writers> = OnceLock::new();
+
+fn shared_writer(workspace: &Path, root: &Path) -> Result<Arc<LocalWriter>> {
+    let mut writers = LOCAL_WRITERS
+        .get_or_init(Writers::default)
         .lock()
         .map_err(|_| Error::Conflict("workspace writer lock poisoned"))?;
-    while *held {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(Error::Conflict("workspace writer is busy; retry"));
-        }
-        held = released
-            .wait_timeout(held, remaining)
-            .map_err(|_| Error::Conflict("workspace writer lock poisoned"))?
-            .0;
+    let key = (root.to_owned(), workspace.to_owned());
+    if let Some(writer) = writers.get(&key).and_then(Weak::upgrade) {
+        return Ok(writer);
     }
-    *held = true;
-    Ok(LocalGuard)
+    writers.retain(|_, writer| writer.strong_count() > 0);
+    let writer = Arc::new(LocalWriter::default());
+    writers.insert(key, Arc::downgrade(&writer));
+    Ok(writer)
+}
+
+struct LocalGuard<'a>(&'a LocalWriter);
+impl Drop for LocalGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut held) = self.0.held.lock() {
+            *held = false;
+        }
+        self.0.released.notify_one();
+    }
+}
+impl LocalWriter {
+    fn acquire(&self, deadline: Instant) -> Result<LocalGuard<'_>> {
+        let mut held = self
+            .held
+            .lock()
+            .map_err(|_| Error::Conflict("workspace writer lock poisoned"))?;
+        while *held {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(Error::Conflict("workspace writer is busy; retry"));
+            }
+            held = self
+                .released
+                .wait_timeout(held, remaining)
+                .map_err(|_| Error::Conflict("workspace writer lock poisoned"))?
+                .0;
+        }
+        *held = true;
+        Ok(LocalGuard(self))
+    }
 }
 
 /// The checked coordination directory, lock database path and open SQLite
@@ -51,6 +84,7 @@ pub(crate) struct Coordination {
     root: PathBuf,
     checked: OnceLock<Checked>,
     connection: Mutex<Option<Cached>>,
+    local: Arc<LocalWriter>,
 }
 struct Checked {
     path: PathBuf,
@@ -69,7 +103,7 @@ struct Cached {
 /// exclusion only, never data.
 pub(crate) struct WriteLock<'a> {
     slot: std::sync::MutexGuard<'a, Option<Cached>>,
-    _local: LocalGuard,
+    _local: LocalGuard<'a>,
 }
 
 pub(crate) fn default_root() -> Result<PathBuf> {
@@ -100,13 +134,15 @@ impl Coordination {
             root: root.to_owned(),
             checked: OnceLock::new(),
             connection: Mutex::new(None),
+            local: shared_writer(workspace, root)?,
         })
     }
     pub(crate) fn root(&self) -> &Path {
         &self.root
     }
     /// The lock database path inside the checked private directory. Called
-    /// under the local writer so setup never races another in-process writer.
+    /// under the workspace's local writer so setup never races another
+    /// in-process writer for the same workspace.
     fn database(&self) -> Result<&Path> {
         let checked = match self.checked.get() {
             Some(checked) => checked,
@@ -188,7 +224,7 @@ impl WriteLock<'_> {
     pub(crate) fn acquire(coordination: &Coordination) -> Result<WriteLock<'_>> {
         let started = Instant::now();
         let deadline = started + WAIT;
-        let local = local_writer(deadline)?;
+        let local = coordination.local.acquire(deadline)?;
         let mut slot = coordination
             .connection
             .lock()
@@ -249,16 +285,19 @@ mod tests {
 
     #[test]
     fn local_writer_waiters_wake_on_release_and_time_out_when_held() {
-        let first = local_writer(Instant::now() + WAIT).unwrap();
+        let writer = Arc::new(LocalWriter::default());
+        let first = writer.acquire(Instant::now() + WAIT).unwrap();
         let started = Instant::now();
-        let error = local_writer(started + Duration::from_millis(50))
+        let error = writer
+            .acquire(started + Duration::from_millis(50))
             .err()
             .expect("held writer times out");
         assert!(error.to_string().contains("busy"));
         assert!(started.elapsed() < WAIT);
         let (released, waiter) = std::sync::mpsc::channel();
+        let shared = Arc::clone(&writer);
         let thread = std::thread::spawn(move || {
-            let guard = local_writer(Instant::now() + WAIT).unwrap();
+            let guard = shared.acquire(Instant::now() + WAIT).unwrap();
             released.send(Instant::now()).unwrap();
             drop(guard);
         });
@@ -271,6 +310,32 @@ mod tests {
     }
 
     #[test]
+    fn different_workspaces_hold_writers_together_and_one_workspace_stays_exclusive() {
+        let temporary = tempfile::tempdir().unwrap();
+        let base = xcb_core::canonical(temporary.path()).unwrap();
+        let root = base.join("coordination");
+        let first = base.join("first");
+        let second = base.join("second");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        let held = Coordination::new(&first, &root).unwrap();
+        let other = Coordination::new(&second, &root).unwrap();
+        let _held = WriteLock::acquire(&held).unwrap();
+        let started = Instant::now();
+        let _other = WriteLock::acquire(&other).expect("another workspace never contends");
+        assert!(started.elapsed() < WAIT);
+        // A second handle on the held workspace shares its in-process writer
+        // and reports busy once the bounded wait runs out.
+        let again = Coordination::new(&first, &root).unwrap();
+        let started = Instant::now();
+        let error = WriteLock::acquire(&again)
+            .err()
+            .expect("same workspace stays exclusive");
+        assert!(error.to_string().contains("busy"));
+        assert!(started.elapsed() >= WAIT);
+    }
+
+    #[test]
     fn coordination_checks_the_private_directory_once_and_reverifies_its_identity() {
         let temporary = tempfile::tempdir().unwrap();
         let base = xcb_core::canonical(temporary.path()).unwrap();
@@ -279,7 +344,7 @@ mod tests {
         let root = base.join("coordination");
         let coordination = Coordination::new(&workspace, &root).unwrap();
         assert!(!root.exists());
-        let _guard = local_writer(Instant::now() + WAIT).unwrap();
+        let _guard = coordination.local.acquire(Instant::now() + WAIT).unwrap();
         let path = coordination.database().unwrap().to_owned();
         assert!(root.is_dir());
         assert_eq!(path.parent().unwrap(), root);
