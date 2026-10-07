@@ -214,6 +214,11 @@ impl ManagedConversation {
     }
 }
 
+/// The detail `xcb backlog dismiss` records. 0.19.7 recorded it without the
+/// `dismissed` flag, so either one marks an owner dismissal.
+pub(crate) const DISMISSED_DETAIL: &str =
+    "dismissed by the owner with unreconciled effects; no retry launched";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedTask {
@@ -331,6 +336,10 @@ pub struct ManagedTask {
     pub max_attempts: u32,
     pub message_count_before: usize,
     pub cancel_requested: bool,
+    /// The owner closed this task from uncertainty without proof of its
+    /// outcome (`xcb backlog dismiss`); it settles as failed, never retried.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dismissed: bool,
     pub last_output: Option<String>,
     pub policy_digest: String,
     pub last_receipt: String,
@@ -2690,6 +2699,7 @@ impl ManagedStore {
             max_attempts: MAX_TASK_ATTEMPTS,
             message_count_before: 0,
             cancel_requested: false,
+            dismissed: false,
             last_output: None,
             policy_digest: policy,
             last_receipt: "sha256:pending".into(),
@@ -9506,6 +9516,7 @@ mod tests {
             max_attempts: 8,
             message_count_before: 0,
             cancel_requested: false,
+            dismissed: false,
             last_output: None,
             policy_digest: "sha256:x".into(),
             last_receipt: "sha256:x".into(),

@@ -10,6 +10,13 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.19.8 - 2026-10-06
+
+xcb lets a herd program move on after you dismiss one of its tasks.
+
+- A program waiting on a task you closed with `xcb backlog dismiss` now stops, or finishes cancelling, instead of waiting forever. This includes tasks dismissed with 0.19.7.
+- Record dismissals on the task itself, so later xcb versions can tell them apart from other failures.
+
 ## 0.19.7 - 2026-10-06
 
 xcb keeps unattended workers moving when a native command fails or a worker ends with an uncertain result.

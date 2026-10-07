@@ -1812,3 +1812,45 @@ async fn program_history_rejects_unknown_versions_and_fields() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn an_owner_dismissed_child_settles_its_waiting_or_cancelled_program() {
+    for cancel in [false, true] {
+        let f = fixture().await;
+        let (parent, child) = waiting(&f, 1).await;
+        let mut uncertain = child.clone();
+        uncertain.state = TaskState::Uncertain;
+        uncertain.session = Some(Id::new("s_dismissed_child").unwrap());
+        uncertain.attempts = 1;
+        uncertain.revision += 1;
+        uncertain.updated_at_ms = now_ms().max(child.updated_at_ms);
+        let uncertain = f.managed.transition(&child, uncertain, None).await.unwrap();
+        if cancel {
+            let mut next = parent.clone();
+            next.cancel_requested = true;
+            next.revision += 1;
+            next.updated_at_ms = now_ms().max(parent.updated_at_ms);
+            f.managed.transition(&parent, next, None).await.unwrap();
+        }
+        f.managed.tick_programs(&f.store, true).await.unwrap();
+        assert!(f.managed.task(&parent.id).unwrap().unwrap().program_waiting);
+
+        let dismissed = f
+            .managed
+            .dismiss_uncertain(&f.store, &uncertain.id, uncertain.revision)
+            .await
+            .unwrap();
+        assert!(dismissed.dismissed);
+        f.managed.tick_programs(&f.store, true).await.unwrap();
+        let settled = f.managed.task(&parent.id).unwrap().unwrap();
+        assert!(!settled.program_waiting);
+        assert_eq!(
+            settled.state,
+            if cancel {
+                TaskState::Cancelled
+            } else {
+                TaskState::Failed
+            }
+        );
+    }
+}

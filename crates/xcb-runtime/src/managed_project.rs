@@ -875,9 +875,10 @@ impl ManagedStore {
         next.state = TaskState::Failed;
         next.attention = None;
         next.cancel_requested = false;
+        next.dismissed = true;
         next.next_prompt.clear();
         next.attachments.clear();
-        next.detail = "dismissed by the owner with unreconciled effects; no retry launched".into();
+        next.detail = super::DISMISSED_DETAIL.into();
         next.revision += 1;
         next.updated_at_ms = now_ms().max(task.updated_at_ms);
         let message = Self::assistant(
