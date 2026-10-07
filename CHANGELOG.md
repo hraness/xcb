@@ -21,6 +21,12 @@ new account without a separate command.
   and names `xcb accounts refresh` as the next step. Their `--json` output adds
   `models` (the count loaded, or `null`); `generate --capabilities` is
   unchanged and still reads local metadata only.
+- `xcb native grant --host-read` lets a workspace's native commands read and
+  run host toolchains anywhere outside private state, as a provider's own
+  workspace-write mode does, and puts Cargo, Bun, nvm Node and Homebrew on
+  their `PATH` with rustup pointed at the host's toolchains. Writes stay
+  confined, and credentials, `~/.config`, shell history and personal
+  `~/Library` stores stay hidden. Existing grants are unchanged.
 
 ## 0.20.1 - 2026-10-07
 

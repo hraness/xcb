@@ -95,7 +95,15 @@ field except `version`, `workspace`, and `task` is optional.
   Use `--github` on both verification and granting if commands need host
   GitHub credentials.
   Add `--read-only-root` for toolchains outside system directories and
-  `--git-metadata` for a worktree's external Git directories. A matching
+  `--git-metadata` for a worktree's external Git directories, or
+  `--host-read` to let commands read and run anything on the host, like a
+  provider's own workspace-write mode. A host-read grant still hides xcb's
+  private state, provider and GitHub credentials, `~/.config`, shell history
+  and the browser, mail, message and application-support stores under
+  `~/Library`; writes stay confined to the workspace and its Git metadata.
+  Its commands also search `~/.cargo/bin`, `~/.bun/bin`, the newest nvm
+  Node, Homebrew and `/usr/local/bin`, and rustup resolves the host's
+  installed toolchains. A matching
   workspace grant also requests native execution for new direct routes and
   newly submitted tasks. Missing or stale tests and grants return
   `unavailable`, including for a dry run; native tasks never substitute the
