@@ -10,6 +10,18 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## Unreleased
+
+Signing in loads the account's models, so applications and `xcb models` see a
+new account without a separate command.
+
+- `xcb accounts login`, `accounts token` and `accounts import-codex` now load
+  the account's model catalog as their last step, as `xcb setup` and `accounts
+  refresh` already did. A sign-in whose load fails still stores the credential
+  and names `xcb accounts refresh` as the next step. Their `--json` output adds
+  `models` (the count loaded, or `null`); `generate --capabilities` is
+  unchanged and still reads local metadata only.
+
 ## 0.20.1 - 2026-10-07
 
 Signed-in accounts stay available to applications however long ago xcb last
