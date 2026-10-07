@@ -10,7 +10,7 @@ export function contentSecurityPolicy(development = false): string {
     "img-src 'self' data: blob:",
     "font-src 'self' data:",
     "media-src 'self'",
-    "connect-src 'self' https://us.i.posthog.com https://us.posthog.com",
+    "connect-src 'self' https://us.i.posthog.com https://us.posthog.com https://account.hraness.com",
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",
