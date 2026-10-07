@@ -1230,7 +1230,7 @@ impl ManagedStore {
             program_child: None, daemon_child: Some(DaemonChild { process: meta.process.clone(), request_digest: call.request_digest.clone(), generation: policy.generation.clone(), required_provider: policy.required_provider }),
             schedule: None, binding: habitat::inherited_binding(&meta.conversation, BindingOrigin::Daemon, format!("from daemon {}", meta.process)), hold_until_ms: None, moved_from: None, detail: if routing_question { "This daemon request conflicts with the project provider requirement. Reply to this child with revised work for the required provider, or cancel it." } else { "managed daemon child; waiting for an eligible worker" }.into(),
             settle: None, acted: None, inbox_continuation: false, attempts: 0, max_attempts: MAX_TASK_ATTEMPTS, message_count_before: 0,
-            cancel_requested: false, last_output: None, policy_digest, last_receipt: "sha256:pending".into(), revision: 1, created_at_ms: now, updated_at_ms: now,
+            cancel_requested: false, dismissed: false, last_output: None, policy_digest, last_receipt: "sha256:pending".into(), revision: 1, created_at_ms: now, updated_at_ms: now,
         };
         task.validate()?;
         bounded_text(
