@@ -1,8 +1,12 @@
 import { fileURLToPath } from "node:url";
 import type { NextConfig } from "next";
+import { securityHeaders } from "./security-headers";
 
 const nextConfig: NextConfig = {
   outputFileTracingRoot: fileURLToPath(new URL(".", import.meta.url)),
+  async headers() {
+    return [{ source: "/:path*", headers: securityHeaders(process.env.NODE_ENV === "development") }];
+  },
   async redirects() {
     return [
       {
