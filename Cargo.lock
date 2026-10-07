@@ -92,7 +92,7 @@ dependencies = [
  "apple-foundation",
  "clap",
  "getrandom 0.3.4",
- "hraness-cli-kit",
+ "hraness-cli-kit 0.8.1",
  "hraness-cli-update",
  "libc",
  "reqwest",
@@ -714,7 +714,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1084,6 +1084,14 @@ dependencies = [
 name = "hraness-cli-kit"
 version = "0.8.1"
 source = "git+https://github.com/hraness/desktop-foundation?tag=v0.8.1#6040606576167e4e8d0163a564463f04fa238be4"
+dependencies = [
+ "clap",
+]
+
+[[package]]
+name = "hraness-cli-kit"
+version = "1.1.2"
+source = "git+https://github.com/hraness/desktop-foundation?tag=v1.1.2#c6003c05a86ab9a188b8bc20dd4de5fe459affab"
 dependencies = [
  "clap",
 ]
@@ -1892,7 +1900,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2145,7 +2153,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2551,7 +2559,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2561,7 +2569,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3203,7 +3211,7 @@ version = "0.19.8"
 dependencies = [
  "clap",
  "clap_complete",
- "hraness-cli-kit",
+ "hraness-cli-kit 1.1.2",
  "rusqlite",
  "rustix",
  "serde",
