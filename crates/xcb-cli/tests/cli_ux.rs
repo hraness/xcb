@@ -2078,3 +2078,25 @@ fn project_preflight_reports_blockers_without_creating_state() {
     assert_eq!(report["requiredFiles"][0]["ready"], false);
     assert!(!sandbox.state().exists());
 }
+
+#[test]
+fn storing_a_token_without_a_provider_build_loads_nothing_and_still_stores_it() {
+    // Sign-in loads the account's models when a supported provider build is
+    // recorded; without one nothing launches and the credential is still
+    // stored.
+    let sandbox = Sandbox::new("token-catalog");
+    let account = sandbox.add(&["claude", "--plan", "Pro"]);
+    let token = b"sk-ant-oat01-syntheticToken000000000000";
+    let stored = sandbox.run_with_input(&["--json", "accounts", "token", &account], token);
+    assert!(stored.status.success(), "{stored:?}");
+    let value: serde_json::Value = serde_json::from_slice(&stored.stdout).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({"version":1,"account":account,"stored":true,"models":null}),
+    );
+    let again = sandbox.run_with_input(&["accounts", "token", &account], token);
+    assert!(again.status.success(), "{again:?}");
+    let printed = format!("{}{}", text(&again.stdout), text(&again.stderr));
+    assert!(printed.contains("Credential stored for"), "{printed}");
+    assert!(!printed.contains("Loaded"), "{printed}");
+}

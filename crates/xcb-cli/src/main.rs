@@ -2024,8 +2024,11 @@ async fn dispatch_inner(
                             ));
                         }
                     }
+                    let models = load_catalog_after_sign_in(&store, &account.id, Some(&pin)).await;
                     if cli.json {
-                        print_json(json!({"version":1,"account":account.id,"stored":true}))?;
+                        print_json(
+                            json!({"version":1,"account":account.id,"stored":true,"models":models}),
+                        )?;
                     } else {
                         let account = store.account(&account.id)?;
                         // codeql[rust/cleartext-logging]: the account name is
@@ -2036,7 +2039,7 @@ async fn dispatch_inner(
                             ux::Style::stdout().symbol(ux::Symbol::Ok),
                             account.name()
                         );
-                        ux::next(&format!("xcb accounts refresh {}", account.id));
+                        report_loaded_catalog(&account.id, models);
                     }
                 }
                 Some(AccountCommand::Token { account }) => {
@@ -2065,13 +2068,19 @@ async fn dispatch_inner(
                         Provider::Devin => unreachable!("retired Devin support was rejected above"),
                         Provider::Codex => unreachable!("Codex token input is rejected above"),
                     }
+                    let pin = Pin::load(store.root(), account.provider).ok();
+                    let models =
+                        load_catalog_after_sign_in(&store, &account.id, pin.as_ref()).await;
                     if cli.json {
-                        print_json(json!({"version":1,"account":account.id,"stored":true}))?;
+                        print_json(
+                            json!({"version":1,"account":account.id,"stored":true,"models":models}),
+                        )?;
                     } else {
                         println!(
                             "Credential stored for {}",
                             xcb_core::display_text(&account.name(), 80)
                         );
+                        report_loaded_catalog(&account.id, models);
                     }
                 }
                 Some(AccountCommand::Default { account }) => {
@@ -2146,14 +2155,21 @@ async fn dispatch_inner(
                     } else {
                         auth::import_codex_account(&store, &source)?
                     };
+                    let pin = Pin::load(store.root(), Provider::Codex).ok();
+                    let models = load_catalog_after_sign_in(&store, &id, pin.as_ref()).await;
                     if cli.json {
-                        print_json(import_acknowledgement(&id))?;
-                    } else if updating {
-                        println!("Updated the Codex sign-in for {id}.");
+                        let mut acknowledgement = import_acknowledgement(&id);
+                        acknowledgement["models"] = json!(models);
+                        print_json(acknowledgement)?;
                     } else {
-                        println!(
-                            "Imported one Codex account as {id}. Original state and sessions are unchanged."
-                        );
+                        if updating {
+                            println!("Updated the Codex sign-in for {id}.");
+                        } else {
+                            println!(
+                                "Imported one Codex account as {id}. Original state and sessions are unchanged."
+                            );
+                        }
+                        report_loaded_catalog(&id, models);
                     }
                 }
             }
@@ -4126,6 +4142,36 @@ fn add_setup_account(
         PublicAccount::from(&account).added_message().0
     );
     Ok(account)
+}
+
+/// Load the account's models right after a sign-in, as `accounts refresh`
+/// does, so `xcb models` and applications see the account without a separate
+/// command. The sign-in already succeeded: when the provider build is missing
+/// or unsupported, or the metadata probe fails, the credential stays stored
+/// and the caller names `accounts refresh` as the next step instead.
+async fn load_catalog_after_sign_in(
+    store: &Store,
+    account: &Id,
+    pin: Option<&Pin>,
+) -> Option<usize> {
+    let pin = pin?;
+    require_supported(store.root(), pin).ok()?;
+    let models = runner::probe(store, pin, Some(account)).await.ok()?;
+    store.set_account_models(account, &models).ok()?;
+    Some(models.len())
+}
+
+fn report_loaded_catalog(account: &Id, models: Option<usize>) {
+    match models {
+        Some(count) => {
+            println!(
+                "{} Loaded {count} models",
+                ux::Style::stdout().symbol(ux::Symbol::Ok)
+            );
+            ux::next("xcb");
+        }
+        None => ux::next(&format!("xcb accounts refresh {account}")),
+    }
 }
 
 async fn finish_account_setup(

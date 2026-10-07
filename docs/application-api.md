@@ -80,9 +80,11 @@ account's most recent provider catalog observation, however old it is: a
 `pending` model needs no recent refresh, and once admitted or qualified a model
 stays listed without further catalog refreshes. A model the provider has since
 withdrawn fails its own request. `models_unavailable` means xcb has never
-observed this account's catalog, as on a new install; `xcb accounts refresh
-ACCOUNT_ID` obtains it in a few seconds with a metadata probe, not a model turn.
-`--capabilities` itself never refreshes a provider.
+observed this account's catalog. Sign-in (`xcb accounts login`, `accounts
+token`, `accounts import-codex` and `xcb setup`) loads the catalog as its last
+step; if that load failed, `xcb accounts refresh ACCOUNT_ID` repeats it in a
+few seconds with a metadata probe, not a model turn. `--capabilities` itself
+never refreshes a provider.
 
 A reason is `application_disabled` (the owner turned app access off),
 `account_disabled`, `authentication_required`, `account_busy`, `not_connected`,
