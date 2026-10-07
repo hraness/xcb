@@ -10,6 +10,21 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## Unreleased
+
+Signed-in accounts stay available to applications however long ago xcb last
+observed their model catalog.
+
+- `generate --capabilities` no longer requires a model to have been seen in the
+  last 24 hours before listing it as `pending`, and `generate` no longer refuses
+  the first automatic check of such a model. Upgrading to 0.20.0 over an older
+  state folder reported every account `models_unavailable` with no models until
+  `xcb accounts refresh` ran; the last observed catalog is now offered in
+  catalog order within the existing caps, and a model the provider withdrew
+  fails its own request as before. `models_unavailable` now only means the
+  account's catalog has never been observed. `--capabilities` still reads local
+  metadata only and never refreshes a provider.
+
 ## 0.20.0 - 2026-10-07
 
 Apps can use a signed-in account with no manual command. The first
