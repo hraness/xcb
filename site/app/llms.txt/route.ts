@@ -22,7 +22,7 @@ const blogLines = indexableBlogPosts.map((entry) => `- [${entry.title}](https://
 
 const body = `# Excalibur (xcb)
 
-> Excalibur (xcb) routes coding tasks across the Claude and Codex subscriptions you already pay for.
+> Excalibur (xcb) is a tool for operating AI subscriptions. Log in with all your Claude and Codex accounts, then tell your agent to use xcb.
 
 xcb is a command-line router for developers who pay for more than one coding agent, and for the agents and apps that work for them. Each task runs on an account that is signed in, idle, and not at a known usage limit, on a model that fits the work, and xcb holds that account until the provider process exits. It is MIT licensed. ${releaseLine}
 

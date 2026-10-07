@@ -44,7 +44,8 @@ test("extracts the landing block between the shared Hraness markers", async () =
   const landing = readmeLanding(source);
   expect(landing.title).toBe("Excalibur (xcb)");
   // The canonical one-line description leads the README.
-  expect(landing.lead.startsWith("Excalibur (xcb) routes coding tasks across the Claude and Codex subscriptions you already pay for.")).toBe(true);
+  expect(landing.lead.startsWith("⚔️ Excalibur (xcb) is a tool for operating AI subscriptions.")).toBe(true);
+  expect(landing.lead).not.toContain(">");
   // The README never types the current version; the site inserts the verified release.
   const { version } = JSON.parse(await readFile(join(repository, "package.json"), "utf8")) as { version: string };
   const escapedVersion = version.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
