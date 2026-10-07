@@ -127,6 +127,7 @@ pub async fn verify_for_account(
         github_credentials: github,
         read_only_roots,
         git_metadata: vec![],
+        host_read: false,
     };
     let mut script = "set -eu; printf native-marker > native.txt; test \"$(cat native.txt)\" = native-marker; printf 'native-shell-ok\\n'; curl --silent --show-error --fail --max-time 20 --output /dev/null https://api.github.com/meta; printf 'native-dns-https-ok\\n'; git init --quiet .; git add native.txt; git -c user.name=XCB -c user.email=native@example.invalid commit --quiet -m 'native qualification'; test \"$(git rev-list --count HEAD)\" = 1; printf 'native-git-ok\\n'".to_string();
     if github {

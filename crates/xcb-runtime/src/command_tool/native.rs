@@ -61,6 +61,10 @@ pub(crate) fn policy(scope: &NativeScope, home: &Path, state: &Path) -> Result<S
             .collect::<Result<Vec<_>>>()
             .map(|parts| parts.join(" "))
     };
+    let mut protected = crate::native_backend::protected_paths(state)?;
+    if scope.host_read {
+        protected.extend(host_private_paths(home_dir()?));
+    }
     let mut ancestors = scope.read_only_roots.clone();
     ancestors.extend(scope.git_metadata.clone());
     let bindings = [
@@ -70,9 +74,14 @@ pub(crate) fn policy(scope: &NativeScope, home: &Path, state: &Path) -> Result<S
         ("git_write", paths(&scope.git_metadata, "subpath")?),
         ("ancestors", paths(&ancestors, "path-ancestors")?),
         (
-            "protected",
-            paths(&crate::native_backend::protected_paths(state)?, "subpath")?,
+            "host_read",
+            if scope.host_read {
+                "(allow file-read* process-exec file-map-executable (subpath \"/\"))\n".into()
+            } else {
+                String::new()
+            },
         ),
+        ("protected", paths(&protected, "subpath")?),
     ];
     include_str!("../native-command.sb")
         .split('@')
@@ -89,6 +98,74 @@ pub(crate) fn policy(scope: &NativeScope, home: &Path, state: &Path) -> Result<S
         })
         .collect::<Result<Vec<_>>>()
         .map(|parts| parts.join(""))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn home_dir() -> Result<std::path::PathBuf> {
+    Ok(xcb_core::canonical(
+        xcb_core::home_dir().ok_or(Error::PrivateState)?,
+    )?)
+}
+
+/// Personal data a host-read grant still hides, beyond xcb's protected
+/// credentials: configuration, browser, mail and message stores, and shell
+/// history. Toolchains never live here.
+#[cfg(any(target_os = "macos", test))]
+fn host_private_paths(home: std::path::PathBuf) -> Vec<std::path::PathBuf> {
+    [
+        ".config",
+        ".zsh_history",
+        ".bash_history",
+        ".zsh_sessions",
+        ".docker",
+        ".kube",
+        ".gnupg",
+        "Library/Application Support",
+        "Library/Containers",
+        "Library/Group Containers",
+        "Library/Cookies",
+        "Library/Mail",
+        "Library/Messages",
+        "Library/Safari",
+        "Library/Accounts",
+        "Library/Mobile Documents",
+    ]
+    .map(|path| home.join(path))
+    .into()
+}
+
+/// Host toolchain directories a host-read command searches before system
+/// directories, in the order a login shell usually puts them.
+#[cfg(target_os = "macos")]
+fn host_toolchain_paths(home: &Path) -> Vec<std::path::PathBuf> {
+    let mut node = std::fs::read_dir(home.join(".nvm/versions/node"))
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok().map(|entry| entry.path().join("bin")))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    node.sort_by_key(|path| {
+        path.parent()
+            .and_then(|version| version.file_name())
+            .and_then(|name| name.to_str())
+            .map(|name| {
+                name.trim_start_matches('v')
+                    .split('.')
+                    .map(|part| part.parse::<u64>().unwrap_or(0))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    });
+    [home.join(".cargo/bin"), home.join(".bun/bin")]
+        .into_iter()
+        .chain(node.pop())
+        .chain(
+            ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin"]
+                .map(std::path::PathBuf::from),
+        )
+        .filter(|path| path.is_dir())
+        .collect()
 }
 
 #[cfg(target_os = "macos")]
@@ -167,7 +244,15 @@ async fn prepare_and_execute(
         .arg(policy_path)
         .args(&request.argv)
         .current_dir(cwd);
+    let host = home_dir()?;
     let mut paths = Vec::new();
+    if scope.host_read {
+        paths.extend(
+            host_toolchain_paths(&host)
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned()),
+        );
+    }
     for root in &scope.read_only_roots {
         paths.push(root.to_string_lossy().into_owned());
         if root.join("bin").is_dir() {
@@ -193,7 +278,14 @@ async fn prepare_and_execute(
     )
     .await
     {
-        Ok(token) => token,
+        Ok(token) => {
+            // The command's HOME is private scratch, so point rustup at the
+            // host's installed toolchains for rust-toolchain.toml pins.
+            if scope.host_read && host.join(".rustup").is_dir() {
+                command.env("RUSTUP_HOME", host.join(".rustup"));
+            }
+            token
+        }
         Err(error) => {
             let uncertain = error.is_cleanup_unproven();
             if !uncertain {
@@ -376,6 +468,7 @@ pub async fn qualify(state: &Path) -> Result<crate::native_backend::Qualificatio
             github_credentials: false,
             read_only_roots: vec![],
             git_metadata: vec![],
+            host_read: false,
         };
         let policy_path = root.join("command.sb");
         private::create(&policy_path, policy(&scope, &home, state)?.as_bytes())?;
@@ -469,6 +562,7 @@ mod tests {
             github_credentials: false,
             read_only_roots: vec![],
             git_metadata: vec![],
+            host_read: false,
         };
         let rendered = policy(&scope, &home, &state).unwrap();
         assert!(rendered.contains(&serde_json::to_string(&workspace).unwrap()));
@@ -481,5 +575,48 @@ mod tests {
         assert!(rendered.contains("(deny network-inbound)"));
         assert!(!rendered.contains("@protected@"));
         assert!(!rendered.contains("(allow network-outbound)"));
+        assert!(!rendered.contains("(subpath \"/\"))"));
+    }
+
+    #[test]
+    fn host_read_opens_host_paths_but_still_hides_private_state_last() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
+        let workspace = crate::private::directory(&base.join("workspace")).unwrap();
+        let home = crate::private::directory(&base.join("home")).unwrap();
+        let state = crate::private::directory(&base.join("state")).unwrap();
+        let scope = NativeScope {
+            workspace,
+            providers: xcb_core::Provider::SUPPORTED.to_vec(),
+            github_credentials: false,
+            read_only_roots: vec![],
+            git_metadata: vec![],
+            host_read: true,
+        };
+        let rendered = policy(&scope, &home, &state).unwrap();
+        let open = rendered
+            .find("(allow file-read* process-exec file-map-executable (subpath \"/\"))")
+            .expect("host read rule");
+        let hidden = rendered.find("(deny file-read* file-write*").unwrap();
+        // Seatbelt applies the last matching rule, so private state must follow the host rule.
+        assert!(open < hidden);
+        let deny = &rendered[hidden..];
+        let real_home = home_dir().unwrap();
+        for private in [
+            ".ssh",
+            ".codex",
+            ".claude",
+            ".config",
+            "Library/Keychains",
+            "Library/Application Support",
+        ] {
+            assert!(
+                deny.contains(&serde_json::to_string(&real_home.join(private)).unwrap()),
+                "{private}"
+            );
+        }
+        assert!(deny.contains(&serde_json::to_string(&state).unwrap()));
+        assert!(!rendered.contains("(allow file-write* (subpath \"/\"))"));
+        assert!(!rendered.contains("@host_read@"));
     }
 }

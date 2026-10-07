@@ -29,6 +29,10 @@ pub struct NativeScope {
     pub read_only_roots: Vec<PathBuf>,
     #[serde(default)]
     pub git_metadata: Vec<PathBuf>,
+    /// Commands may read and execute any host path outside private state,
+    /// like a provider's own workspace-write mode. Writes stay confined.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub host_read: bool,
 }
 
 impl NativeConfig {
@@ -1119,6 +1123,7 @@ mod tests {
             github_credentials: false,
             read_only_roots: vec![],
             git_metadata: vec![],
+            host_read: false,
         };
         let config = NativeConfig {
             scopes: vec![scope.clone()],
@@ -1185,6 +1190,7 @@ mod tests {
             github_credentials: false,
             read_only_roots: vec![],
             git_metadata: vec![],
+            host_read: false,
         };
         validate_grant(&scope, &state).unwrap();
         for path in [state.clone(), base.clone()] {
@@ -1230,6 +1236,7 @@ mod tests {
             github_credentials: false,
             read_only_roots: vec![],
             git_metadata: vec![],
+            host_read: false,
         };
         let arguments =
             serde_json::json!({"argv":["/bin/true"],"cwd":".","timeoutMs":1000,"network":"https"});

@@ -204,6 +204,11 @@ pub(crate) enum Commands {
             help = "Explicit writable Git metadata directory outside the worktree; repeat as needed"
         )]
         git_metadata: Vec<PathBuf>,
+        #[arg(
+            long = "host-read",
+            help = "Let commands read and run host toolchains outside private state, like a provider's workspace-write mode; writes stay confined"
+        )]
+        host_read: bool,
     },
 }
 
@@ -520,6 +525,7 @@ pub(crate) async fn execute(
             github,
             read_only_roots,
             git_metadata,
+            host_read,
         } => {
             native_backend::require_qualification(store.root())?;
             let workspace = xcb_core::canonical(workspace)?;
@@ -549,6 +555,7 @@ pub(crate) async fn execute(
                     .into_iter()
                     .map(xcb_core::canonical)
                     .collect::<std::io::Result<_>>()?,
+                host_read,
             };
             native_backend::validate_grant(&scope, store.root())?;
             let (mut config, revision) = Config::load(store.root())?;
@@ -595,6 +602,7 @@ mod tests {
                 github_credentials: false,
                 read_only_roots: vec![],
                 git_metadata: vec![],
+                host_read: false,
             });
         }
         config.save(store.root(), revision.as_deref()).unwrap();

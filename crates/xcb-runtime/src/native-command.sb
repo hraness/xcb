@@ -11,5 +11,5 @@
 (allow file-ioctl (literal "/dev/null") (literal "/dev/fd/0") (literal "/dev/fd/1") (literal "/dev/fd/2"))
 (allow file-read-metadata (path-ancestors @workspace@) (path-ancestors @home@) @ancestors@)
 (allow network-outbound (literal "/private/var/run/mDNSResponder") (literal "/private/var/run/syslog") (remote tcp "*:443"))
-(deny file-read* file-write* @protected@)
+@host_read@(deny file-read* file-write* @protected@)
 (deny network-inbound)
