@@ -678,6 +678,12 @@ pub enum ScheduleCommand {
         /// Move the next wake-up to this many seconds from now.
         #[arg(long, value_parser = clap::value_parser!(u64).range(0..=31_536_000))]
         next_in: Option<u64>,
+        /// For unattended work: once a task in this schedule's directory has
+        /// an uncertain outcome and its run has stopped, close it as failed
+        /// (as `xcb backlog dismiss` does, never retried) so the next wake-up
+        /// can go ahead and inspect it. `false` turns this off.
+        #[arg(long)]
+        dismiss_uncertain: Option<bool>,
     },
     /// Delete a schedule. Tasks it already created keep their history and
     /// finish on their own terms.
@@ -1437,30 +1443,43 @@ pub async fn schedules(
             prompt,
             every,
             next_in,
+            dismiss_uncertain,
         }) => {
-            let next_due_ms = next_in
-                .map(|seconds| {
-                    seconds
-                        .checked_mul(1000)
-                        .and_then(|delay| now_ms().checked_add(delay))
-                        .ok_or(Error::Unavailable("schedule time overflow"))
-                })
-                .transpose()?;
-            let schedule = store.update_schedule(
-                &store.resolve_schedule(&id)?,
-                revision,
-                prompt,
-                every
+            let id = store.resolve_schedule(&id)?;
+            let mut revision = revision;
+            let mut schedule = None;
+            if let Some(dismiss) = dismiss_uncertain {
+                let updated = store.set_schedule_dismissal(&id, revision, dismiss)?;
+                revision = updated.revision;
+                schedule = Some(updated);
+            }
+            if schedule.is_none() || prompt.is_some() || every.is_some() || next_in.is_some() {
+                let next_due_ms = next_in
                     .map(|seconds| {
                         seconds
                             .checked_mul(1000)
-                            .ok_or(Error::Unavailable("schedule interval overflow"))
+                            .and_then(|delay| now_ms().checked_add(delay))
+                            .ok_or(Error::Unavailable("schedule time overflow"))
                     })
-                    .transpose()?,
-                next_due_ms,
-            )?;
+                    .transpose()?;
+                schedule = Some(
+                    store.update_schedule(
+                        &id,
+                        revision,
+                        prompt,
+                        every
+                            .map(|seconds| {
+                                seconds
+                                    .checked_mul(1000)
+                                    .ok_or(Error::Unavailable("schedule interval overflow"))
+                            })
+                            .transpose()?,
+                        next_due_ms,
+                    )?,
+                );
+            }
             wake(root)?;
-            vec![schedule]
+            vec![schedule.expect("an edit always changes the schedule")]
         }
         Some(ScheduleCommand::Delete { .. }) => unreachable!("handled above"),
     };

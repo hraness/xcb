@@ -10,6 +10,13 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.19.9 - 2026-10-07
+
+xcb keeps unattended schedules running without you.
+
+- `xcb schedules edit <id> --dismiss-uncertain true` lets a schedule dismiss uncertain work in its directory once no worker is still running, the same way `xcb backlog dismiss` does. Nothing is retried, and the next wake-up goes ahead instead of waiting for you.
+- After an xcb upgrade, a newly adopted provider build, or 30 days, xcb re-runs the native checks you already passed for providers a directory grant names. Granted directories keep running instead of quietly finding no account.
+
 ## 0.19.8 - 2026-10-06
 
 xcb lets a herd program move on after you dismiss one of its tasks.

@@ -1331,3 +1331,46 @@ async fn backlog_add_refuses_a_pin_that_contradicts_a_required_provider() {
     );
     assert!(task.provider_required);
 }
+
+#[tokio::test]
+async fn a_schedule_dismisses_released_uncertainty_only_when_the_owner_opted_in() {
+    let f = fixture().await;
+    let store = Store::open(f.managed.root().parent().unwrap()).unwrap();
+    let schedule = f
+        .managed
+        .create_schedule(&f.conversation, "herd".into(), 60_000, now_ms())
+        .await
+        .unwrap();
+    let open = enqueue(&f, "unprovable", false).await;
+    let uncertain = set_state(&f, &open, TaskState::Uncertain).await;
+    // Off by default: a timer never infers that uncertainty settled.
+    f.managed.tick_schedule_dismissals(&store).await.unwrap();
+    assert_eq!(
+        f.managed.task(&uncertain.id).unwrap().unwrap().state,
+        TaskState::Uncertain
+    );
+    assert_eq!(
+        f.managed
+            .schedule_view(&schedule)
+            .unwrap()
+            .blocker
+            .as_deref(),
+        Some("1 open task in this project")
+    );
+    let opted = f
+        .managed
+        .set_schedule_dismissal(&schedule.id, schedule.revision, true)
+        .unwrap();
+    assert!(opted.dismiss_released_uncertainty);
+    assert!(
+        f.managed
+            .set_schedule_dismissal(&schedule.id, schedule.revision, false)
+            .is_err()
+    );
+    f.managed.tick_schedule_dismissals(&store).await.unwrap();
+    let dismissed = f.managed.task(&uncertain.id).unwrap().unwrap();
+    assert_eq!(dismissed.state, TaskState::Failed);
+    assert!(dismissed.dismissed);
+    assert_eq!(dismissed.detail, SCHEDULE_DISMISSED_DETAIL);
+    assert!(f.managed.schedule_view(&opted).unwrap().blocker.is_none());
+}

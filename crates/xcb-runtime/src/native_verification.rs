@@ -14,6 +14,54 @@ use xcb_core::{
     session::{Message, Role, State, TaskRequirements},
 };
 
+/// Re-run native checks the owner already passed once and that have since
+/// lapsed (an xcb upgrade, an adopted provider build, or receipt age) for
+/// providers a workspace grant still names. It never checks a provider the
+/// owner has not, and never changes a grant. Returns what failed.
+pub async fn requalify_lapsed(store: Arc<Store>) -> Vec<String> {
+    let mut faults = Vec::new();
+    let root = store.root().to_path_buf();
+    let Ok((config, _)) = Config::load(&root) else {
+        return faults;
+    };
+    let mut providers: Vec<(Provider, bool)> = Vec::new();
+    for scope in &config.native_execution.scopes {
+        for provider in &scope.providers {
+            match providers.iter_mut().find(|(known, _)| known == provider) {
+                Some((_, github)) => *github |= scope.github_credentials,
+                None => providers.push((*provider, scope.github_credentials)),
+            }
+        }
+    }
+    if providers.is_empty() {
+        return faults;
+    }
+    if native_backend::require_qualification(&root).is_err() {
+        if !root.join("qualification/native-command.json").exists() {
+            return faults;
+        }
+        if let Err(error) = crate::command_tool::qualify_native(&root).await {
+            faults.push(format!("native command checks: {error}"));
+            return faults;
+        }
+    }
+    for (provider, github) in providers {
+        if native_backend::require_provider_qualification(&root, provider, github).is_ok()
+            || !root
+                .join(format!("qualification/native-{provider}.json"))
+                .exists()
+        {
+            continue;
+        }
+        let (_keep, cancel) = watch::channel(false);
+        if let Err(error) = verify_for_account(store.clone(), provider, None, github, cancel).await
+        {
+            faults.push(format!("{provider} native checks: {error}"));
+        }
+    }
+    faults
+}
+
 pub async fn verify(
     store: Arc<Store>,
     provider: Provider,

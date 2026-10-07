@@ -849,6 +849,17 @@ impl ManagedStore {
         id: &Id,
         expected_revision: u64,
     ) -> Result<ManagedTask> {
+        self.dismiss_uncertain_as(store, id, expected_revision, super::DISMISSED_DETAIL)
+            .await
+    }
+
+    pub(super) async fn dismiss_uncertain_as(
+        &self,
+        store: &Store,
+        id: &Id,
+        expected_revision: u64,
+        detail: &str,
+    ) -> Result<ManagedTask> {
         let task = self
             .task(id)?
             .ok_or(Error::Unavailable("managed task not found"))?;
@@ -878,7 +889,7 @@ impl ManagedStore {
         next.dismissed = true;
         next.next_prompt.clear();
         next.attachments.clear();
-        next.detail = super::DISMISSED_DETAIL.into();
+        next.detail = detail.into();
         next.revision += 1;
         next.updated_at_ms = now_ms().max(task.updated_at_ms);
         let message = Self::assistant(
