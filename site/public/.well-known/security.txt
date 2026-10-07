@@ -1,0 +1,6 @@
+Contact: mailto:hraness@pm.me
+Contact: https://github.com/hraness/xcb/security/advisories/new
+Expires: 2027-09-30T00:00:00.000Z
+Preferred-Languages: en
+Policy: https://github.com/hraness/xcb/blob/main/SECURITY.md
+Canonical: https://xcb.sh/.well-known/security.txt

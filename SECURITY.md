@@ -23,7 +23,8 @@ unsafe replay, and confusion about which process holds an account.
 ## Reporting
 
 Open a private security advisory on
-[hraness/xcb](https://github.com/hraness/xcb/security/advisories/new), or use the
+[hraness/xcb](https://github.com/hraness/xcb/security/advisories/new), email
+[hraness@pm.me](mailto:hraness@pm.me), or use the
 maintainer contact listed on the organization profile. Include a minimal
 reproduction when possible. Remove account keys, private paths, provider state,
 and transcript contents from diagnostic attachments.
