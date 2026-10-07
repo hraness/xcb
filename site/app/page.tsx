@@ -11,6 +11,7 @@ import {
 import { PlatformInstall } from "@hraness/design-kit/react";
 import { AskAiAboutThis } from "@hraness/ui";
 import { CodeBlock } from "./code-block";
+import { FounderNote } from "./founder-note";
 import { RouterShowcase } from "./mockups/showcase";
 import "./mockups/mockups.css";
 import { providerStatus } from "./docs/provider-status";
@@ -93,6 +94,15 @@ export default function Home() {
               : <PlatformInstall id="hero-install" platforms={installPlatforms(publishedRelease)} />}
             actions={[{ href: "/install", label: "Install guide", emphasis: "secondary" }, { href: "#use", label: productMessaging.hero.secondaryAction, emphasis: "secondary" }]}
             boundary={`Free and open source · ${releaseStatusLabel(publishedRelease)}`}
+          />
+
+          <FounderNote
+            emoji="⚔️"
+            paragraphs={[
+              "Excalibur (xcb) is a tool for operating AI subscriptions. Just log in with all your Codex and Claude accounts, then tell your agent to use xcb. Personally, I like asking my agent to create long-running jobs that scale parallelism based on load and available usage. xcb exposes pretty much every feature in Claude Code and Codex, so you can create whatever custom setup you want (you can even build apps on top of it). I’m going to China for a month, and I plan to leave several herds of agents running on one of my laptops, shepherded by xcb.",
+            ]}
+            action={{ label: "Tell your agent to set it up:", href: "https://xcb.sh" }}
+            signature="Ben Guo"
           />
 
           <p className="xcb-launch-link"><a className="xcb-text-link" href="/blog/one-agent-for-all-your-ai-plans">Introducing Excalibur: the short version →</a></p>

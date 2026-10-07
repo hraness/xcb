@@ -1,11 +1,23 @@
 <!-- hraness:xcb-landing:start -->
 # Excalibur (xcb)
 
-Excalibur (xcb) routes coding tasks across the Claude and Codex
-subscriptions you already pay for. Each task runs on an account that is signed
-in, idle, and not at a known usage limit, on a model that fits the work. Send
-work through the headless CLI, JSON contract, or SDK. The former interactive
-terminal and hosted remote commands are removed from the current source build.
+> ⚔️ Excalibur (xcb) is a tool for operating AI subscriptions. Just log in
+> with all your Codex and Claude accounts, then tell your agent to use xcb.
+> Personally, I like asking my agent to create long-running jobs that scale
+> parallelism based on load and available usage. xcb exposes pretty much every
+> feature in Claude Code and Codex, so you can create whatever custom setup
+> you want (you can even build apps on top of it). I’m going to China for a
+> month, and I plan to leave several herds of agents running on one of my
+> laptops, shepherded by xcb.
+>
+> Tell your agent to set it up: https://xcb.sh
+>
+> — Ben Guo
+
+xcb routes each task to a Claude or Codex account that is signed in, idle, and
+not at a known usage limit, on a model that fits the work. Send work through
+the headless CLI, JSON contract, or SDK. The former interactive terminal and
+hosted remote commands are removed from the current source build.
 <!-- hraness:xcb-landing:end -->
 
 **Status:** [Latest release](https://github.com/hraness/xcb/releases/latest)

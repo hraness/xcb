@@ -5,7 +5,7 @@
   "portfolio": {
     "contract": "hraness.portfolio-public/v1",
     "url": "https://hraness.com/portfolio.json",
-    "digest": "sha256:3d3a303e32a0c39eb32054df7f5537e0caa1d0db7d5f3bc2abc6f935eea31d9a"
+    "digest": "sha256:d59d09f6944486d48162f8ebd4af2529d9f0aafeb653ba13ee6ba585456183fc"
   },
   "messaging": {
     "formatVersion": 1,
@@ -19,15 +19,15 @@
         "HRA"
       ]
     },
-    "category": "Agent subscription router",
-    "tagline": "One plan across your coding agents",
-    "short": "Routes coding tasks across the Claude, Codex, and Devin plans you have",
-    "meta": "Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for, picking an account that is signed in and idle.",
-    "medium": "Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for. Each task runs on an account that is signed in, idle, and not at a known usage limit, on a model that fits the work.",
-    "long": "Excalibur (xcb) is a terminal and router for developers who pay for more than one coding agent. Type the work into one conversation, and xcb sends each task to a Claude, Codex, or Devin account that is signed in, idle, and not at a known usage limit, on a model that fits the job. Tasks keep running after you close the terminal, every session appears on one screen, and each account runs one task at a time. Other agents can hand xcb work with one JSON command. xcb is free and MIT licensed, with releases for macOS and Linux.",
+    "category": "AI subscription operator",
+    "tagline": "Operate your AI subscriptions",
+    "short": "Runs agent work across every Claude and Codex account you sign in",
+    "meta": "Excalibur (xcb) operates your AI subscriptions. Sign in with your Claude and Codex accounts, then tell your agent to use xcb.",
+    "medium": "Excalibur (xcb) is a free, open-source tool for operating AI subscriptions. Sign in with all your Claude and Codex accounts, then tell your agent to use xcb for long-running jobs, custom setups, or apps.",
+    "long": "Excalibur (xcb) is a free, MIT-licensed tool for operating AI subscriptions. Sign in with all your Claude and Codex accounts, then tell your agent to use xcb. Each task runs through the provider's own tool on an account that is signed in, idle, and not at a known usage limit. Your agent can queue long-running backlog work that scales parallelism with load and remaining usage, call xcb with one JSON command, or build on the TypeScript SDK. xcb exposes nearly every Claude Code and Codex feature, so you can assemble whatever setup you want.",
     "hero": {
-      "heading": "Keep coding when one subscription hits its limit.",
-      "summary": "One terminal for your Claude, Codex, and Devin accounts. Each task runs on an account that is signed in, idle, and not at a known limit.",
+      "heading": "Operate every AI subscription you pay for.",
+      "summary": "Sign in with all your Claude and Codex accounts, then tell your agent to use xcb. It exposes nearly every Claude Code and Codex feature, so you can run long jobs or build apps on top.",
       "primaryAction": "Install xcb",
       "secondaryAction": "See how it works"
     },
@@ -49,7 +49,7 @@
     {
       "id": "gobstopper",
       "name": "Gobstopper",
-      "description": "compacts long agent sessions into smaller copies, keeping every byte",
+      "description": "replaces claude code and codex compaction to save tokens and keep context",
       "canonicalUrl": "https://gobstopper.sh",
       "surface": {
         "actionLabel": "explore Gobstopper",
@@ -57,21 +57,21 @@
           "CLI",
           "MCP"
         ],
-        "proof": "automatic context compaction that snapshots each transcript before changing it"
+        "proof": "a local proxy that compacts more often than built-in compaction, using 29% fewer tokens on Terminal-Bench 2.1"
       },
       "messaging": {
         "names": {
           "name": "Gobstopper",
           "command": "gobstopper"
         },
-        "short": "Compacts long agent sessions into smaller copies, keeping every byte",
-        "tagline": "Reversible context compaction"
+        "short": "Replaces Claude Code and Codex compaction to save tokens and keep context",
+        "tagline": "Save tokens while preserving context"
       }
     },
     {
       "id": "xcb",
       "name": "Excalibur (xcb)",
-      "description": "routes coding tasks across the claude, codex, and devin plans you have",
+      "description": "runs agent work across every claude and codex account you sign in",
       "canonicalUrl": "https://xcb.sh",
       "surface": {
         "actionLabel": "explore Excalibur (xcb)",
@@ -79,7 +79,7 @@
           "CLI",
           "SDK"
         ],
-        "proof": "a customizable terminal workspace, provider account management, and token usage tracking"
+        "proof": "routes agent work across signed-in Claude and Codex accounts, with a backlog, a JSON route command, and a TypeScript SDK"
       },
       "messaging": {
         "names": {
@@ -91,8 +91,8 @@
             "HRA"
           ]
         },
-        "short": "Routes coding tasks across the Claude, Codex, and Devin plans you have",
-        "tagline": "One plan across your coding agents"
+        "short": "Runs agent work across every Claude and Codex account you sign in",
+        "tagline": "Operate your AI subscriptions"
       }
     },
     {

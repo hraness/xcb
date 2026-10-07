@@ -175,7 +175,7 @@ describe("xcb site source contract", () => {
     expect(llms).toContain("https://xcb.sh/README.md");
     expect(llms).not.toContain("http://");
     // The canonical one-line description leads, verbatim.
-    expect(llms.split("\n")[2]).toBe("> Excalibur (xcb) routes coding tasks across the Claude and Codex subscriptions you already pay for.");
+    expect(llms.split("\n")[2]).toBe("> Excalibur (xcb) is a tool for operating AI subscriptions. Log in with all your Claude and Codex accounts, then tell your agent to use xcb.");
     // Every current docs page is listed, and repository links follow main, not an old tag.
     for (const topic of docsTopics) expect(llms).toContain(`(https://xcb.sh/docs/${topic.slug})`);
     expect(llms).not.toMatch(/github\.com\/hraness\/xcb\/blob\/v\d/u);
