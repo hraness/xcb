@@ -280,7 +280,8 @@ pub fn empty_capabilities() -> Capabilities {
     }
 }
 
-/// Qualifying requires a recent catalog observation of the model.
+/// Strict manual qualification requires a recent catalog observation of the
+/// model; automatic admission accepts any observation (see `listed`).
 fn fresh(model: &ModelChoice, now: u64) -> bool {
     listed(model, now) && now - model.observed_at_ms <= CATALOG_AGE_MS
 }
@@ -352,7 +353,7 @@ pub(crate) fn capabilities_with(store: &Store, hooks: &AdmissionHooks) -> Result
             catalog
                 .for_account(&account.id, account.provider)
                 .iter()
-                .filter(|model| model.provider == account.provider && fresh(model, now))
+                .filter(|model| model.provider == account.provider && listed(model, now))
                 .any(|model| {
                     auto::state(
                         store.root(),
@@ -438,7 +439,7 @@ fn auto_state(
     };
     match auto::state(store.root(), &context, now) {
         AdmissionState::Admitted => Some(AdmissionState::Admitted),
-        AdmissionState::Pending if fresh(model, now) => Some(AdmissionState::Pending),
+        AdmissionState::Pending => Some(AdmissionState::Pending),
         _ => None,
     }
 }
@@ -806,9 +807,10 @@ pub(crate) async fn admit_automatically(
         policy_sha256: &policy,
         config_sha256: &config,
     };
-    // A model must have been seen recently to be admitted for the first time.
+    // Any catalog observation admits a model for the first time: a withdrawn
+    // model fails its own challenge, and nothing is recorded for that.
     if auto::state(store.root(), &context, now_ms()) != AdmissionState::Admitted
-        && !fresh(model, now_ms())
+        && !listed(model, now_ms())
     {
         return Err(GenerateFailure::unstarted(FailureCode::Unavailable));
     }
@@ -996,7 +998,9 @@ pub async fn qualify_with_expected_generation(
     let model = observed
         .iter()
         .find(|model| {
-            model.provider == account.provider && model.key() == model_key && fresh(model, now_ms())
+            model.provider == account.provider
+                && model.key() == model_key
+                && listed(model, now_ms())
         })
         .cloned()
         .ok_or_else(|| fail(FailureCode::Unavailable))?;
@@ -1009,7 +1013,7 @@ pub async fn qualify_with_expected_generation(
     let config = configuration_digest();
     let keys: Vec<_> = observed
         .iter()
-        .filter(|model| model.provider == account.provider && fresh(model, now_ms()))
+        .filter(|model| model.provider == account.provider && listed(model, now_ms()))
         .map(ModelChoice::key)
         .collect();
     let expected = Expected {

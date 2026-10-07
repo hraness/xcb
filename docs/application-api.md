@@ -75,16 +75,21 @@ build, settings and sign-in:
 The account-level `admission` is the best value among its models, or `null`
 whenever the account is unavailable (`reason` says why). On an unavailable
 account, a model's `admission` is `null` too unless a strict qualification
-covers it, so `pending` never appears beside a reason. A `pending` model must
-have been seen in the last 24 hours; `xcb accounts refresh <account>` obtains fresh
-provider metadata. Once admitted or qualified, a model stays listed without
-further catalog refreshes.
+covers it, so `pending` never appears beside a reason. Models come from the
+account's most recent provider catalog observation, however old it is: a
+`pending` model needs no recent refresh, and once admitted or qualified a model
+stays listed without further catalog refreshes. A model the provider has since
+withdrawn fails its own request. `models_unavailable` means xcb has never
+observed this account's catalog, as on a new install; `xcb accounts refresh
+ACCOUNT_ID` obtains it in a few seconds with a metadata probe, not a model turn.
+`--capabilities` itself never refreshes a provider.
 
 A reason is `application_disabled` (the owner turned app access off),
 `account_disabled`, `authentication_required`, `account_busy`, `not_connected`,
 `runtime_unavailable`, `sandbox_unproven` (xcb couldn't confirm the provider's
 sandbox on this computer), `admission_failed` (the automatic check failed for
-every listed model), `models_unavailable`, or `null` when ready. `busy` is true
+every listed model), `models_unavailable` (no catalog observed yet; see
+above), or `null` when ready. `busy` is true
 while the account has any unfinished run; `account_busy` means its runs reached
 the configured `max_runs_per_account` limit, so the account cannot take another
 task right now. Version 0.19 and earlier also reported

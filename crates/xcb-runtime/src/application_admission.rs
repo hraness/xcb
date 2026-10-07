@@ -881,6 +881,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_stale_catalog_still_offers_and_admits_pending_models() {
+        // Three days old: well outside any freshness window, as on an install
+        // that inherits a state folder nothing has refreshed lately.
+        let stale_ms = now_ms() - 3 * 24 * 60 * 60 * 1000;
+        let mut harness = Harness::new();
+        harness.model.observed_at_ms = stale_ms;
+        harness
+            .store
+            .set_account_models(&harness.account, std::slice::from_ref(&harness.model))
+            .unwrap();
+
+        let row = harness.row();
+        assert_eq!(row["available"], true, "{row}");
+        assert_eq!(row["reason"], serde_json::Value::Null);
+        assert_eq!(row["admission"], "pending");
+        assert_eq!(row["models"][0]["key"], harness.model.key());
+        assert_eq!(row["models"][0]["observedAtMs"], stale_ms);
+        assert_eq!(row["models"][0]["admission"], "pending");
+
+        let response = harness.generate().await.unwrap();
+        assert_eq!(response.text, SECRET_REPLY);
+        assert_eq!(harness.challenges.load(Ordering::SeqCst), 1);
+        assert_eq!(harness.row()["admission"], "admitted");
+        harness.idle();
+
+        // A failed check on a stale model is reported, not hidden.
+        let mut failing = Harness::new();
+        failing.model.observed_at_ms = stale_ms;
+        failing
+            .store
+            .set_account_models(&failing.account, std::slice::from_ref(&failing.model))
+            .unwrap();
+        *failing.answer.lock().unwrap() = Answer::Wrong;
+        assert!(failing.generate().await.is_err());
+        let row = failing.row();
+        assert_eq!(row["available"], false, "{row}");
+        assert_eq!(row["reason"], "admission_failed");
+    }
+
+    #[tokio::test]
     async fn any_binding_change_readmits_automatically() {
         let harness = Harness::new();
         harness.generate().await.unwrap();
