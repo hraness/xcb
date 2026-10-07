@@ -1,5 +1,10 @@
 # Application qualification renewal
 
+Apps no longer need this. `generate` checks accounts automatically and checks
+again after an update (see
+[Application checks](application-api.md#application-checks)). Use this helper
+only to keep the optional strict qualification current.
+
 `scripts/application-renewal.py` is an explicit local macOS installer and runner
 for one previously qualified Claude account/model. It runs the existing fresh
 prerequisite collector and the native fixed live challenge. It never changes the

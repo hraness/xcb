@@ -10,6 +10,27 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## Unreleased
+
+Apps can use a signed-in account with no manual command. The first
+`xcb --json generate` for an account and model checks it automatically, and
+checks again after xcb, the provider, the settings or the sign-in changes.
+
+- Check the provider's sandbox on this computer automatically, once per xcb
+  build and provider, without credentials. If it can't be confirmed, apps can't
+  use that provider (`sandbox_unproven`); nothing runs unsandboxed.
+- Run the fixed harmless challenge automatically on the first `generate`, one
+  per account at a time, and record only identities, the result and a time.
+- Add `admission` (`pending`, `admitted` or `qualified`) to `--capabilities`
+  account and model rows. `pending` accounts are available; their first call
+  takes up to 60 seconds longer.
+- Add `xcb application disable|enable [--account ID]` and
+  `xcb application status`, which turn app access off globally or per account.
+- Keep `qualify-application --evidence` as an optional stronger qualification.
+- Replace the `application_not_qualified` reason with `application_disabled`,
+  `sandbox_unproven` and `admission_failed`, and document the existing
+  `authentication_required`.
+
 ## 0.19.9 - 2026-10-07
 
 xcb keeps unattended schedules running without you.

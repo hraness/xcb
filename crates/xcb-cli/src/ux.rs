@@ -333,6 +333,7 @@ Maintenance
   recover        Inspect or clean up unfinished runs
   command        Inspect or archive offline command jobs
   generate       Generate text for an app (no tools, no hooks)
+  application    Turn app access to your accounts off or on
 ";
 
 #[cfg(test)]

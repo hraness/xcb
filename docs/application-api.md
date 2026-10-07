@@ -15,11 +15,14 @@ continuation, or switching to another account. Private run records keep the
 account, process, model, and timing without storing application prompts or
 replies. Provider sign-in stays in xcb; applications never pass credentials.
 
-An installation reports `supported: false` until the application path has
-passed xcb's application checks for that xcb executable, provider, account, and
-model. The record of those checks is called a qualification. A provider pin, a
-configured account, or a successful metadata request doesn't create one. Do not
-substitute `xcb run` when application generation is unavailable.
+Once you sign in an account, apps can use it with no extra command. The first
+`generate` for an account and model checks it automatically: xcb sends one
+fixed harmless prompt through the same no-tools path and checks the reply. Later
+calls skip the check until xcb, the provider build, the app settings, or the
+account's sign-in changes. An installation reports `supported: false` when no
+provider build on this computer can serve apps, for example when xcb can't
+confirm the provider's sandbox here. Do not substitute `xcb run` when
+application generation is unavailable.
 
 ## Discover available accounts and models
 
@@ -56,17 +59,39 @@ still have no available account.
 ```
 
 Account rows contain `id`, `label`, `provider`, `enabled`, `busy`, `connected`,
-`runtimeAdmitted`, `available`, `reason` and `models`. Models contain the exact
-public `key`, `label` and `observedAtMs`. Keys match `xcb models` and accounts
-match `xcb accounts`. Qualifying needs a model seen in the last 24 hours; once
-qualified, a model stays listed without further catalog refreshes. A reason is
-`application_not_qualified`, `account_disabled`, `account_busy`, `not_connected`,
-`runtime_unavailable`, `models_unavailable`, or `null` when ready. `busy` is
-true while the account has any unfinished run; `account_busy` means its runs
-reached the configured `max_runs_per_account` limit, so the account cannot
-take another task right now.
+`runtimeAdmitted`, `available`, `reason`, `admission` and `models`. Models
+contain the exact public `key`, `label`, `observedAtMs` and `admission`. Keys
+match `xcb models` and accounts match `xcb accounts`.
 
-A qualified account additionally carries `qualification` with `runtimeVersion`,
+`admission` says how far a model has been checked for this exact xcb, provider
+build, settings and sign-in:
+
+| Value | Meaning |
+| --- | --- |
+| `pending` | Not checked yet. It is usable: the next `generate` checks it first, so that call takes longer (up to 60 seconds more). |
+| `admitted` | The automatic check passed. |
+| `qualified` | A strict manual qualification covers it (see below). |
+
+The account-level `admission` is the best value among its models, or `null`
+whenever the account is unavailable (`reason` says why). On an unavailable
+account, a model's `admission` is `null` too unless a strict qualification
+covers it, so `pending` never appears beside a reason. A `pending` model must
+have been seen in the last 24 hours; `xcb accounts refresh <account>` obtains fresh
+provider metadata. Once admitted or qualified, a model stays listed without
+further catalog refreshes.
+
+A reason is `application_disabled` (the owner turned app access off),
+`account_disabled`, `authentication_required`, `account_busy`, `not_connected`,
+`runtime_unavailable`, `sandbox_unproven` (xcb couldn't confirm the provider's
+sandbox on this computer), `admission_failed` (the automatic check failed for
+every listed model), `models_unavailable`, or `null` when ready. `busy` is true
+while the account has any unfinished run; `account_busy` means its runs reached
+the configured `max_runs_per_account` limit, so the account cannot take another
+task right now. Version 0.19 and earlier also reported
+`application_not_qualified`; newer versions don't, so treat unknown reasons as
+unavailable.
+
+A manually qualified account additionally carries `qualification` with `runtimeVersion`,
 `runtimeDigest`, `evidenceDigest` and `expiresAt`, which is always `null`:
 qualification has no time limit. `runtimeDigest` identifies the exact xcb
 executable. The separately reviewed evidence binds its provider pin, isolation
@@ -76,8 +101,8 @@ account sign-in nor caller JSON can issue it.
 
 ## Generate one response
 
-Start the xcb executable that passed the checks directly, write one UTF-8 JSON
-document to stdin, close stdin, and read stdout:
+Start the xcb executable directly, write one UTF-8 JSON document to stdin, close
+stdin, and read stdout:
 
 ```json
 {"version":1,"account":"a_selected_account","model":"claude/observed-model/observed-effort","prompt":"Return the requested application response.","timeoutMs":60000,"maxOutputBytes":65536}
@@ -155,11 +180,62 @@ validation and external effects. TextButler's recipient-bound grants, final
 takeover checks and send journal remain necessary even when xcb has successfully
 generated a response. xcb never sends messages for the application.
 
-## Application checks and expiry
+## Application checks
 
-The host check command takes a private directory of sandbox and source/test
-evidence collected on the host, then runs a fixed harmless challenge through the
-same path as `generate`:
+### Automatic check on first use
+
+The first `generate` for an account and model runs the check before your
+request:
+
+1. xcb confirms the provider's sandbox works on this computer. On macOS it runs
+   a short local test of the provider's sandbox profile; on Linux it uses the
+   receipt from `xcb doctor --qualify-sandbox`. This needs no account and runs
+   once per xcb build and provider. If it fails, apps can't use that provider
+   here (`sandbox_unproven`), and xcb tries again 15 minutes later.
+2. xcb holds the account and sends one fixed harmless prompt through the same
+   no-tools path `generate` uses, then checks the reply exactly. The provider's
+   processes must exit and credentials must be saved before the result counts.
+3. xcb records the result, then serves your request. Your `timeoutMs` starts
+   after the check, which has its own 60-second limit.
+
+Only one check runs per account at a time. Other calls for that account wait
+for it, then return `busy` if it's still running. If the model answers with the
+wrong text, or more than the check allows, the model stays unavailable
+(`admission_failed`, and `generate` returns `unavailable`) for 15 minutes or
+until something it covers changes. A provider error (such as a rate limit), a
+deadline, cancellation or local failure records nothing, so the next call checks
+again. Each xcb build keeps its own results, so two xcb executables sharing one
+state folder don't undo each other's checks.
+
+A check covers one account and model for the exact xcb executable, provider
+build, platform, application policy and configuration, and the account's
+sign-in. When any of these changes, for example after an xcb or provider
+update, the next `generate` checks again automatically. The record holds those
+identities, the result and a time. It never holds a prompt, the check's reply,
+or your text.
+
+### Turn app access off
+
+Apps can use every signed-in account until you turn access off:
+
+```sh
+xcb application disable                  # every account
+xcb application disable --account ID     # one account
+xcb application enable [--account ID]
+xcb application status
+```
+
+While access is off, `--capabilities` reports `application_disabled` and
+`generate` returns `unavailable` without starting a provider. This also stops
+accounts that were already checked or qualified. If xcb can't read the setting,
+it treats access as off.
+
+### Strict manual qualification (optional)
+
+The strict manual qualification remains available as a stronger record for an
+exact deployment. It is optional: `generate` doesn't require it. It takes a
+private directory of sandbox and source/test evidence collected on the host,
+then runs the same fixed challenge:
 
 ```sh
 xcb --json qualify-application --account <account-id> --model <full-model-key> --evidence /absolute/private/evidence-directory
@@ -169,24 +245,53 @@ The evidence must match the current executable, provider, platform and effective
 application settings. The command accepts no caller prompt, tools or availability
 override. It saves a qualification only after the fixed response is correct,
 the provider's processes and connection have exited, credentials are saved, and
-it holds the account exclusively. `generate` can't run this path. Each run covers
-one model and replaces that account's previous coverage; it doesn't add to other
-models' qualifications.
+it holds the account exclusively. Each run covers one model and replaces that
+account's previous coverage; it doesn't add to other models' qualifications.
+A qualified model reports `admission: "qualified"` and needs no automatic check.
 
 A qualification has no time limit. It ends when anything it covers changes: the
 xcb executable, the provider build, the platform, the application policy or
 configuration, or the account's sign-in after an explicit credential
 replacement. Collection itself must finish within 24 hours of its first
 observation, and the model must have been seen in the last 24 hours when
-qualifying; `xcb accounts refresh <account>` obtains fresh provider metadata.
-After a change, qualify again with new evidence and a new fixed challenge. The
-[renewal helper](application-renewal.md) remains available for requalifying a
-Claude account/model on macOS after such a change.
+qualifying. The [renewal helper](application-renewal.md) remains available for
+requalifying a Claude account/model on macOS after such a change.
 
-Discovery emits models only when covered by that account's valid qualification.
-The complete response is limited to 128 accounts, 64 qualified models per
-account, 1,024 models total, and 2 MiB. An oversized inventory makes discovery
-fail rather than be silently truncated. These cardinalities also keep the closed
+### What protects you
+
+Earlier versions required the strict qualification before any app call. It
+re-proved, for every account and model, facts about the xcb build: that the
+workspace tests passed, that a frozen source build matched the running binary,
+and, for Codex and Devin, a separately produced provider-boundary receipt. Those
+are now proved once, where they belong:
+
+- **Build facts are proved with the build.** A release binary comes from a
+  `main` commit whose required checks ran the workspace tests, and carries a
+  build-provenance attestation bound to its digest. A build from source carries
+  only what its builder checked; xcb doesn't verify that attestation at run
+  time, so the runtime controls below are what protect every build. Provider builds run only
+  when xcb's source or its reviewed catalog names their exact digest, and that
+  admission already checks tools, configuration isolation and file access.
+- **Host facts are proved automatically.** The sandbox check above runs without
+  credentials, once per xcb build and provider. If it can't pass, apps can't
+  use that provider; nothing falls back to an unsandboxed run.
+- **Account facts are proved automatically.** The fixed challenge confirms the
+  account, model and provider answer through the exact no-tools path, and is
+  repeated whenever anything it covers changes.
+
+What protects you on every call is unchanged and enforced at run time, not by a
+record: no tools, hooks or plugins; the provider's sandbox and isolated
+configuration; credentials that stay in xcb; exact provider-build checks before
+launch; exclusive account custody with `custody_unproven` holding the account
+when xcb can't confirm the provider stopped; and failures that never include
+payloads. The owner switch above turns access off at any time.
+
+Discovery emits models only when they are qualified, admitted, or pending for
+that account. The complete response is limited to 128 accounts, 64 models per
+account, 1,024 models total, and 2 MiB. Qualified and admitted models count
+first; pending models fill the remaining room in catalog order, and any beyond
+it are left out until earlier ones are admitted. Otherwise an oversized
+inventory makes discovery fail rather than be silently truncated. These cardinalities also keep the closed
 version-one schema below 131,072 JSON tokens.
 
 Trusted qualification tooling can read the executable's exact binding without

@@ -163,6 +163,14 @@ from native tool inventory, authentication and live-provider qualification.
 
 ## Application qualification prerequisites
 
+This collection is optional. `xcb --json generate` admits a signed-in account
+and model automatically on first use: a credential-free host sandbox check once
+per xcb build and provider, then the fixed challenge through the same zero-tool
+path, bound to the exact xcb, provider, policy, configuration and sign-in (see
+[Application checks](../docs/application-api.md#application-checks)). The
+collection below produces the stronger manual qualification for an exact
+deployment; a qualified model reports `admission: "qualified"`.
+
 `application-prerequisites.py` collects actual native validation output and
 prepares the private input for `xcb --json qualify-application`. It does not
 perform authenticated inference or activate application access. Python 3.9 or

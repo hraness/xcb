@@ -342,7 +342,11 @@ def capabilities(binding, required=False, *, allow_busy=False):
     if not eligible or qualification is None:
         require(not required, "bind requires a currently qualified selected account/model")
         return None
-    require(any(model.get("key") == binding["model"] for model in row["models"])
+    # Rows now also list pending and admitted models; only the strict receipt
+    # (`admission: "qualified"`, or an older xcb without the field) counts.
+    require(any(model.get("key") == binding["model"]
+                and model.get("admission", "qualified") == "qualified"
+                for model in row["models"])
             and qualification.get("runtimeDigest") == binding["files"][binding["xcb"]]
             and digest(qualification.get("evidenceDigest"))
             and qualification.get("expiresAt") is None, "qualification binding mismatch")

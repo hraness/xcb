@@ -75,7 +75,9 @@ fn capabilities_do_not_claim_qualification_or_expose_state_paths() {
     assert_eq!(value["ephemeral"], true);
     assert_eq!(value["accounts"][0]["id"], account.id.as_str());
     assert_eq!(value["accounts"][0]["available"], false);
-    assert_eq!(value["accounts"][0]["reason"], "application_not_qualified");
+    // No credentials: nothing to admit, so no admission state either.
+    assert_eq!(value["accounts"][0]["reason"], "not_connected");
+    assert_eq!(value["accounts"][0]["admission"], serde_json::Value::Null);
     assert!(value["accounts"][0].get("qualification").is_none());
     assert_eq!(value["accounts"][0]["models"], json!([]));
     assert!(!value.to_string().contains(root.path().to_str().unwrap()));
