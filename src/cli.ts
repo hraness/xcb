@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { runCliUpdate } from "@hraness/cli-update";
 import { compatibilityUpdateOptions } from "./cli/update.ts";
 
-const VERSION = "0.20.1";
+const VERSION = "0.20.2";
 
 function reportStartupError(error: unknown): number {
   process.stderr.write(`xcb-compat: ${error instanceof Error ? error.message : "unexpected failure"}\n`);

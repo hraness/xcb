@@ -10,10 +10,10 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
-## Unreleased
+## 0.20.2 - 2026-10-07
 
-Signing in loads the account's models, so applications and `xcb models` see a
-new account without a separate command.
+Signing in loads the account's models, and native grants can let workspace
+commands read and run host toolchains.
 
 - `xcb accounts login`, `accounts token` and `accounts import-codex` now load
   the account's model catalog as their last step, as `xcb setup` and `accounts
