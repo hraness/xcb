@@ -99,7 +99,7 @@ export default function Home() {
           <FounderNote
             emoji="⚔️"
             paragraphs={[
-              "Excalibur (xcb) is a tool for operating AI subscriptions. Just log in with all your Codex and Claude accounts, then tell your agent to use xcb. Personally, I like asking my agent to create long-running jobs that scale parallelism based on load and available usage. xcb exposes pretty much every feature in Claude Code and Codex, so you can create whatever custom setup you want (you can even build apps on top of it).",
+              "Excalibur (xcb) operates your AI subscriptions. Log in with all your Codex and Claude accounts, then tell your agent to use xcb. I like asking mine to run long jobs that scale their parallelism to the load and the usage left on each account. xcb exposes nearly every feature in Claude Code and Codex, so you can build any setup you want, and apps on top of it.",
             ]}
             action={{ label: "Tell your agent to set it up:", href: "https://xcb.sh" }}
             signature="Ben Guo"
