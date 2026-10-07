@@ -219,6 +219,9 @@ impl ManagedConversation {
 pub(crate) const DISMISSED_DETAIL: &str =
     "dismissed by the owner with unreconciled effects; no retry launched";
 
+/// The detail a schedule's standing dismissal records.
+pub(crate) const SCHEDULE_DISMISSED_DETAIL: &str = "dismissed under its schedule's standing owner instruction with unreconciled effects; no retry launched";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedTask {
@@ -5856,6 +5859,9 @@ impl Supervisor {
         // never skips dispatch or counts toward the supervisor's own fault
         // limit: one damaged row must not stop every other task, or restart
         // the supervisor into the same failure.
+        if !draining && let Err(error) = self.managed.tick_schedule_dismissals(&self.store).await {
+            self.upkeep_fault("schedule dismissal", &error);
+        }
         if let Err(error) = self.managed.tick_programs(&self.store, !draining).await {
             self.upkeep_fault("program", &error);
         }
@@ -6614,6 +6620,7 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
             ),
         );
     }
+    let native_store = store.clone();
     let mut supervisor = Supervisor::new(managed.clone(), store);
     let spawn_refresh = |root: PathBuf| {
         tokio::task::spawn_blocking(move || {
@@ -6625,6 +6632,7 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
     let fault_root = managed.root().to_path_buf();
     let spawn_pins = |root: PathBuf| {
         let fault_root = fault_root.clone();
+        let native_store = native_store.clone();
         tokio::spawn(async move {
             let home = root.join("metadata-home");
             let catalog_root = root.clone();
@@ -6635,6 +6643,12 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
                 if let Some(detail) = report.detail {
                     record_supervisor_fault(&fault_root, &format!("{provider} refresh: {detail}"));
                 }
+            }
+            // An upgrade or adopted provider build voids native receipts;
+            // re-run the checks the owner already passed so granted
+            // workspaces keep routing instead of silently stalling.
+            for fault in crate::native_verification::requalify_lapsed(native_store).await {
+                record_supervisor_fault(&fault_root, &fault);
             }
         })
     };

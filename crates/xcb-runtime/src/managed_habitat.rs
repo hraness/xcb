@@ -23,6 +23,12 @@ pub struct HabitatSchedule {
     pub interval_ms: u64,
     pub next_due_ms: u64,
     pub enabled: bool,
+    /// The owner's standing instruction for an unattended herd: once no run
+    /// holds an uncertain task in this schedule's directory, the supervisor
+    /// dismisses it as `xcb backlog dismiss` would, so the next wake-up can
+    /// inspect it instead of waiting for the owner. Never retries the work.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dismiss_released_uncertainty: bool,
     pub last_task: Option<Id>,
     pub revision: u64,
     pub created_at_ms: u64,
@@ -1219,6 +1225,7 @@ impl ManagedStore {
             interval_ms,
             next_due_ms: first_due_ms,
             enabled: true,
+            dismiss_released_uncertainty: false,
             last_task: None,
             revision: 1,
             created_at_ms: now,
@@ -1302,6 +1309,62 @@ impl ManagedStore {
         write_schedule(&tx, &current, &next)?;
         tx.commit()?;
         Ok(next)
+    }
+
+    /// Turn the schedule's standing dismissal of released uncertain work on
+    /// or off.
+    pub fn set_schedule_dismissal(
+        &self,
+        id: &Id,
+        expected_revision: u64,
+        dismiss_released_uncertainty: bool,
+    ) -> Result<HabitatSchedule> {
+        let mut db = self.write_db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = schedule_from(&tx, id)?.ok_or(Error::Unavailable("schedule not found"))?;
+        if current.revision != expected_revision {
+            return Err(Error::Conflict("schedule revision changed"));
+        }
+        let mut next = current.clone();
+        next.dismiss_released_uncertainty = dismiss_released_uncertainty;
+        next.revision += 1;
+        next.updated_at_ms = now_ms().max(current.updated_at_ms);
+        write_schedule(&tx, &current, &next)?;
+        tx.commit()?;
+        Ok(next)
+    }
+
+    /// Dismiss uncertain tasks in the directories of enabled schedules that
+    /// carry the owner's standing dismissal, once no run holds them. A task
+    /// still held by a run or a delivered reply stays uncertain.
+    pub async fn tick_schedule_dismissals(&self, store: &Store) -> Result<()> {
+        let mut uncertain = Vec::new();
+        {
+            let db = self.db()?;
+            for schedule in self.schedules_in(&db, None)? {
+                if !schedule.enabled || !schedule.dismiss_released_uncertainty {
+                    continue;
+                }
+                let Ok(workspace) = schedule_workspace(&db, &schedule) else {
+                    continue;
+                };
+                uncertain.extend(
+                    project::outstanding_in(&db, &workspace, None)?
+                        .into_iter()
+                        .filter(|task| task.state == TaskState::Uncertain),
+                );
+            }
+        }
+        for task in uncertain {
+            match self
+                .dismiss_uncertain_as(store, &task.id, task.revision, SCHEDULE_DISMISSED_DETAIL)
+                .await
+            {
+                Ok(_) | Err(Error::Conflict(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
     }
 
     /// Delete a schedule row; occurrences already queued are unaffected.

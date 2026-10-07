@@ -249,6 +249,25 @@ scheduler is involved. Downtime coalesces missed intervals into one occurrence.
 Durable occurrence identities prevent duplicate enqueue, and outstanding work,
 questions or uncertainty block overlapping project occurrences.
 
+An unattended schedule can stop waiting on you for uncertain work:
+
+```sh
+xcb schedules edit <schedule-id> --revision 6 --dismiss-uncertain true
+```
+
+Once an uncertain task in that schedule's directory has no worker still
+running, xcb dismisses it the way `backlog dismiss` does: the task is marked
+failed and nothing is retried. The next wake-up can then go ahead, so write the
+schedule's prompt to inspect earlier failed and uncertain work before starting
+new work. `--dismiss-uncertain false` turns this off.
+
+Native execution checks are tied to the exact xcb and provider builds. After
+an xcb upgrade, an adopted provider build or 30 days, xcb re-runs the checks
+you already passed for providers a directory grant names, within the hour, so
+granted directories keep running. A check that fails shows as the last
+supervisor fault in `/status`, and work in those directories waits until a
+later check passes.
+
 Every mutation takes the schedule's current revision, so an edit and a wake-up
 can never interleave into a half-applied change. The list view reports why a
 due schedule is not running — a paused project, open work, an unfinished
