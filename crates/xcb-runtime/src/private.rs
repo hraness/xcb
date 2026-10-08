@@ -248,6 +248,43 @@ pub fn read(path: &Path, max: usize) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Read a display-only file a provider wrote inside one of xcb's private
+/// launch directories. The provider picks the file mode itself (Claude Code's
+/// `.claude.json` follows the process umask), so group/other read bits are
+/// tolerated; the private parent directory already keeps the file
+/// owner-only. Everything else in the private-file contract still applies:
+/// a checked private parent, no symlink, a regular file owned by this user
+/// with a single name, and the byte bound.
+#[cfg(unix)]
+pub(crate) fn read_provider_written(path: &Path, max: usize) -> Result<Vec<u8>> {
+    check_directory(path.parent().ok_or(Error::PrivateState)?)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(
+            (rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::NONBLOCK
+                | rustix::fs::OFlags::CLOEXEC)
+                .bits() as i32,
+        )
+        .open(path)?;
+    let options = OwnedPathOptions {
+        owner_only: false,
+        ..owned_file(max as u64)
+    };
+    assert_owned_fd(file.as_raw_fd(), &options).map_err(map_custody_error)?;
+    let mut bytes = Vec::new();
+    file.take(max as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > max {
+        return Err(xcb_core::Error::Limit("private file").into());
+    }
+    Ok(bytes)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn read_provider_written(path: &Path, max: usize) -> Result<Vec<u8>> {
+    read(path, max)
+}
+
 pub(crate) fn lock(file: &File) -> Result<()> {
     let started = std::time::Instant::now();
     loop {

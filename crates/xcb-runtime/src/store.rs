@@ -349,6 +349,19 @@ impl Account {
     }
 }
 
+/// A provider-reported account email fit to persist and show as the account's
+/// display identity: non-empty, trimmed, at most 320 bytes, containing `@`,
+/// and free of control characters. Anything else is dropped, never stored.
+/// Display identity only; callers never pass credential material here.
+pub fn observed_email(value: &str) -> Option<String> {
+    (!value.is_empty()
+        && value.len() <= 320
+        && value.contains('@')
+        && value.trim() == value
+        && !value.chars().any(char::is_control))
+    .then(|| value.to_owned())
+}
+
 fn email_label(value: &str) -> Result<()> {
     label(value, 320)?;
     if !value.contains('@') {

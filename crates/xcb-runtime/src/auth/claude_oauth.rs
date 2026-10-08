@@ -169,6 +169,16 @@ pub fn has_claude_browser_credentials(store: &Store, account: &Id) -> Result<boo
     Ok(read_active(store, account)?.is_some())
 }
 
+/// The account email verified against the provider's profile at the last
+/// browser sign-in or refresh. The record also holds a token; only the email
+/// leaves this function.
+pub(super) fn verified_email(store: &Store, account: &Id) -> Result<Option<String>> {
+    if store.account(account)?.provider != Provider::Claude {
+        return Ok(None);
+    }
+    Ok(read_active(store, account)?.map(|active| active.value.email.clone()))
+}
+
 pub(super) fn cached_token(store: &Store, account: &Id) -> Result<Option<Zeroizing<String>>> {
     let Some(active) = read_active(store, account)? else {
         return Ok(None);

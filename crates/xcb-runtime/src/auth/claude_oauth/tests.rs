@@ -372,3 +372,31 @@ async fn never_started_auth_has_no_pending_effect_and_safe_failure() {
     );
     store.settle(&run, State::Failed, 3).unwrap();
 }
+
+#[test]
+fn browser_sign_in_email_fills_a_missing_account_email_without_the_token() {
+    let (_dir, store, account) = fixture();
+    let path = store.account_root(&account).unwrap().join(ACTIVE);
+    let bytes =
+        serde_json::to_vec(&active(&account, UUID, NEW, crate::now_ms() + 600_000)).unwrap();
+    private::create(&path, &bytes).unwrap();
+    assert_eq!(store.account(&account).unwrap().email, None);
+    let none: [&std::path::Path; 0] = [];
+    assert_eq!(
+        super::super::observe_claude_email(&store, &account, None, &none)
+            .unwrap()
+            .as_deref(),
+        Some("fixture@example.test")
+    );
+    let record = store.account(&account).unwrap();
+    assert_eq!(record.name(), "fixture@example.test");
+    assert_eq!(record.subscription, "Test");
+    assert!(!serde_json::to_string(&record).unwrap().contains(NEW));
+    // A fresher provider report wins over the sign-in record.
+    super::super::observe_claude_email(&store, &account, Some("fresh@example.test"), &none)
+        .unwrap();
+    assert_eq!(
+        store.account(&account).unwrap().email.as_deref(),
+        Some("fresh@example.test")
+    );
+}
