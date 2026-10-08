@@ -105,7 +105,11 @@ impl Protocol for ClaudeProtocol {
     fn account_identity(&self) -> (Option<String>, Option<String>) {
         self.metadata.as_ref().map_or((None, None), |metadata| {
             (
-                metadata.account.email.clone(),
+                metadata
+                    .account
+                    .email
+                    .as_deref()
+                    .and_then(crate::store::observed_email),
                 metadata
                     .account
                     .subscription_type

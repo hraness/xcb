@@ -210,32 +210,57 @@ fn captured_claude_token(bytes: &[u8]) -> Result<Zeroizing<String>> {
 
 /// Best-effort account identity: browser sign-in makes Claude Code write
 /// `oauthAccount.emailAddress` into `.claude.json` under its config/home dir.
-/// Reading our own launch artifacts is the only ambient-free source — the
-/// control protocol reports no account identity.
-pub(crate) fn claude_profile_email(dirs: &[&Path]) -> Option<String> {
+/// Reading our own launch artifacts is an ambient-free source for launches
+/// whose control-protocol startup report omits the account email.
+pub(crate) fn claude_profile_email<P: AsRef<Path>>(dirs: &[P]) -> Option<String> {
     for dir in dirs {
-        let Ok(bytes) = private::read(&dir.join(".claude.json"), 256 * 1024) else {
+        let Ok(bytes) =
+            private::read_provider_written(&dir.as_ref().join(".claude.json"), 256 * 1024)
+        else {
             continue;
         };
         let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
             continue;
         };
-        let Some(email) = value
+        if let Some(email) = value
             .pointer("/oauthAccount/emailAddress")
             .and_then(serde_json::Value::as_str)
-        else {
-            continue;
-        };
-        if !email.is_empty()
-            && email.len() <= 320
-            && email.contains('@')
-            && !email.chars().any(char::is_control)
-            && email.trim() == email
+            .and_then(crate::store::observed_email)
         {
-            return Some(email.to_owned());
+            return Some(email);
         }
     }
     None
+}
+
+/// The email xcb verified with the provider when this account last completed
+/// a full browser sign-in. Local read only: no Keychain, process, or network.
+pub(crate) fn claude_browser_email(store: &Store, id: &Id) -> Result<Option<String>> {
+    claude_oauth::verified_email(store, id)
+}
+
+/// Every local, token-free source of a Claude account's email, in order of
+/// freshness: the provider's own startup report, the `.claude.json` profile
+/// the provider wrote inside this launch's private directories, then the
+/// identity verified at browser sign-in. Persists the first valid one.
+pub(crate) fn observe_claude_email(
+    store: &Store,
+    id: &Id,
+    reported: Option<&str>,
+    profile_dirs: &[impl AsRef<Path>],
+) -> Result<Option<String>> {
+    // The browser record is a display fallback; an unreadable one is
+    // reported by the credential path, never by identity observation.
+    let email = reported
+        .and_then(crate::store::observed_email)
+        .or_else(|| claude_profile_email(profile_dirs))
+        .or_else(|| claude_browser_email(store, id).ok().flatten());
+    if let Some(email) = &email
+        && store.account(id)?.email.as_ref() != Some(email)
+    {
+        store.set_account_identity(id, Some(email.clone()), None)?;
+    }
+    Ok(email)
 }
 
 fn finish_claude_login(
@@ -270,9 +295,12 @@ fn finish_claude_login(
         // The provider wrote this file inside our own launch profile; a
         // missing or unparseable one just leaves the fixed account name.
         let base = artifacts.path();
-        if let Some(email) = claude_profile_email(&[&base.join("home"), &base.join("profile")]) {
-            store.set_account_identity(&run.account, Some(email), None)?;
-        }
+        observe_claude_email(
+            store,
+            &run.account,
+            None,
+            &[&base.join("home"), &base.join("profile")],
+        )?;
         Ok(())
     })();
     if result.is_ok() || !publication_attempted {
@@ -1610,6 +1638,128 @@ mod claude_login_observer_tests {
                     .is_empty()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod claude_email_tests {
+    use super::*;
+
+    fn fixture() -> (tempfile::TempDir, Store, Id) {
+        let directory = tempfile::tempdir().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let id = store
+            .add_account(Provider::Claude, "Personal Max", 1, None)
+            .unwrap()
+            .id;
+        (directory, store, id)
+    }
+
+    fn profile(dir: &Path, email: &str) {
+        private::directory(dir).unwrap();
+        let body = serde_json::json!({
+            "oauthAccount": {"emailAddress": email, "accountUuid": "synthetic"},
+            "primaryApiKey": "SYNTHETIC_PRIVATE_VALUE",
+        });
+        // Claude Code writes this file under the default umask (0644), not
+        // xcb's owner-only mode; the private launch directory still holds it.
+        let path = dir.join(".claude.json");
+        std::fs::write(&path, body.to_string()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+    }
+
+    #[test]
+    fn no_observed_email_keeps_the_placeholder_name() {
+        let (_directory, store, id) = fixture();
+        let missing = store.root().join("missing-profile");
+        assert_eq!(
+            observe_claude_email(&store, &id, None, &[&missing]).unwrap(),
+            None
+        );
+        // A symlinked profile is never followed, even to a valid email.
+        #[cfg(unix)]
+        {
+            let elsewhere = store.root().join("elsewhere");
+            profile(&elsewhere, "fixture@example.invalid");
+            let linked = store.root().join("linked-profile");
+            private::directory(&linked).unwrap();
+            std::os::unix::fs::symlink(elsewhere.join(".claude.json"), linked.join(".claude.json"))
+                .unwrap();
+            assert_eq!(
+                observe_claude_email(&store, &id, None, &[&linked]).unwrap(),
+                None
+            );
+        }
+        let account = store.account(&id).unwrap();
+        assert_eq!(account.email, None);
+        assert!(
+            account.name().starts_with("claude/a_"),
+            "{}",
+            account.name()
+        );
+    }
+
+    #[test]
+    fn profile_email_becomes_the_display_name_and_keeps_the_plan() {
+        let (_directory, store, id) = fixture();
+        let empty = store.root().join("launch-config");
+        let home = store.root().join("launch-home");
+        private::directory(&empty).unwrap();
+        profile(&home, "fixture@example.invalid");
+        let before = store.account(&id).unwrap();
+        assert_eq!(
+            observe_claude_email(&store, &id, None, &[&empty, &home])
+                .unwrap()
+                .as_deref(),
+            Some("fixture@example.invalid")
+        );
+        let account = store.account(&id).unwrap();
+        assert_eq!(account.name(), "fixture@example.invalid");
+        assert_eq!(account.label, before.label);
+        assert_eq!(account.subscription, "Personal Max");
+        assert!(
+            !serde_json::to_string(&account)
+                .unwrap()
+                .contains("SYNTHETIC_PRIVATE_VALUE")
+        );
+    }
+
+    #[test]
+    fn invalid_reported_email_falls_back_to_the_profile_and_never_fails() {
+        let (_directory, store, id) = fixture();
+        let home = store.root().join("launch-home");
+        profile(&home, "fixture@example.invalid");
+        let long = format!("{}@example.invalid", "x".repeat(320));
+        for reported in [
+            "",
+            " fixture@example.invalid",
+            "no-at-sign",
+            "x\n@example.invalid",
+            long.as_str(),
+        ] {
+            assert_eq!(
+                observe_claude_email(&store, &id, Some(reported), &[&home])
+                    .unwrap()
+                    .as_deref(),
+                Some("fixture@example.invalid"),
+                "{reported:?}"
+            );
+        }
+        assert_eq!(
+            observe_claude_email(&store, &id, Some("startup@example.invalid"), &[&home])
+                .unwrap()
+                .as_deref(),
+            Some("startup@example.invalid")
+        );
+        assert_eq!(
+            store.account(&id).unwrap().email.as_deref(),
+            Some("startup@example.invalid")
+        );
     }
 }
 

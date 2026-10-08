@@ -1983,14 +1983,7 @@ impl Protocol for CodexProtocol {
         // ever the display identity — never credential material.
         self.observed_email = account["account"]["email"]
             .as_str()
-            .filter(|value| {
-                !value.is_empty()
-                    && value.len() <= 320
-                    && value.contains('@')
-                    && !value.chars().any(char::is_control)
-                    && value.trim() == *value
-            })
-            .map(str::to_owned);
+            .and_then(crate::store::observed_email);
         self.observed_plan = account["account"]["planType"]
             .as_str()
             .filter(|value| {

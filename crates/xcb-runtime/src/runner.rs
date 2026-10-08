@@ -2317,6 +2317,16 @@ pub(crate) async fn handshake(
     .map_err(|_| Error::Unavailable("provider initialization timed out"))?
 }
 
+/// Private directories inside one Claude launch where the provider may have
+/// written its `.claude.json` profile (config dir, home, sign-in profile).
+fn claude_profile_dirs(base: &Path) -> [PathBuf; 3] {
+    [
+        base.join("scratch").join("config"),
+        base.join("scratch").join("home"),
+        base.join("profile"),
+    ]
+}
+
 pub async fn probe(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<Vec<ModelChoice>> {
     if pin.provider == Provider::Codex {
         return probe_codex(store, pin, account).await;
@@ -2464,13 +2474,12 @@ async fn probe_claude_metadata_inner(
                 })
                 .map(|value| format!("Claude {value}"));
             let base = launch.artifacts.path();
-            let email = metadata.account.email.clone().or_else(|| {
-                auth::claude_profile_email(&[
-                    &base.join("scratch").join("config"),
-                    &base.join("scratch").join("home"),
-                    &base.join("profile"),
-                ])
-            });
+            auth::observe_claude_email(
+                store,
+                account,
+                metadata.account.email.as_deref(),
+                &claude_profile_dirs(base),
+            )?;
             let plan = plan.or_else(|| {
                 metadata
                     .account
@@ -2478,8 +2487,8 @@ async fn probe_claude_metadata_inner(
                     .as_ref()
                     .map(|plan| format!("Claude {plan}"))
             });
-            if email.is_some() || plan.is_some() {
-                store.set_account_identity(account, email, plan)?;
+            if plan.is_some() {
+                store.set_account_identity(account, None, plan)?;
             }
         }
         if inspect_runtime {
@@ -2860,6 +2869,7 @@ pub(crate) async fn run_prepared<P: Protocol>(
         }
     };
     launch.artifacts.retain_before_launch();
+    let launch_directory = launch.artifacts.path().to_owned();
     let bridge = launch.bridge.take();
     let mut process = match StreamProcess::spawn(launch.command) {
         Ok(process) => process,
@@ -2939,8 +2949,24 @@ pub(crate) async fn run_prepared<P: Protocol>(
             return Err(Error::Unavailable(STALE_MODEL));
         }
         let (email, plan) = protocol.account_identity();
-        if email.is_some() || plan.is_some() {
-            store.set_account_identity(&session.account, email, plan)?;
+        if session.model.provider == Provider::Claude {
+            // A Claude run reads the same token-free sources as `accounts
+            // refresh`, so an ordinary task also fills a missing email.
+            auth::observe_claude_email(
+                &store,
+                &session.account,
+                email.as_deref(),
+                &claude_profile_dirs(&launch_directory),
+            )?;
+            if plan.is_some() {
+                store.set_account_identity(&session.account, None, plan)?;
+            }
+        } else if email.is_some() || plan.is_some() {
+            store.set_account_identity(
+                &session.account,
+                email.as_deref().and_then(crate::store::observed_email),
+                plan,
+            )?;
         }
         let history = store
             .messages(&session.id, 512)?

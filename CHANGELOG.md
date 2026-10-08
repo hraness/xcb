@@ -10,6 +10,21 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## Unreleased
+
+Claude accounts now show their email in `xcb accounts`.
+
+- `xcb accounts` and `xcb --json accounts` show a Claude account's email in
+  place of the `claude/a_…` placeholder once xcb sees it. xcb reads it during
+  `accounts login`, `accounts refresh`, and ordinary runs, from Claude Code's
+  startup report, the profile Claude Code writes inside xcb's private launch
+  folder, or the email confirmed at browser sign-in. None of these sends a
+  prompt. Your plan name is never changed, and an email that is empty,
+  untrimmed, longer than 320 characters, missing `@`, or contains control
+  characters is ignored instead of failing the run.
+- The Claude profile is now read even when Claude Code writes it with its
+  default file mode, which previously hid the email.
+
 ## 0.20.3 - 2026-10-07
 
 Native commands in different workspaces no longer block each other.

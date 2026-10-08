@@ -840,6 +840,54 @@ fn accounts_table_lines_up_and_names_the_account_to_sign_in() {
     );
 }
 
+/// An observed Claude email replaces the `claude/a_…` placeholder in both
+/// views; an account without one keeps the placeholder, and the plan the
+/// owner chose stays as written.
+#[test]
+fn accounts_show_an_observed_claude_email_in_place_of_the_placeholder() {
+    let sandbox = Sandbox::new("accounts-claude-email");
+    let named = sandbox.add(&["claude", "--plan", "Personal Max"]);
+    let unnamed = sandbox.add(&["claude", "--plan", "Pro"]);
+    let store = xcb_runtime::store::Store::open(&sandbox.state()).unwrap();
+    store
+        .set_account_identity(
+            &xcb_core::Id::new(&named).unwrap(),
+            Some("fixture@example.invalid".into()),
+            None,
+        )
+        .unwrap();
+    let json = sandbox.run(&["--json", "accounts"], &[]);
+    assert!(json.status.success(), "{json:?}");
+    let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    let row = |id: &str| {
+        value["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(row(&named)["email"], "fixture@example.invalid", "{value}");
+    assert_eq!(row(&named)["name"], "fixture@example.invalid", "{value}");
+    assert_eq!(row(&named)["subscription"], "Personal Max", "{value}");
+    assert!(row(&unnamed)["email"].is_null(), "{value}");
+    assert_eq!(
+        row(&unnamed)["name"],
+        format!("claude/{}", &unnamed[..10]),
+        "{value}"
+    );
+    let human = sandbox.run(&["accounts"], &[("HRANESS_AUDIENCE", "human")]);
+    assert!(human.status.success(), "{human:?}");
+    let stdout = text(&human.stdout);
+    let line = stdout
+        .lines()
+        .find(|line| line.contains(&format!("{}…", &named[..10])))
+        .unwrap();
+    assert!(line.contains("fixture@example.invalid"), "{stdout}");
+    assert!(!line.contains("claude/a_"), "{stdout}");
+}
+
 /// `update disable` and `update enable --policy disable` only record the
 /// policy: no LaunchAgent, no login-item notice, on every platform. The
 /// sandbox HOME has no LaunchAgent, so nothing reaches launchd.
