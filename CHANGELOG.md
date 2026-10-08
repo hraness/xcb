@@ -10,7 +10,7 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
-## Unreleased
+## 0.20.5 - 2026-10-08
 
 A scheduled program no longer waits forever on a child task you cancelled.
 
