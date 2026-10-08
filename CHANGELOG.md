@@ -10,6 +10,16 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## Unreleased
+
+A scheduled program no longer waits forever on a child task you cancelled.
+
+- When a program's child task is cancelled, for example with `xcb tasks
+  cancel` while it waits for your input, the program now stops with
+  "program stopped because child … settled as cancelled", the same way it
+  stops for a failed child, and its schedule wakes again. Programs already
+  stuck on a cancelled child stop the next time the service checks them.
+
 ## 0.20.4 - 2026-10-08
 
 Claude accounts now show their email in `xcb accounts`.
