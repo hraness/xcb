@@ -156,8 +156,8 @@ export const blogPosts: readonly BlogPost[] = [
   }),
   post({
     slug: launchPostSlug,
-    title: "Introducing Excalibur: one agent for all your AI coding plans",
-    dek: "Run tasks across your Claude and Codex plans, use available quota, and keep work moving between accounts.",
+    title: "Introducing Excalibur: operate your AI subscriptions",
+    dek: "Log in with all your Codex and Claude accounts, tell your agent to use xcb, and let long jobs scale to the usage left on each account.",
     eyebrow: "Launch",
     updated: "2026-10-04",
     published: "2026-09-29",

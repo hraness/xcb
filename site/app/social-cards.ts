@@ -43,8 +43,8 @@ const cardCopy: Readonly<Record<string, { description: string; headline?: string
   "/compare/openrouter": { description: "OpenRouter bills per token. xcb sends each task to a plan you already pay for." },
   "/blog": { description: "How xcb routes coding tasks across your Claude and Codex plans." },
   "/blog/one-agent-for-all-your-ai-plans": {
-    headline: "Excalibur: one agent for all your AI plans",
-    description: "Type a task once, and xcb picks the account.",
+    headline: "Excalibur operates your AI subscriptions",
+    description: "Log in with all your accounts, then tell your agent to use xcb.",
   },
   "/blog/introducing-excalibur": { description: "xcb sends each coding task to an idle Claude or Codex account of yours." },
   "/blog/how-xcb-uses-gobstopper": { description: "xcb trims stale tool output and keeps it locally." },
