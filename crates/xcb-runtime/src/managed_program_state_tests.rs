@@ -1920,3 +1920,57 @@ async fn a_cancelled_child_settles_its_waiting_program() {
     assert!(!stopped.program_waiting);
     assert_eq!(stopped.state, TaskState::Failed);
 }
+
+#[tokio::test]
+async fn cancelling_a_program_waiting_on_a_cancelled_child_settles_it_as_cancelled() {
+    // The child stopped on an approval question and was cancelled; the owner
+    // then cancelled the queued parent. Neither holds a provider process.
+    let f = fixture().await;
+    let (parent, child) = waiting(&f, 1).await;
+    let question = xcb_core::policy::TurnFacts {
+        terminal: Terminal::Failed,
+        joined: true,
+        effects: EffectState::Settled,
+        pending_attention: true,
+        failure: Some(xcb_core::policy::Failure::Policy),
+    };
+    let asked = settle_child_turn(&f, &child, "", question, State::NeedsApproval).await;
+    f.managed.settle_unstarted_cancel(&asked).await.unwrap();
+    let parent = f.managed.task(&parent.id).unwrap().unwrap();
+    let requested = f
+        .managed
+        .cancel_task(&parent.id, parent.revision)
+        .await
+        .unwrap();
+    assert!(requested.cancel_requested && requested.program_waiting);
+    f.managed.tick_programs(&f.store, true).await.unwrap();
+    let settled = f.managed.task(&parent.id).unwrap().unwrap();
+    assert_eq!(settled.state, TaskState::Cancelled);
+    assert!(!settled.program_waiting && !settled.cancel_requested);
+    assert_eq!(
+        settled.detail,
+        "program cancelled after linked child settled"
+    );
+
+    // Cancellation settles even while the service is draining.
+    let f = fixture().await;
+    let (parent, child) = waiting(&f, 1).await;
+    let mut stale = child.clone();
+    stale.state = TaskState::Cancelled;
+    stale.session = Some(Id::new("s_cancelled_child").unwrap());
+    stale.attempts = 1;
+    stale.revision += 1;
+    stale.updated_at_ms = now_ms().max(child.updated_at_ms);
+    f.managed.transition(&child, stale, None).await.unwrap();
+    let requested = f
+        .managed
+        .cancel_task(&parent.id, parent.revision)
+        .await
+        .unwrap();
+    assert!(requested.cancel_requested);
+    f.managed.tick_programs(&f.store, false).await.unwrap();
+    assert_eq!(
+        f.managed.task(&parent.id).unwrap().unwrap().state,
+        TaskState::Cancelled
+    );
+}

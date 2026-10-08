@@ -19,6 +19,8 @@ A scheduled program no longer waits forever on a child task you cancelled.
   "program stopped because child … settled as cancelled", the same way it
   stops for a failed child, and its schedule wakes again. Programs already
   stuck on a cancelled child stop the next time the service checks them.
+- Cancelling a program that waits on a cancelled child now cancels it on the
+  service's next check instead of leaving it at "cancellation requested".
 
 ## 0.20.4 - 2026-10-08
 
