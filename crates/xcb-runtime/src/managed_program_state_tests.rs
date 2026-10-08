@@ -89,6 +89,22 @@ async fn waiting(f: &Fixture, calls: u8) -> (ManagedTask, ManagedTask) {
     (parent, child)
 }
 async fn settle_child(f: &Fixture, child: &ManagedTask, text: &str) -> ManagedTask {
+    let completed = xcb_core::policy::TurnFacts {
+        terminal: Terminal::Completed,
+        joined: true,
+        effects: EffectState::Settled,
+        pending_attention: false,
+        failure: None,
+    };
+    settle_child_turn(f, child, text, completed, State::Idle).await
+}
+async fn settle_child_turn(
+    f: &Fixture,
+    child: &ManagedTask,
+    text: &str,
+    facts: xcb_core::policy::TurnFacts,
+    state: State,
+) -> ManagedTask {
     use xcb_core::models::{Mode, ModelChoice};
     let account = f
         .store
@@ -143,14 +159,8 @@ async fn settle_child(f: &Fixture, child: &ManagedTask, text: &str) -> ManagedTa
         tool_calls: Some(0),
         text_attention: false,
         text: text.into(),
-        facts: xcb_core::policy::TurnFacts {
-            terminal: Terminal::Completed,
-            joined: true,
-            effects: EffectState::Settled,
-            pending_attention: false,
-            failure: None,
-        },
-        state: State::Idle,
+        facts,
+        state,
         diagnostic: None,
     };
     let current = f.store.session(&session.id).unwrap().unwrap();
@@ -1853,4 +1863,60 @@ async fn an_owner_dismissed_child_settles_its_waiting_or_cancelled_program() {
             }
         );
     }
+}
+
+#[tokio::test]
+async fn a_cancelled_child_settles_its_waiting_program() {
+    // The child stopped on an approval question, then the owner cancelled it.
+    let f = fixture().await;
+    let (parent, child) = waiting(&f, 1).await;
+    let question = xcb_core::policy::TurnFacts {
+        terminal: Terminal::Failed,
+        joined: true,
+        effects: EffectState::Settled,
+        pending_attention: true,
+        failure: Some(xcb_core::policy::Failure::Policy),
+    };
+    let asked = settle_child_turn(&f, &child, "", question, State::NeedsApproval).await;
+    assert_eq!(asked.state, TaskState::NeedsInput);
+    f.managed.tick_programs(&f.store, true).await.unwrap();
+    assert!(f.managed.task(&parent.id).unwrap().unwrap().program_waiting);
+    let cancelled = f.managed.settle_unstarted_cancel(&asked).await.unwrap();
+    assert_eq!(cancelled.state, TaskState::Cancelled);
+    f.managed.tick_programs(&f.store, true).await.unwrap();
+    let stopped = f.managed.task(&parent.id).unwrap().unwrap();
+    assert!(!stopped.program_waiting);
+    assert_eq!(stopped.state, TaskState::Failed);
+    assert_eq!(
+        stopped.detail,
+        format!(
+            "program stopped because child {} settled as cancelled",
+            child.id
+        )
+    );
+
+    // A parent already left waiting on a cancelled child whose last turn is
+    // absent settles the next time the program tick evaluates it.
+    let f = fixture().await;
+    let (parent, child) = waiting(&f, 1).await;
+    let mut stale = child.clone();
+    stale.state = TaskState::Cancelled;
+    stale.session = Some(Id::new("s_cancelled_child").unwrap());
+    stale.attempts = 1;
+    stale.detail = "cancelled before worker dispatch".into();
+    stale.revision += 1;
+    stale.updated_at_ms = now_ms().max(child.updated_at_ms);
+    f.managed.transition(&child, stale, None).await.unwrap();
+    let mut stuck = parent.clone();
+    stuck.detail = format!(
+        "waiting for child {} · cancelled; no worker slot held",
+        child.id
+    );
+    stuck.revision += 1;
+    stuck.updated_at_ms = now_ms().max(parent.updated_at_ms);
+    f.managed.transition(&parent, stuck, None).await.unwrap();
+    f.managed.tick_programs(&f.store, true).await.unwrap();
+    let stopped = f.managed.task(&parent.id).unwrap().unwrap();
+    assert!(!stopped.program_waiting);
+    assert_eq!(stopped.state, TaskState::Failed);
 }

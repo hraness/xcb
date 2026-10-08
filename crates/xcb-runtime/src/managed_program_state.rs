@@ -1479,18 +1479,31 @@ impl ManagedStore {
         {
             None
         } else if let Some(session) = &child.session {
-            let Some(outcome) = store.settled_outcome(session, child.message_count_before)? else {
-                return Ok(None);
-            };
-            if !outcome.facts.joined
-                || outcome.facts.effects == EffectState::Uncertain
-                || outcome.facts.pending_attention
-                || (child.state == TaskState::Completed
-                    && (!settled_completion(&outcome) || outcome.facts.failure.is_some()))
-            {
-                return Ok(None);
+            match store.settled_outcome(session, child.message_count_before)? {
+                Some(outcome)
+                    if !outcome.facts.joined || outcome.facts.effects == EffectState::Uncertain =>
+                {
+                    return Ok(None);
+                }
+                Some(outcome) if child.state != TaskState::Completed => {
+                    // A failed or cancelled child cannot answer its pending
+                    // question, so the question no longer holds the program.
+                    Some(outcome)
+                }
+                Some(outcome)
+                    if !outcome.facts.pending_attention
+                        && settled_completion(&outcome)
+                        && outcome.facts.failure.is_none() =>
+                {
+                    Some(outcome)
+                }
+                Some(_) => return Ok(None),
+                // A child cancelled while queued or awaiting input settles
+                // from its own record once no run holds it; its last turn
+                // may be absent or superseded.
+                None if child.state != TaskState::Completed => None,
+                None => return Ok(None),
             }
-            Some(outcome)
         } else if child.attempts != 0 || child.state == TaskState::Completed {
             return Ok(None);
         } else {
@@ -1649,7 +1662,7 @@ impl ManagedStore {
             let mut next = parent.clone();
             next.state = TaskState::Failed;
             next.program_waiting = false;
-            next.detail = if !report_fits {
+            next.detail = if child.state == TaskState::Completed {
                 format!(
                     "program stopped because child {} report exceeds resume limits ({} bytes, 16384 encoded); complete report retained in child session",
                     child.id, MAX_SUMMARY_BYTES
