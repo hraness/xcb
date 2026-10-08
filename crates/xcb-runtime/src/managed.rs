@@ -2052,7 +2052,10 @@ impl ManagedStore {
     /// A bare id or label is accepted only when it names one model; excluded
     /// routes are refused exactly as dispatch would refuse them.
     fn resolve_model_pin(&self, requested: &str) -> Result<(String, Provider)> {
-        let store = Store::open(self.root())?;
+        // The catalog lives in the state root; `self.root` is its managed
+        // subdirectory, and opening a Store there finds no models.
+        let state = self.root.parent().ok_or(Error::PrivateState)?;
+        let store = Store::open(state)?;
         let matches: Vec<_> = store
             .models()?
             .into_iter()
@@ -2075,7 +2078,7 @@ impl ManagedStore {
                 ));
             }
         };
-        if Config::load(self.root())?.0.routing.excluded(model) {
+        if Config::load(state)?.0.routing.excluded(model) {
             return Err(xcb_core::Error::Invalid(crate::routing_stack::EXCLUDED_BY_NEVER).into());
         }
         Ok((model.key(), model.provider))
