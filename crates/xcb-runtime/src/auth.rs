@@ -1697,11 +1697,8 @@ mod claude_email_tests {
         }
         let account = store.account(&id).unwrap();
         assert_eq!(account.email, None);
-        assert!(
-            account.name().starts_with("claude/a_"),
-            "{}",
-            account.name()
-        );
+        assert_eq!(account.name(), account.fixed_name());
+        assert!(account.fixed_name().starts_with("claude/a_"));
     }
 
     #[test]
