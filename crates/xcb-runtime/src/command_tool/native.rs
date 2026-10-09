@@ -134,18 +134,18 @@ fn host_private_paths(home: std::path::PathBuf) -> Vec<std::path::PathBuf> {
     .into()
 }
 
-/// Host toolchain directories a host-read command searches before system
-/// directories, in the order a login shell usually puts them.
-#[cfg(target_os = "macos")]
-fn host_toolchain_paths(home: &Path) -> Vec<std::path::PathBuf> {
-    let mut node = std::fs::read_dir(home.join(".nvm/versions/node"))
+/// The `bin` directory of the highest version installed under a version
+/// manager's directory, such as nvm's `versions/node` or nodenv's `versions`.
+#[cfg(any(target_os = "macos", test))]
+fn newest_version_bin(versions: &Path) -> Option<std::path::PathBuf> {
+    let mut bins = std::fs::read_dir(versions)
         .map(|entries| {
             entries
                 .filter_map(|entry| entry.ok().map(|entry| entry.path().join("bin")))
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    node.sort_by_key(|path| {
+    bins.sort_by_key(|path| {
         path.parent()
             .and_then(|version| version.file_name())
             .and_then(|name| name.to_str())
@@ -157,9 +157,17 @@ fn host_toolchain_paths(home: &Path) -> Vec<std::path::PathBuf> {
             })
             .unwrap_or_default()
     });
+    bins.pop()
+}
+
+/// Host toolchain directories a host-read command searches before system
+/// directories, in the order a login shell usually puts them.
+#[cfg(target_os = "macos")]
+fn host_toolchain_paths(home: &Path) -> Vec<std::path::PathBuf> {
     [home.join(".cargo/bin"), home.join(".bun/bin")]
         .into_iter()
-        .chain(node.pop())
+        .chain(newest_version_bin(&home.join(".nvm/versions/node")))
+        .chain(newest_version_bin(&home.join(".nodenv/versions")))
         .chain(
             ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin"]
                 .map(std::path::PathBuf::from),
@@ -539,6 +547,19 @@ mod tests {
             bad[key] = value;
             assert!(Request::parse(&bad, root).is_err(), "{key}");
         }
+    }
+
+    #[test]
+    fn version_manager_toolchains_pick_the_highest_installed_version() {
+        let directory = tempfile::tempdir().unwrap();
+        for version in ["v18.20.4", "v23.9.0", "v9.11.2", "22.13.0"] {
+            std::fs::create_dir_all(directory.path().join(version).join("bin")).unwrap();
+        }
+        assert_eq!(
+            newest_version_bin(directory.path()),
+            Some(directory.path().join("v23.9.0").join("bin"))
+        );
+        assert_eq!(newest_version_bin(&directory.path().join("absent")), None);
     }
 
     #[test]
