@@ -853,6 +853,33 @@ fn workspace_read_rejects_oversized_files_with_a_guided_tool_error() {
     assert!(error.to_string().contains("exceeds the 128 KiB read limit"));
 }
 
+#[test]
+fn native_command_descriptor_documents_long_builds_and_binds_timeout() {
+    use xcb_runtime::broker::{compact_descriptors, descriptors};
+    let descriptor = descriptors()
+        .into_iter()
+        .find(|tool| tool["name"] == "workspace_native_exec")
+        .expect("native workspace tool descriptor");
+    let description = descriptor["description"].as_str().unwrap();
+    assert!(description.contains("several minutes"));
+    assert!(description.contains("600000ms"));
+    assert_eq!(
+        descriptor["inputSchema"]["properties"]["timeoutMs"]["maximum"],
+        600000
+    );
+    assert_eq!(
+        descriptor["inputSchema"]["properties"]["timeoutMs"]["description"],
+        "Builds and test suites may take several minutes; set timeoutMs up to 600000ms."
+    );
+    let compact = compact_descriptors()
+        .into_iter()
+        .find(|tool| tool["name"] == "workspace_native_exec")
+        .expect("compact native workspace tool descriptor");
+    let compact_description = compact["description"].as_str().unwrap();
+    assert!(compact_description.contains("several minutes"));
+    assert!(compact_description.contains("600000ms"));
+}
+
 /// Devin shows `tools/list` to its model as indented JSON and moves any tool
 /// output over 10,000 characters into a file that only a denied native tool
 /// could read. The listing it receives stays well inside that limit while
