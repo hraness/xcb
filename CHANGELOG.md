@@ -10,6 +10,13 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.20.6 - 2026-10-09
+
+Native build and test commands now document the time needed for cold builds.
+
+- `workspace_native_exec` tells workers that builds and test suites may take several minutes and accepts a `timeoutMs` up to `600000ms`, including in its compact descriptor.
+- Regression coverage pins the full and compact tool descriptions and the timeout schema.
+
 ## 0.20.5 - 2026-10-08
 
 A scheduled program no longer waits forever on a child task you cancelled.
