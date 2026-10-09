@@ -1818,8 +1818,17 @@ pub(crate) enum CommandOutcome {
         stderr: zeroize::Zeroizing<Vec<u8>>,
         truncated: bool,
     },
-    /// Timeout, cancellation or a read failure stopped the command; its
-    /// group was then proven absent, but its effects are unknown.
+    /// The deadline passed first. xcb stopped the group and then proved it
+    /// absent with both streams at EOF, so nothing from the command still
+    /// runs. The output read before the deadline is kept, clipped to the
+    /// same bound. Whether its effects are known is the caller's decision:
+    /// it depends on what the command could reach, not on how it stopped.
+    TimedOut {
+        stdout: zeroize::Zeroizing<Vec<u8>>,
+        stderr: zeroize::Zeroizing<Vec<u8>>,
+    },
+    /// Cancellation or a read failure stopped the command; its group was
+    /// then proven absent, but its effects are unknown.
     Interrupted,
     Unproven,
 }
@@ -1886,8 +1895,13 @@ pub(crate) async fn capture_command(
     // Reserve the full bound so growth cannot leave an unwiped copy behind.
     let mut out = zeroize::Zeroizing::new(Vec::with_capacity(max));
     let mut err = zeroize::Zeroizing::new(Vec::with_capacity(max));
+    enum Read {
+        Complete(bool),
+        TimedOut,
+        Stopped,
+    }
     let read = match recorded {
-        Err(_) => None,
+        Err(_) => Read::Stopped,
         Ok(()) => {
             let execution = async {
                 tokio::try_join!(
@@ -1897,15 +1911,16 @@ pub(crate) async fn capture_command(
             };
             tokio::select! {
                 biased;
-                _ = async { if !*cancel.borrow() { let _ = cancel.changed().await; } } => None,
+                _ = async { if !*cancel.borrow() { let _ = cancel.changed().await; } } => Read::Stopped,
                 result = tokio::time::timeout(deadline, execution) => match result {
-                    Ok(Ok((out_cut, err_cut))) => Some(out_cut || err_cut),
-                    _ => None,
+                    Ok(Ok((out_cut, err_cut))) => Read::Complete(out_cut || err_cut),
+                    Ok(Err(_)) => Read::Stopped,
+                    Err(_) => Read::TimedOut,
                 },
             }
         }
     };
-    if read.is_none() {
+    if !matches!(read, Read::Complete(_)) {
         if child.id() == Some(pid) {
             let _ = group.kill();
         }
@@ -1928,13 +1943,19 @@ pub(crate) async fn capture_command(
         return CommandOutcome::Unproven;
     }
     match read {
-        Some(truncated) => CommandOutcome::Exited {
+        Read::Complete(truncated) => CommandOutcome::Exited {
             code: status.code(),
             stdout: out,
             stderr: err,
             truncated,
         },
-        None => CommandOutcome::Interrupted,
+        // Cancellation wins a race with the deadline: the caller is
+        // stopping the run, so it is not a timeout to settle.
+        Read::TimedOut if !*cancel.borrow() => CommandOutcome::TimedOut {
+            stdout: out,
+            stderr: err,
+        },
+        Read::TimedOut | Read::Stopped => CommandOutcome::Interrupted,
     }
 }
 
@@ -2109,8 +2130,32 @@ mod tests {
             } => assert_eq!(&**stdout, b"0123"),
             _ => panic!("long output must be clipped, not interrupted"),
         }
+        match run("printf started; printf warming >&2; sleep 5", 1024, 300).await {
+            CommandOutcome::TimedOut { stdout, stderr } => {
+                assert_eq!(&**stdout, b"started");
+                assert_eq!(&**stderr, b"warming");
+            }
+            _ => panic!("a deadline must report a timeout with the output read so far"),
+        }
+        // A child that outlives its parent in the same group is stopped too.
         assert!(matches!(
-            run("sleep 5", 1024, 100).await,
+            run("sleep 30 & sleep 30", 1024, 200).await,
+            CommandOutcome::TimedOut { .. }
+        ));
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 5"]);
+        let cancelled = tokio::spawn(capture_command(
+            command,
+            1024,
+            Duration::from_secs(5),
+            stopped,
+            |_| Ok(()),
+        ));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        stop.send(true).unwrap();
+        assert!(matches!(
+            cancelled.await.unwrap(),
             CommandOutcome::Interrupted
         ));
         let missing = Command::new("/nonexistent/xcb-command");

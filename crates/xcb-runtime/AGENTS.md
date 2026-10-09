@@ -22,7 +22,12 @@
   requirement. It never substitutes offline replay or legacy host commands.
   A native command that runs to its own exit, with any status, after its group
   is proven absent returns its exit code, stdout and stderr as a settled result.
-  Only a timeout, cancellation or unproven join retains uncertain effects.
+  A timeout whose group is then stopped and proven absent settles as
+  `timed_out` only when the command held no GitHub credentials (per-call
+  `githubCredentials: false` or an uncredentialed grant) or was a read-only
+  `gh` query by bare name; its workspace file changes stay for the worker to
+  inspect. A credentialed timeout, cancellation or unproven join retains
+  uncertain effects. Never widen the settling set by argv guesses about builds.
 - A run whose provider, tool and command groups are all proven joined
   releases its account lease even with uncertain effects: the session stays
   uncertain, the receipts stay unsettled and nothing is replayed. Startup

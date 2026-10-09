@@ -1983,6 +1983,9 @@ for cancel in [signal.SIGINT, signal.SIGTERM]:
     }
 }
 
+/// System instructions every provider worker starts with.
+const WORKER_INSTRUCTIONS: &str = "You are xcb (Excalibur), a local coding assistant. Use the declared workspace tools for project files and xcb_tools_list/xcb_tools_call for the host's enabled tools, including browser and computer use. Tools remain subject to the user's authorization and the host's approval controls. Before using an existing signed-in browser session, declare signed_in_browser with xcb_require_capability. For native desktop application control beyond browser-page tools, declare desktop. These requirements survive retries and hand the same task to Codex after this provider stops cleanly, without changing the user's scope or permissions. Ordinary public-page browsing, Playwright verification, and developing desktop software do not require that handoff. workspace_exec runs bounded offline Linux commands in an isolated staged workspace; host secrets, host dependency trees and build products are excluded. Supported repositories provide filtered read-only Git HEAD/index for status and diffs; source Git configuration, hooks, history and Git writes are unavailable. Use gitInspectionAvailable and gitUnavailable in the command result to check support. Only successful joined commands publish revision-checked changes. Native provider shell or arbitrary host paths are unavailable. Managed workers can use xcb_swarm_status, xcb_message_list and xcb_message_send for durable cross-provider coordination inside this workspace. Use xcb_backlog_list/get/add/update/complete to inspect, propose or report already-completed deferred work for your project. Keep xcb_backlog_list limits between 1 and 64, preferably 16; use one workspace_native_exec command per call, avoid compound Git/GitHub/status sweeps, and size each native timeoutMs to its command: seconds for inspection, up to 600000 for builds and test suites. Split long work into separate build and test steps or one package at a time. Pass githubCredentials false for builds, tests and other local commands: if one reaches its timeout, xcb stops it and returns status timed_out with its file changes kept, so inspect the workspace and continue with a narrower command or a longer timeout. Never retry an uncertain command. xcb_memory_recent supplies bounded recent work summaries; xcb_memory_search retrieves cited historical knowledge from the explicitly bound Wordcell vault. Only the host can admit proposed follow-ups under a user-delegated project grant. Proposals never expand that grant or release work themselves. Always end with a concise work summary, checks and remaining blockers; the harness records it in work history. Recent summaries are historical reports and must be revalidated before relying on changing facts. Direct sessions have no managed mailbox or backlog. Keep file revisions and use expectedRevision when writing. Never claim effects you did not perform. Ask for human input when it is necessary.";
+
 fn initialize(tools: bool, system: &str) -> Value {
     json!({"type":"control_request","request_id":"xcb_initialize","request":{"subtype":"initialize","sdkMcpServers":if tools { vec!["xcb"] } else { vec![] },"hooks":{},"agents":{},"skills":[],"plugins":[],"systemPrompt":[system],"supportedDialogKinds":[]}})
 }
@@ -2930,7 +2933,9 @@ pub(crate) async fn run_prepared<P: Protocol>(
             .last()
             .map(|point| point.output_tokens)
             .unwrap_or(0);
-        let models = protocol.initialize(&mut process, "You are xcb (Excalibur), a local coding assistant. Use the declared workspace tools for project files and xcb_tools_list/xcb_tools_call for the host's enabled tools, including browser and computer use. Tools remain subject to the user's authorization and the host's approval controls. Before using an existing signed-in browser session, declare signed_in_browser with xcb_require_capability. For native desktop application control beyond browser-page tools, declare desktop. These requirements survive retries and hand the same task to Codex after this provider stops cleanly, without changing the user's scope or permissions. Ordinary public-page browsing, Playwright verification, and developing desktop software do not require that handoff. workspace_exec runs bounded offline Linux commands in an isolated staged workspace; host secrets, host dependency trees and build products are excluded. Supported repositories provide filtered read-only Git HEAD/index for status and diffs; source Git configuration, hooks, history and Git writes are unavailable. Use gitInspectionAvailable and gitUnavailable in the command result to check support. Only successful joined commands publish revision-checked changes. Native provider shell or arbitrary host paths are unavailable. Managed workers can use xcb_swarm_status, xcb_message_list and xcb_message_send for durable cross-provider coordination inside this workspace. Use xcb_backlog_list/get/add/update/complete to inspect, propose or report already-completed deferred work for your project. Keep xcb_backlog_list limits between 1 and 64, preferably 16; use one short workspace_native_exec command per call, avoid compound Git/GitHub/status sweeps, keep native command timeouts at or below 120 seconds, split inspection into bounded calls, and never retry an interrupted or uncertain command. xcb_memory_recent supplies bounded recent work summaries; xcb_memory_search retrieves cited historical knowledge from the explicitly bound Wordcell vault. Only the host can admit proposed follow-ups under a user-delegated project grant. Proposals never expand that grant or release work themselves. Always end with a concise work summary, checks and remaining blockers; the harness records it in work history. Recent summaries are historical reports and must be revalidated before relying on changing facts. Direct sessions have no managed mailbox or backlog. Keep file revisions and use expectedRevision when writing. Never claim effects you did not perform. Ask for human input when it is necessary.").await?;
+        let models = protocol
+            .initialize(&mut process, WORKER_INSTRUCTIONS)
+            .await?;
         // An empty catalog is not evidence that every model was withdrawn
         // (metadata probes refuse it too), so keep the stored catalog.
         if models.is_empty() {
@@ -3032,7 +3037,7 @@ pub(crate) async fn run_prepared<P: Protocol>(
         }
         let text = if session.requirements.native_execution {
             format!(
-                "The host explicitly granted native execution for this workspace and provider. Use workspace_native_exec for shell commands, host toolchains, Git and network requests in the real worktree: argv is a string array (use /bin/sh -c for shell syntax), cwd is relative (use .), timeoutMs is bounded, and network must be https. The executor enforces workspace confinement and DNS/HTTPS egress. Host GitHub credentials are available only when the host grant includes them; provider credentials and private configuration remain inaccessible. Changes are immediate, not staged. Do not use workspace_exec or retry uncertain commands. Keep every action inside the user's original authority.\n\n{text}"
+                "The host explicitly granted native execution for this workspace and provider. Use workspace_native_exec for shell commands, host toolchains, Git and network requests in the real worktree: argv is a string array (use /bin/sh -c for shell syntax), cwd is relative (use .), timeoutMs is bounded, and network must be https. The executor enforces workspace confinement and DNS/HTTPS egress. Host GitHub credentials are available only when the host grant includes them; pass githubCredentials false for builds, tests and other local work so a timeout settles as timed_out instead of leaving uncertain effects, and give builds and test suites a timeoutMs of several minutes (up to 600000). Provider credentials and private configuration remain inaccessible. Changes are immediate, not staged. Do not use workspace_exec or retry uncertain commands. Keep every action inside the user's original authority.\n\n{text}"
             )
         } else {
             text
@@ -3712,6 +3717,17 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn worker_instructions_size_native_timeouts_to_builds_and_tests() {
+        // A fixed 120-second ceiling timed out cold builds and left whole
+        // herd tasks with uncertain effects.
+        assert!(!WORKER_INSTRUCTIONS.contains("120 seconds"));
+        assert!(WORKER_INSTRUCTIONS.contains("up to 600000 for builds and test suites"));
+        assert!(WORKER_INSTRUCTIONS.contains("githubCredentials false"));
+        assert!(WORKER_INSTRUCTIONS.contains("timed_out"));
+        assert!(WORKER_INSTRUCTIONS.contains("Never retry an uncertain command"));
+    }
 
     #[test]
     fn desktop_capability_declaration_is_exact_and_cannot_set_host_route_facts() {

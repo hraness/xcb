@@ -34,6 +34,17 @@ and a successful authenticated test. Provider-built-in host shell and web
 tools remain disabled; the host bridge does not claim that a provider's
 built-in command classifier reviewed its arguments.
 
+Each command declares a `timeoutMs` of up to 600,000 ms, so builds and test
+suites get several minutes. A command can pass `"githubCredentials": false`
+to run without the grant's GitHub credentials. When a command reaches its
+timeout, xcb stops its process group and waits until every process in it has
+exited. If the command held no credentials, or was a read-only `gh` query
+such as `gh pr checks` or `gh run watch` run directly, xcb returns a settled
+result with `"status": "timed_out"`, the output read so far, and any
+workspace file changes left in place. A timed-out command that held
+credentials, a cancelled command, or one whose processes xcb could not prove
+gone keeps uncertain effects for the owner to reconcile.
+
 A task with `native_execution: true` preserves that requirement through resume
 and provider changes. The host must first pass `xcb native qualify`, run
 `xcb native verify --provider <provider>` for each provider, and select the
