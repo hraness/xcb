@@ -21,8 +21,8 @@ serde = "=1.0.229"
 serde_json = "=1.0.151"
 tokio = { version = "=1.47.1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
 unicode-width = "=0.2.2"
-xcb-core = { version = "0.20.5", path = "../xcb-core" }
-xcb-runtime = { version = "0.20.5", path = "../xcb-runtime" }
+xcb-core = { version = "0.20.6", path = "../xcb-core" }
+xcb-runtime = { version = "0.20.6", path = "../xcb-runtime" }
 zeroize = "=1.9.0"
 
 [target.'cfg(unix)'.dependencies]
