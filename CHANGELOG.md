@@ -10,6 +10,28 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## Unreleased
+
+A slow native build no longer costs an unattended task its work.
+
+- Workers are now told to size `workspace_native_exec` timeouts to the
+  command, up to 600,000 ms for builds and test suites, and to split long
+  work into build and test steps. The old instruction to keep every native
+  command at or below 120 seconds made cold builds time out, which left the
+  whole task with uncertain effects and got scheduled runs dismissed before
+  they opened a pull request.
+- `workspace_native_exec` accepts an optional `githubCredentials`. `false`
+  runs the command without the grant's GitHub credentials; `true` requires
+  them.
+- When a native command reaches its timeout, xcb stops its process group and
+  confirms every process exited. If the command held no GitHub credentials,
+  or was a read-only `gh` query such as `gh pr checks --watch` or
+  `gh run watch`, the worker gets a settled result with `"status":
+  "timed_out"`, the output so far, and its workspace file changes kept, and
+  the task continues. A timed-out command that held credentials, a cancelled
+  command, or one whose processes xcb could not prove gone still reports
+  uncertain effects.
+
 ## 0.20.6 - 2026-10-09
 
 Native build and test commands now document the time needed for cold builds.

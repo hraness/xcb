@@ -21,6 +21,10 @@ pub(super) struct Request {
     pub cwd: String,
     pub timeout_ms: u32,
     pub network: Network,
+    /// `false` runs this command without the grant's GitHub credentials, so
+    /// a timeout can settle. `true` requires them. Omitted follows the grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_credentials: Option<bool>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -44,6 +48,52 @@ impl Request {
         request.cwd = checked.cwd;
         Ok(request)
     }
+}
+
+/// Whether a command runs with the grant's GitHub credentials.
+#[cfg(any(target_os = "macos", test))]
+fn github_credentials(granted: bool, requested: Option<bool>) -> Result<bool> {
+    match requested {
+        Some(true) if !granted => Err(Error::Unavailable(
+            "GitHub credentials are not granted to this native workspace",
+        )),
+        Some(requested) => Ok(requested),
+        None => Ok(granted),
+    }
+}
+
+/// Read-only GitHub CLI queries, the usual way a worker waits on CI. Their
+/// remote effects are known (none) even when they hold credentials and are
+/// stopped at a deadline. Only `gh` found on the command's PATH qualifies:
+/// the PATH holds host toolchain and granted read-only roots, never the
+/// writable workspace. Shells, `gh api`, aliases and extensions never match.
+#[cfg(any(target_os = "macos", test))]
+fn read_only_github_query(argv: &[String]) -> bool {
+    let [program, group, action, ..] = argv else {
+        return false;
+    };
+    program == "gh"
+        && matches!(
+            (group.as_str(), action.as_str()),
+            ("pr", "checks" | "view" | "list" | "status" | "diff")
+                | ("run", "watch" | "view" | "list")
+                | ("issue", "view" | "list")
+                | ("release", "view" | "list")
+                | ("repo", "view")
+                | ("workflow", "view" | "list")
+        )
+        && argv[3..].iter().all(|argument| {
+            !matches!(argument.as_str(), "--web" | "-w") && !argument.starts_with("--web=")
+        })
+}
+
+/// A timed-out native command whose group xcb stopped and proved absent has
+/// known effects when it could not have changed anything but local files:
+/// it ran without GitHub credentials (the only remote authority a native
+/// command can hold), or it was a read-only GitHub query.
+#[cfg(any(target_os = "macos", test))]
+fn timeout_settles(github: bool, argv: &[String]) -> bool {
+    !github || read_only_github_query(argv)
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -265,6 +315,7 @@ async fn prepare_and_execute(
         "/usr/sbin".into(),
         "/sbin".into(),
     ]);
+    let github = github_credentials(scope.github_credentials, request.github_credentials)?;
     let custody = format!("native_{}", &crate::digest(call)[..32]);
     store.mark_capability_starting(run, &custody)?;
     artifacts.retain_before_launch();
@@ -273,7 +324,7 @@ async fn prepare_and_execute(
         artifacts.path(),
         &home,
         &paths.join(":"),
-        scope.github_credentials,
+        github,
         cancel.clone(),
     )
     .await
@@ -312,6 +363,15 @@ async fn prepare_and_execute(
         |pid| store.mark_capability_spawned(run, &custody, pid),
     )
     .await;
+    let redact = |bytes: &[u8]| {
+        let text = zeroize::Zeroizing::new(String::from_utf8_lossy(bytes).into_owned());
+        let text = if token.is_empty() {
+            text.to_string()
+        } else {
+            text.replace(token.as_str(), "[credential redacted]")
+        };
+        xcb_core::display_text(&text, 16384)
+    };
     let (output, effects, joined) = match outcome {
         process::CommandOutcome::NeverStarted(error) => (Err(error), EffectState::None, true),
         // A command that ran to its own exit has a known result whatever its
@@ -321,25 +381,49 @@ async fn prepare_and_execute(
             stdout,
             stderr,
             truncated,
-        } if !*cancel.borrow() => {
-            let redact = |bytes: &[u8]| {
-                let text = zeroize::Zeroizing::new(String::from_utf8_lossy(bytes).into_owned());
-                let text = if token.is_empty() {
-                    text.to_string()
-                } else {
-                    text.replace(token.as_str(), "[credential redacted]")
-                };
-                xcb_core::display_text(&text, 16384)
-            };
+        } if !*cancel.borrow() => (
+            Ok(
+                json!({"stdout":redact(&stdout),"stderr":redact(&stderr),"exitCode":code,"truncated":truncated,"network":"https","joined":true,"published":true,"sandbox":"native-workspace"}),
+            ),
+            EffectState::Settled,
+            true,
+        ),
+        // The deadline passed, xcb stopped the whole group and proved it
+        // gone. Without remote authority its only effects are the workspace
+        // files it changed, which the worker can inspect: a settled result,
+        // so one slow build does not leave the whole task uncertain.
+        process::CommandOutcome::TimedOut { stdout, stderr }
+            if !*cancel.borrow() && timeout_settles(github, &request.argv) =>
+        {
             (
-                Ok(
-                    json!({"stdout":redact(&stdout),"stderr":redact(&stderr),"exitCode":code,"truncated":truncated,"network":"https","joined":true,"published":true,"sandbox":"native-workspace"}),
-                ),
+                Ok(json!({
+                    "status": "timed_out",
+                    "timedOut": true,
+                    "timeoutMs": request.timeout_ms,
+                    "exitCode": null,
+                    "stdout": redact(&stdout),
+                    "stderr": redact(&stderr),
+                    "truncated": true,
+                    "network": "https",
+                    "joined": true,
+                    "published": true,
+                    "sandbox": "native-workspace",
+                    "note": "xcb stopped the command at timeoutMs and confirmed every process in its group exited. Any workspace file changes it made before stopping are kept; inspect them (for example git status) before continuing. Run a narrower command or give it a larger timeoutMs (up to 600000).",
+                })),
                 EffectState::Settled,
                 true,
             )
         }
-        process::CommandOutcome::Exited { .. } | process::CommandOutcome::Interrupted => (
+        process::CommandOutcome::TimedOut { .. } if !*cancel.borrow() => (
+            Err(Error::Unavailable(
+                "native command timed out while holding GitHub credentials, so its remote effects are unknown; reconcile effects before retrying. Run builds and tests with githubCredentials false so a timeout settles",
+            )),
+            EffectState::Uncertain,
+            true,
+        ),
+        process::CommandOutcome::Exited { .. }
+        | process::CommandOutcome::TimedOut { .. }
+        | process::CommandOutcome::Interrupted => (
             Err(Error::Unavailable(
                 "native command timed out or was cancelled; reconcile effects before retrying",
             )),
@@ -538,6 +622,82 @@ mod tests {
             let mut bad = valid.clone();
             bad[key] = value;
             assert!(Request::parse(&bad, root).is_err(), "{key}");
+        }
+    }
+
+    #[test]
+    fn native_requests_may_withhold_or_require_granted_github_credentials() {
+        let root = Path::new("/tmp/workspace");
+        let base = json!({"argv":["cargo","build"],"cwd":".","timeoutMs":600000,"network":"https"});
+        let request = Request::parse(&base, root).unwrap();
+        assert_eq!(request.github_credentials, None);
+        // Omitted, the field leaves the request (and its permit digest) as before.
+        assert!(
+            serde_json::to_value(&request)
+                .unwrap()
+                .get("githubCredentials")
+                .is_none()
+        );
+        for value in [false, true] {
+            let mut with = base.clone();
+            with["githubCredentials"] = json!(value);
+            assert_eq!(
+                Request::parse(&with, root).unwrap().github_credentials,
+                Some(value)
+            );
+        }
+        let mut bad = base.clone();
+        bad["githubCredentials"] = json!("no");
+        assert!(Request::parse(&bad, root).is_err());
+        assert!(github_credentials(true, None).unwrap());
+        assert!(!github_credentials(true, Some(false)).unwrap());
+        assert!(github_credentials(true, Some(true)).unwrap());
+        assert!(!github_credentials(false, None).unwrap());
+        assert!(!github_credentials(false, Some(false)).unwrap());
+        assert!(github_credentials(false, Some(true)).is_err());
+    }
+
+    #[test]
+    fn only_uncredentialed_commands_and_read_only_github_queries_settle_timeouts() {
+        let argv = |items: &[&str]| {
+            items
+                .iter()
+                .map(|item| item.to_string())
+                .collect::<Vec<_>>()
+        };
+        // Without credentials a stopped command can only have changed local files.
+        for command in [
+            argv(&["cargo", "build", "--workspace"]),
+            argv(&["/bin/sh", "-c", "git push origin HEAD"]),
+            argv(&["gh", "pr", "merge", "1"]),
+        ] {
+            assert!(timeout_settles(false, &command), "{command:?}");
+        }
+        for command in [
+            argv(&["gh", "pr", "checks", "12", "--watch"]),
+            argv(&["gh", "run", "watch", "123", "--exit-status"]),
+            argv(&["gh", "pr", "view", "12", "--json", "state"]),
+            argv(&["gh", "release", "list"]),
+        ] {
+            assert!(timeout_settles(true, &command), "{command:?}");
+        }
+        // With credentials, anything that could write remotely stays uncertain.
+        for command in [
+            argv(&["cargo", "build"]),
+            argv(&["bun", "test"]),
+            argv(&["git", "push"]),
+            argv(&["gh", "pr", "merge", "12", "--auto"]),
+            argv(&["gh", "pr", "create"]),
+            argv(&["gh", "api", "repos/o/r/pulls"]),
+            argv(&["gh", "run", "rerun", "1"]),
+            argv(&["gh", "pr", "view", "12", "--web"]),
+            argv(&["gh", "pr", "view", "--web=true"]),
+            argv(&["gh", "pr"]),
+            argv(&["./gh", "pr", "view"]),
+            argv(&["/opt/homebrew/bin/gh", "pr", "checks"]),
+            argv(&["/bin/sh", "-c", "gh pr checks 12 --watch"]),
+        ] {
+            assert!(!timeout_settles(true, &command), "{command:?}");
         }
     }
 

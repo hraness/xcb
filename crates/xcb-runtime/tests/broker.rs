@@ -878,6 +878,23 @@ fn native_command_descriptor_documents_long_builds_and_binds_timeout() {
     let compact_description = compact["description"].as_str().unwrap();
     assert!(compact_description.contains("several minutes"));
     assert!(compact_description.contains("600000ms"));
+    // Local work can opt out of credentials so a timeout settles.
+    assert_eq!(
+        descriptor["inputSchema"]["properties"]["githubCredentials"]["type"],
+        "boolean"
+    );
+    assert!(
+        !descriptor["inputSchema"]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|name| name == "githubCredentials")
+    );
+    for text in [description, compact_description] {
+        assert!(text.contains("githubCredentials false"));
+        assert!(text.contains("timed_out"));
+    }
+    assert!(!description.contains("120"));
 }
 
 /// Devin shows `tools/list` to its model as indented JSON and moves any tool
