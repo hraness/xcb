@@ -1203,9 +1203,74 @@ pub fn discard_unstarted_codex_auth(
     store.discard_unstarted_tool(run, CODEX_AUTH_CALL)
 }
 
+/// Reconcile joined session refreshes under the account's concurrent-run limit.
+/// Keep the saved token when it is at least as recent (including timestamp
+/// ties, where order cannot be proven); publish a strictly newer run copy by
+/// CAS against the *current* revision. Only a pre-publication CAS race is
+/// retried. Other write/durability failures retain the credential receipt.
+fn publish_joined_codex_auth(
+    target: &Path,
+    refreshed: &[u8],
+    original_revision: Option<&str>,
+    account_identity: Option<&str>,
+) -> Result<()> {
+    let Some(original) = original_revision else {
+        // New device sign-in has an exclusive probe lease.
+        return private::create(target, refreshed);
+    };
+    let refreshed_revision = crate::digest(refreshed);
+    for _ in 0..8 {
+        let saved = Zeroizing::new(private::read(target, MAX_CODEX_AUTH_BYTES)?);
+        let saved_revision = crate::digest(&saved);
+        if saved_revision == refreshed_revision {
+            // A prior publication may have completed before its receipt.
+            // Windows' checked file handle is read-only and cannot FlushFileBuffers;
+            // private::replace already makes its publication durable there.
+            #[cfg(unix)]
+            {
+                private::open_file(target, MAX_CODEX_AUTH_BYTES as u64)?.sync_all()?;
+                private::sync_directory(target.parent().ok_or(Error::PrivateState)?)?;
+            }
+            return Ok(());
+        }
+        if saved_revision != original {
+            let expected = account_identity
+                .ok_or(Error::Conflict("Codex credential account identity changed"))?;
+            if codex_identity(&saved)?.digest != expected {
+                return Err(Error::Conflict("Codex credential account identity changed"));
+            }
+            if refreshed_revision == original
+                || matches!(
+                    (codex_last_refresh(&saved), codex_last_refresh(refreshed)),
+                    (Some(saved), Some(mine)) if saved >= mine
+                )
+            {
+                // An unchanged run copy cannot supersede a changed saved
+                // copy. With equal timestamps, leave the already-saved copy.
+                return Ok(());
+            }
+            if !matches!(
+                (codex_last_refresh(&saved), codex_last_refresh(refreshed)),
+                (Some(saved), Some(mine)) if mine > saved
+            ) {
+                return Err(Error::Conflict("Codex credential refresh order unproven"));
+            }
+        }
+        match private::replace(target, refreshed, &saved_revision) {
+            Ok(()) => return Ok(()),
+            Err(Error::Conflict("file revision changed" | "file identity changed")) => (),
+            Err(error) => return Err(error),
+        }
+    }
+    Err(Error::Conflict(
+        "Codex credentials changed repeatedly during refresh",
+    ))
+}
+
 /// Persist refreshed credentials only after the provider, bridge and handlers
-/// are fully joined, while the run still owns its account. CAS rejects rotation
-/// by another actor; identity checks reject an unintended account/user switch.
+/// are fully joined, while the run still owns its account. Reconcile concurrent
+/// same-account refreshes without overwriting newer saved credentials; retain
+/// custody on unproven identity, order, publication or receipt failures.
 pub fn persist_codex_auth(
     store: &Store,
     run: &crate::store::RunRecord,
@@ -1240,11 +1305,12 @@ pub fn persist_codex_auth(
         return Err(Error::Conflict("Codex credential account identity changed"));
     }
     let target = codex_auth_path(store, &run.account)?;
-    if let Some(revision) = &snapshot.original_revision {
-        private::replace(&target, &bytes, revision)?;
-    } else {
-        private::create(&target, &bytes)?;
-    }
+    publish_joined_codex_auth(
+        &target,
+        &bytes,
+        snapshot.original_revision.as_deref(),
+        snapshot.account_identity.as_deref(),
+    )?;
     store.settle_tool(run, CODEX_AUTH_CALL)?;
     // Identity was proven unchanged above; the email claim just fills in the
     // display identity for accounts imported before it was captured.
@@ -1901,6 +1967,127 @@ mod auth_custody_tests {
                 concurrent,
                 "{saved_at}: saved credentials are never overwritten"
             );
+        }
+    }
+
+    #[test]
+    fn two_joined_runs_refresh_one_account_without_stranding_either_receipt() {
+        use xcb_core::{
+            policy::{EffectState, Terminal, TurnFacts},
+            session::{Message, Role, State},
+        };
+        for (first_at, second_at, expected) in [
+            ("2026-10-10T07:00:00Z", "2026-10-10T08:00:00Z", 1),
+            ("2026-10-10T08:00:00Z", "2026-10-10T07:00:00Z", 0),
+            // Refresh timestamps may only have second precision. Do not
+            // overwrite an already-saved copy with an ambiguous same-time one.
+            ("2026-10-10T07:00:00Z", "2026-10-10T07:00:00Z", 0),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let base = xcb_core::canonical(directory.path()).unwrap();
+            let state = private::directory(&base.join("state")).unwrap();
+            let config = crate::config::Config {
+                max_runs_per_account: 2,
+                ..Default::default()
+            };
+            private::create(
+                &state.join("config.json"),
+                serde_json::to_string(&config).unwrap().as_bytes(),
+            )
+            .unwrap();
+            let store = Store::open(&state).unwrap();
+            let account = store
+                .add_account(Provider::Codex, "ChatGPT", 1, None)
+                .unwrap();
+            let original = stamped("acct", "original", "2026-10-10T06:00:00Z");
+            let target = codex_auth_path(&store, &account.id).unwrap();
+            private::create(&target, &original).unwrap();
+            let work = private::directory(&base.join("work")).unwrap();
+            let mut runs = Vec::new();
+            let mut inputs = Vec::new();
+            let mut snapshots = Vec::new();
+            for index in 0..2 {
+                let session = store
+                    .create_session(
+                        &account.id,
+                        crate::authentication_tests::model(Provider::Codex),
+                        &work,
+                        2 + index,
+                    )
+                    .unwrap();
+                let message = Message {
+                    id: crate::new_id("m"),
+                    role: Role::User,
+                    text: "synthetic refresh".into(),
+                    at_ms: 3 + index,
+                    attachments: vec![],
+                    provenance: None,
+                };
+                let current = store
+                    .append_message(&session.id, session.revision, &message)
+                    .unwrap();
+                let run = store.prepare_run(&session.id, current.revision, 4).unwrap();
+                let snapshot = snapshot_codex_auth(
+                    &store,
+                    &run,
+                    &store.root().join(format!("runs/synthetic-refresh-{index}")),
+                )
+                .unwrap();
+                runs.push(run);
+                inputs.push(message.id);
+                snapshots.push(snapshot);
+            }
+            let refreshed = [
+                stamped("acct", "first", first_at),
+                stamped("acct", "second", second_at),
+            ];
+            for index in 0..2 {
+                private::replace(
+                    &snapshots[index].profile().join("auth.json"),
+                    &refreshed[index],
+                    &crate::digest(&original),
+                )
+                .unwrap();
+            }
+            let outcome = crate::runner::Outcome {
+                tool_calls: Some(0),
+                text_attention: false,
+                text: "synthetic completed turn".into(),
+                diagnostic: None,
+                state: State::Idle,
+                facts: TurnFacts {
+                    terminal: Terminal::Completed,
+                    joined: true,
+                    effects: EffectState::None,
+                    pending_attention: false,
+                    failure: None,
+                },
+            };
+            for index in 0..2 {
+                persist_codex_auth(&store, &runs[index], &snapshots[index], true).unwrap();
+                assert!(
+                    !store
+                        .has_pending_credential_receipts(&runs[index].id)
+                        .unwrap()
+                );
+                store
+                    .settle_outcome(&runs[index], &inputs[index], &outcome, 5 + index as u64)
+                    .unwrap();
+                assert_eq!(
+                    store
+                        .settled_outcome(runs[index].session.as_ref().unwrap(), 0)
+                        .unwrap()
+                        .unwrap()
+                        .facts
+                        .effects,
+                    EffectState::None
+                );
+            }
+            assert_eq!(
+                private::read(&target, MAX_CODEX_AUTH_BYTES).unwrap(),
+                refreshed[expected]
+            );
+            assert!(store.unsettled_runs().unwrap().is_empty());
         }
     }
 
