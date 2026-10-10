@@ -1391,7 +1391,8 @@ pub async fn capture_with_input(
     })
     .await;
     let timed_out = result.is_err();
-    if timed_out {
+    // A read/write error can arrive before the deadline while the child is still running.
+    if timed_out || matches!(&result, Ok(Err(_))) {
         let _ = group.kill();
     }
     let status = match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
@@ -2081,6 +2082,19 @@ mod tests {
             }
             assert!(prove_process_group_absent(pid).is_ok());
         }
+    }
+
+    #[tokio::test]
+    async fn input_capture_stops_a_child_on_output_limit() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "read line; printf too-much; exec sleep 30"]);
+        let result = tokio::time::timeout(
+            Duration::from_secs(4),
+            capture_with_input(command, b"x\n", 1, Duration::from_secs(20)),
+        )
+        .await
+        .expect("output limit should stop the child promptly");
+        assert!(result.is_err(), "an oversized capture must fail");
     }
 
     #[tokio::test]
