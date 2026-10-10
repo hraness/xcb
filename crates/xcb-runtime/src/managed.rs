@@ -339,8 +339,9 @@ pub struct ManagedTask {
     pub max_attempts: u32,
     pub message_count_before: usize,
     pub cancel_requested: bool,
-    /// The owner closed this task from uncertainty without proof of its
-    /// outcome (`xcb backlog dismiss`); it settles as failed, never retried.
+    /// The owner closed uncertainty (`xcb backlog dismiss`) or opted into
+    /// closing an unanswered question. The failed record has no new worker
+    /// outcome to prove and is never retried.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dismissed: bool,
     pub last_output: Option<String>,
@@ -5861,6 +5862,14 @@ impl Supervisor {
         // the supervisor into the same failure.
         if !draining && let Err(error) = self.managed.tick_schedule_dismissals(&self.store).await {
             self.upkeep_fault("schedule dismissal", &error);
+        }
+        if !draining
+            && let Err(error) = self
+                .managed
+                .tick_schedule_unanswered(&self.store, now_ms())
+                .await
+        {
+            self.upkeep_fault("unanswered schedule", &error);
         }
         if let Err(error) = self.managed.tick_programs(&self.store, !draining).await {
             self.upkeep_fault("program", &error);

@@ -261,6 +261,23 @@ failed and nothing is retried. The next wake-up can then go ahead, so write the
 schedule's prompt to inspect earlier failed and uncertain work before starting
 new work. `--dismiss-uncertain false` turns this off.
 
+To keep unanswered work from blocking that directory indefinitely, add
+`--settle-unanswered-after 7200` to `schedules add` or `schedules program`, or
+edit an existing schedule with its current revision:
+
+```sh
+xcb schedules edit <schedule-id> --revision 7 --settle-unanswered-after 7200
+```
+
+This separate option is off by default. After the chosen number of seconds
+(60 to 31,536,000) without an answer, xcb records a failure with the timeout
+and does not retry the task. A linked program can then settle, freeing the
+schedule for the next wake-up. A reply starts a fresh wait if the task asks
+again. Running workers and uncertain tasks are not closed by this option.
+`--settle-unanswered-after 0` turns it off; `schedules show` and `--json`
+show the saved setting (milliseconds in JSON). Neither option grants a
+permission that an unanswered question asked for.
+
 Native execution checks are tied to the exact xcb and provider builds. After
 an xcb upgrade, an adopted provider build or 30 days, xcb re-runs the checks
 you already passed for providers a directory grant names, within the hour, so

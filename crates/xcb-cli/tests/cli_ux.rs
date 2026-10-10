@@ -2148,3 +2148,31 @@ fn storing_a_token_without_a_provider_build_loads_nothing_and_still_stores_it() 
     assert!(printed.contains("Credential stored for"), "{printed}");
     assert!(!printed.contains("Loaded"), "{printed}");
 }
+
+#[tokio::test]
+async fn schedule_show_json_reads_persisted_unanswered_timeout() {
+    // A private state root; show never wakes the daemon or touches host state.
+    let sandbox = Sandbox::new("schedule-unanswered-json");
+    let work = sandbox.root.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let store = xcb_runtime::managed::ManagedStore::open(&sandbox.state()).unwrap();
+    let conversation = store.create_conversation(&work).await.unwrap();
+    let row = store
+        .create_schedule_at_with_timeout(
+            &conversation.id,
+            None,
+            "Review failures".into(),
+            3_600_000,
+            xcb_runtime::now_ms() + 3_600_000,
+            Some(7_200_000),
+        )
+        .await
+        .unwrap();
+    drop(store);
+    let output = sandbox.run(&["--json", "schedules", "show", row.id.as_str()], &[]);
+    assert!(output.status.success(), "{output:?}");
+    let views: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(views[0]["settle_unanswered_after_ms"], 7_200_000);
+    assert_eq!(views[0]["id"], row.id.as_str());
+    assert_eq!(views[0]["prompt"], "Review failures");
+}
