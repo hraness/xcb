@@ -1113,8 +1113,7 @@ pub(crate) fn recover_codex_auth(
                 (Some(saved), Some(mine)) if saved > mine
             )
         {
-            private::open_file(&target, MAX_CODEX_AUTH_BYTES as u64)?.sync_all()?;
-            private::sync_directory(&persistent)?;
+            // Nothing is written here, so there is nothing to make durable.
             return Ok(());
         }
         return Err(Error::Conflict(
