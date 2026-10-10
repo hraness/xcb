@@ -29,6 +29,10 @@ pub struct HabitatSchedule {
     /// inspect it instead of waiting for the owner. Never retries the work.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dismiss_released_uncertainty: bool,
+    /// Optional time an unanswered question may block this directory. A
+    /// reply starts a fresh wait; omitted means the owner must answer it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settle_unanswered_after_ms: Option<u64>,
     pub last_task: Option<Id>,
     pub revision: u64,
     pub created_at_ms: u64,
@@ -44,6 +48,9 @@ impl HabitatSchedule {
             bounded_text(workspace, 4096)?;
         }
         if !(MIN_INTERVAL_MS..=MAX_INTERVAL_MS).contains(&self.interval_ms)
+            || self
+                .settle_unanswered_after_ms
+                .is_some_and(|timeout| !(MIN_INTERVAL_MS..=MAX_INTERVAL_MS).contains(&timeout))
             || self
                 .workspace
                 .as_deref()
@@ -1143,6 +1150,27 @@ impl ManagedStore {
         interval_ms: u64,
         first_due_ms: u64,
     ) -> Result<HabitatSchedule> {
+        self.create_schedule_at_with_timeout(
+            conversation,
+            workspace,
+            prompt,
+            interval_ms,
+            first_due_ms,
+            None,
+        )
+        .await
+    }
+
+    /// Create a schedule with an optional owner-chosen unanswered timeout.
+    pub async fn create_schedule_at_with_timeout(
+        &self,
+        conversation: &Id,
+        workspace: Option<&Path>,
+        prompt: String,
+        interval_ms: u64,
+        first_due_ms: u64,
+        settle_unanswered_after_ms: Option<u64>,
+    ) -> Result<HabitatSchedule> {
         self.create_schedule_inner(
             conversation,
             workspace,
@@ -1150,6 +1178,7 @@ impl ManagedStore {
             None,
             interval_ms,
             first_due_ms,
+            settle_unanswered_after_ms,
         )
         .await
     }
@@ -1185,6 +1214,30 @@ impl ManagedStore {
         interval_ms: u64,
         first_due_ms: u64,
     ) -> Result<HabitatSchedule> {
+        self.create_program_schedule_at_with_timeout(
+            conversation,
+            workspace,
+            prompt,
+            program,
+            interval_ms,
+            first_due_ms,
+            None,
+        )
+        .await
+    }
+
+    /// Create a pinned program schedule with an optional unanswered timeout.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_program_schedule_at_with_timeout(
+        &self,
+        conversation: &Id,
+        workspace: Option<&Path>,
+        prompt: String,
+        program: crate::managed_program::AdmittedProgram,
+        interval_ms: u64,
+        first_due_ms: u64,
+        settle_unanswered_after_ms: Option<u64>,
+    ) -> Result<HabitatSchedule> {
         program.verify()?;
         if program.managed_calls > 0 {
             let workspace = self.entry_workspace(conversation, workspace)?;
@@ -1197,10 +1250,12 @@ impl ManagedStore {
             Some(program),
             interval_ms,
             first_due_ms,
+            settle_unanswered_after_ms,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn create_schedule_inner(
         &self,
         conversation: &Id,
@@ -1209,6 +1264,7 @@ impl ManagedStore {
         program: Option<crate::managed_program::AdmittedProgram>,
         interval_ms: u64,
         first_due_ms: u64,
+        settle_unanswered_after_ms: Option<u64>,
     ) -> Result<HabitatSchedule> {
         let workspace = self.entry_workspace(conversation, workspace)?;
         let thread = conversation.as_str() == GLOBAL_THREAD_ID;
@@ -1226,6 +1282,7 @@ impl ManagedStore {
             next_due_ms: first_due_ms,
             enabled: true,
             dismiss_released_uncertainty: false,
+            settle_unanswered_after_ms,
             last_task: None,
             revision: 1,
             created_at_ms: now,
@@ -1332,6 +1389,154 @@ impl ManagedStore {
         write_schedule(&tx, &current, &next)?;
         tx.commit()?;
         Ok(next)
+    }
+
+    /// Change or disable the unanswered timeout under the schedule revision.
+    /// `None` disables it; the ordinary update path preserves the value.
+    pub fn set_schedule_unanswered_timeout(
+        &self,
+        id: &Id,
+        expected_revision: u64,
+        timeout_ms: Option<u64>,
+    ) -> Result<HabitatSchedule> {
+        let mut db = self.write_db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = schedule_from(&tx, id)?.ok_or(Error::Unavailable("schedule not found"))?;
+        if current.revision != expected_revision {
+            return Err(Error::Conflict("schedule revision changed"));
+        }
+        let mut next = current.clone();
+        next.settle_unanswered_after_ms = timeout_ms;
+        next.revision += 1;
+        next.updated_at_ms = now_ms().max(current.updated_at_ms);
+        write_schedule(&tx, &current, &next)?;
+        tx.commit()?;
+        Ok(next)
+    }
+
+    /// Fail unanswered work only after its opted-in schedule's timeout.
+    /// Project scope and task revision are rechecked by the task transition;
+    /// an in-flight worker, delivered reply or uncertain run is never closed.
+    pub async fn tick_schedule_unanswered(&self, store: &Store, now: u64) -> Result<()> {
+        let mut candidates = Vec::new();
+        {
+            let db = self.db()?;
+            for schedule in self.schedules_in(&db, None)? {
+                let Some(timeout) = schedule.settle_unanswered_after_ms else {
+                    continue;
+                };
+                if !schedule.enabled {
+                    continue;
+                }
+                let Ok(workspace) = schedule_workspace(&db, &schedule) else {
+                    continue;
+                };
+                candidates.extend(
+                    project::outstanding_in(&db, &workspace, None)?
+                        .into_iter()
+                        .filter(|task| {
+                            task.state == TaskState::NeedsInput
+                                && !task.deferred
+                                && !task.cancel_requested
+                                && now.saturating_sub(task.updated_at_ms) >= timeout
+                        })
+                        .map(|task| (task, timeout, workspace.clone())),
+                );
+            }
+        }
+        for (task, timeout, workspace) in candidates {
+            match self
+                .settle_unanswered_task(store, &task, &workspace, timeout, now)
+                .await
+            {
+                Ok(()) | Err(Error::Conflict(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
+    async fn settle_unanswered_task(
+        &self,
+        store: &Store,
+        task: &ManagedTask,
+        workspace: &str,
+        timeout: u64,
+        now: u64,
+    ) -> Result<()> {
+        // Recheck schedule eligibility before attempting the revision-checked
+        // task transition. Never carry the database guard across an await.
+        let current = {
+            let db = self.db()?;
+            let eligible = self.schedules_in(&db, None)?.into_iter().any(|schedule| {
+                schedule.enabled
+                    && schedule.settle_unanswered_after_ms == Some(timeout)
+                    && schedule_workspace(&db, &schedule).ok().as_deref() == Some(workspace)
+            });
+            if !eligible {
+                return Err(Error::Conflict("unanswered schedule changed"));
+            }
+            task_from(&db, &task.id)?.ok_or(Error::Unavailable("task not found"))?
+        };
+        if current.revision != task.revision
+            || current.state != TaskState::NeedsInput
+            || current.cancel_requested
+            || current.deferred
+            || current.workspace != workspace
+            || now.saturating_sub(current.updated_at_ms) < timeout
+        {
+            return Err(Error::Conflict("unanswered task changed"));
+        }
+        if store.unsettled_runs()?.iter().any(|run| {
+            run.session.as_ref().is_some_and(|session| {
+                current.session.as_ref() == Some(session)
+                    || current.worker_sessions.contains(session)
+            })
+        }) {
+            return Err(Error::Conflict(
+                "worker process or effects still require recovery",
+            ));
+        }
+        if self.inbox_batch(&current.id)?.is_some() {
+            return Err(Error::Conflict(
+                "delivered input still requires reconciliation",
+            ));
+        }
+        if let Some(session) = &current.session {
+            // A worker-backed question must have its exact settled turn before
+            // the owner's timeout may close it. Missing evidence is not proof
+            // that the worker completed or joined its effects.
+            let outcome = store
+                .settled_outcome(session, current.message_count_before)?
+                .ok_or(Error::Conflict("worker outcome missing"))?;
+            if !outcome.facts.joined || outcome.facts.effects == EffectState::Uncertain {
+                return Err(Error::Conflict("worker outcome is uncertain"));
+            }
+        }
+        let mut next = current.clone();
+        next.state = TaskState::Failed;
+        next.attention = None;
+        // A standing owner instruction closes the question without a worker
+        // result, so a linked program can settle from this failed record.
+        next.dismissed = true;
+        // The prior question remains in its receipt; the current work
+        // summary must explain why this task stopped.
+        next.last_output = None;
+        next.next_prompt.clear();
+        next.attachments.clear();
+        next.detail = format!(
+            "unanswered for {}s; closed so the next wake can proceed; no retry launched",
+            timeout / 1000
+        );
+        next.revision += 1;
+        next.updated_at_ms = now_ms().max(current.updated_at_ms);
+        let message = Self::assistant(
+            format!("**{}** · {}", next.title, next.detail),
+            Some(&next.id),
+            next.revision,
+        );
+        self.transition(&current, next, Some(message)).await?;
+        Ok(())
     }
 
     /// Dismiss uncertain tasks in the directories of enabled schedules that

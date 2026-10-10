@@ -33,10 +33,10 @@ Default decisions are:
 
 | Condition | Behavior |
 | --- | --- |
-| Disk available space at or below 60 GiB | Include a resource advisory at the next worker turn |
-| A known volume reaches 24 GiB | Defer new workers using it |
-| A paused volume recovers above 32 GiB | Require three healthy samples before resuming |
-| A newly observed volume has 32 GiB or less | Start paused until recovery is established |
+| Disk available space at or below 24 GiB | Include a resource advisory at the next worker turn |
+| A known volume reaches 8 GiB | Defer new workers using it |
+| A paused volume recovers above 12 GiB | Require three healthy samples before resuming |
+| A newly observed volume has 12 GiB or less | Start paused until recovery is established |
 | Memory warning or critical pressure lasts at least 60 seconds | Defer new workers until three normal samples arrive |
 | Swap grows at least 1 GiB within the observed ten-minute window | Include an advisory; growth alone does not stop work |
 | Required measurements fail or are older than 120 seconds | Defer new workers until measurements recover |
@@ -63,6 +63,33 @@ xcb resources disable
 
 Disabling protection saves the setting without waiting for another measurement.
 Monitoring is available through `xcb resources` even while protection is off.
+
+## Keep unattended schedules moving
+
+A schedule normally waits when a task in its directory needs an answer, even
+if that task belongs to a linked program. For a project that should continue
+without a person, opt in when creating a prompt or program schedule, or edit
+an existing schedule using its current revision:
+
+```sh
+xcb schedules add <project> "Review previous work" --every 3600 --settle-unanswered-after 7200
+xcb schedules program <project> planner.json --every 3600 --settle-unanswered-after 7200
+xcb schedules edit <schedule-id> --revision <current-revision> --settle-unanswered-after 7200
+```
+
+After 7,200 seconds without an answer, xcb marks the unanswered task failed
+with a saved reason and lets its waiting program settle; it does not retry the
+task. This applies to every non-deferred task waiting for input in that directory,
+not just work started by this schedule: approval and action requests, routing
+questions, and tasks paused by an exhausted continuation budget can also fail.
+Choose the timeout only if that is acceptable for the whole directory. A reply
+starts a new wait if the task asks again. Running workers and uncertain outcomes
+stay untouched. The option is off by default; edit with
+`--settle-unanswered-after 0` to turn it off. Use `xcb schedules show <id>`
+or `xcb --json schedules show <id>` to inspect the saved setting (milliseconds
+in JSON). Pick an interval between 60 seconds and 365 days, and make sure
+the schedule prompt checks earlier failures before starting new work. This
+setting does not grant authority or answer permission requests.
 
 ## Investigate and reclaim resources
 

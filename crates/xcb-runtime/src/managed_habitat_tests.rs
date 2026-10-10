@@ -1374,3 +1374,259 @@ async fn a_schedule_dismisses_released_uncertainty_only_when_the_owner_opted_in(
     assert_eq!(dismissed.detail, SCHEDULE_DISMISSED_DETAIL);
     assert!(f.managed.schedule_view(&opted).unwrap().blocker.is_none());
 }
+
+#[tokio::test]
+async fn unanswered_schedule_timeout_is_opt_in_revision_checked_and_reply_resets_clock() {
+    let f = fixture().await;
+    let store = Store::open(f.managed.root().parent().unwrap()).unwrap();
+    let now = now_ms();
+    let schedule = f
+        .managed
+        .create_schedule(&f.conversation, "herd".into(), 60_000, now)
+        .await
+        .unwrap();
+    assert_eq!(schedule.settle_unanswered_after_ms, None);
+    let task = enqueue(&f, "question", false).await;
+    let asked = set_state(&f, &task, TaskState::NeedsInput).await;
+    f.managed
+        .tick_schedule_unanswered(&store, now + 120_000)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.managed.task(&task.id).unwrap().unwrap().state,
+        TaskState::NeedsInput
+    );
+    let opted = f
+        .managed
+        .set_schedule_unanswered_timeout(&schedule.id, schedule.revision, Some(60_000))
+        .unwrap();
+    assert_eq!(opted.settle_unanswered_after_ms, Some(60_000));
+    assert!(
+        f.managed
+            .set_schedule_unanswered_timeout(&schedule.id, schedule.revision, None)
+            .is_err()
+    );
+    assert!(
+        f.managed
+            .set_schedule_unanswered_timeout(&schedule.id, opted.revision, Some(1))
+            .is_err()
+    );
+    let json = serde_json::to_value(f.managed.schedule_view(&opted).unwrap()).unwrap();
+    assert_eq!(json["settle_unanswered_after_ms"], 60_000);
+    assert_eq!(
+        f.managed
+            .schedule(&schedule.id)
+            .unwrap()
+            .unwrap()
+            .settle_unanswered_after_ms,
+        Some(60_000)
+    );
+    f.managed
+        .tick_schedule_unanswered(&store, asked.updated_at_ms + 59_999)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.managed.task(&task.id).unwrap().unwrap().state,
+        TaskState::NeedsInput
+    );
+    // A reply queues the task and invalidates the old question revision.
+    let replied = f
+        .managed
+        .reply_to_task_checked(&task.id, asked.revision, new_id("reply"), "answer".into())
+        .await
+        .unwrap();
+    assert_eq!(replied.state, TaskState::Queued);
+    f.managed
+        .tick_schedule_unanswered(&store, replied.updated_at_ms + 61_000)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.managed.task(&task.id).unwrap().unwrap().state,
+        TaskState::Queued
+    );
+    let mut again = replied.clone();
+    again.state = TaskState::NeedsInput;
+    again.attention = Some(State::NeedsAnswer);
+    again.last_output = Some("What evidence supports that?".into());
+    again.revision += 1;
+    again.updated_at_ms = now_ms().max(replied.updated_at_ms);
+    let asked_again = f.managed.transition(&replied, again, None).await.unwrap();
+    assert!(
+        f.managed
+            .settle_unanswered_task(
+                &store,
+                &asked,
+                &f.workspace.to_string_lossy(),
+                60_000,
+                asked_again.updated_at_ms + 60_000
+            )
+            .await
+            .is_err()
+    );
+    f.managed
+        .tick_schedule_unanswered(&store, asked_again.updated_at_ms + 59_999)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.managed.task(&task.id).unwrap().unwrap().state,
+        TaskState::NeedsInput
+    );
+    f.managed
+        .tick_schedule_unanswered(&store, asked_again.updated_at_ms + 60_000)
+        .await
+        .unwrap();
+    let failed = f.managed.task(&task.id).unwrap().unwrap();
+    assert_eq!(failed.state, TaskState::Failed);
+    assert!(failed.detail.contains("unanswered for 60s"));
+    assert_eq!(failed.work_summary(), failed.detail);
+    assert_eq!(failed.attempts, asked_again.attempts);
+    assert_eq!(
+        f.managed.verify_task(&task.id).await.unwrap()["verified"],
+        true
+    );
+    assert!(f.managed.schedule_view(&opted).unwrap().blocker.is_none());
+    f.managed.tick_schedules(now + 121_000).await.unwrap();
+    let current = f.managed.schedule(&schedule.id).unwrap().unwrap();
+    assert!(current.last_task.is_some());
+    let off = f
+        .managed
+        .set_schedule_unanswered_timeout(&schedule.id, current.revision, None)
+        .unwrap();
+    assert_eq!(off.settle_unanswered_after_ms, None);
+    let later = set_state(
+        &f,
+        &enqueue(&f, "later question", false).await,
+        TaskState::NeedsInput,
+    )
+    .await;
+    f.managed
+        .tick_schedule_unanswered(&store, later.updated_at_ms + 120_000)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.managed.task(&later.id).unwrap().unwrap().state,
+        TaskState::NeedsInput
+    );
+}
+
+#[tokio::test]
+async fn unanswered_timeout_ignores_running_uncertain_paused_and_other_workspaces() {
+    let f = fixture().await;
+    let store = Store::open(f.managed.root().parent().unwrap()).unwrap();
+    let schedule = f
+        .managed
+        .create_schedule_at_with_timeout(
+            &f.conversation,
+            None,
+            "herd".into(),
+            60_000,
+            now_ms(),
+            Some(60_000),
+        )
+        .await
+        .unwrap();
+    let running = set_state(&f, &enqueue(&f, "running", false).await, TaskState::Running).await;
+    let uncertain = set_state(
+        &f,
+        &enqueue(&f, "uncertain", false).await,
+        TaskState::Uncertain,
+    )
+    .await;
+    let other = f.managed.create_conversation(&second(&f)).await.unwrap();
+    let foreign = f
+        .managed
+        .enqueue_backlog(&other.id, new_id("m"), "other".into(), false, 0)
+        .await
+        .unwrap();
+    let foreign = set_state(&f, &foreign, TaskState::NeedsInput).await;
+    f.managed
+        .tick_schedule_unanswered(&store, now_ms() + 120_000)
+        .await
+        .unwrap();
+    for task in [&running, &uncertain, &foreign] {
+        assert_eq!(f.managed.task(&task.id).unwrap().unwrap().state, task.state);
+    }
+    let asked = set_state(
+        &f,
+        &enqueue(&f, "question", false).await,
+        TaskState::NeedsInput,
+    )
+    .await;
+    let paused = f
+        .managed
+        .set_schedule_enabled(&schedule.id, schedule.revision, false)
+        .unwrap();
+    f.managed
+        .tick_schedule_unanswered(&store, asked.updated_at_ms + 60_000)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.managed.task(&asked.id).unwrap().unwrap().state,
+        TaskState::NeedsInput
+    );
+    f.managed
+        .set_schedule_enabled(&schedule.id, paused.revision, true)
+        .unwrap();
+    f.managed
+        .tick_schedule_unanswered(&store, asked.updated_at_ms + 60_000)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.managed.task(&asked.id).unwrap().unwrap().state,
+        TaskState::Failed
+    );
+    assert!(f.managed.task(&uncertain.id).unwrap().unwrap().state == TaskState::Uncertain);
+}
+
+#[tokio::test]
+async fn unanswered_timeout_keeps_worker_question_without_exact_outcome() {
+    let f = fixture().await;
+    let store = Store::open(f.managed.root().parent().unwrap()).unwrap();
+    let schedule = f
+        .managed
+        .create_schedule_at_with_timeout(
+            &f.conversation,
+            None,
+            "herd".into(),
+            60_000,
+            now_ms(),
+            Some(60_000),
+        )
+        .await
+        .unwrap();
+    let task = enqueue(&f, "unsettled question", false).await;
+    let mut question = task.clone();
+    question.state = TaskState::NeedsInput;
+    question.attention = Some(State::NeedsAnswer);
+    question.session = Some(new_id("s_missing_outcome"));
+    question.attempts = 1;
+    question.revision += 1;
+    question.updated_at_ms = now_ms().max(task.updated_at_ms);
+    let question = f.managed.transition(&task, question, None).await.unwrap();
+    let expired = question.updated_at_ms + 60_000;
+    assert!(matches!(
+        f.managed
+            .settle_unanswered_task(&store, &question, &question.workspace, 60_000, expired)
+            .await,
+        Err(Error::Conflict("worker outcome missing"))
+    ));
+    f.managed
+        .tick_schedule_unanswered(&store, expired)
+        .await
+        .unwrap();
+    let held = f.managed.task(&question.id).unwrap().unwrap();
+    assert_eq!(held.state, TaskState::NeedsInput);
+    assert!(!held.dismissed);
+    assert_eq!(held.revision, question.revision);
+    assert!(
+        f.managed
+            .schedule_view(&schedule)
+            .unwrap()
+            .blocker
+            .is_some()
+    );
+    assert_eq!(
+        f.managed.verify_task(&question.id).await.unwrap()["verified"],
+        true
+    );
+}

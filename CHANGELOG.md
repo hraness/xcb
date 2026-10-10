@@ -10,6 +10,21 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## Unreleased
+
+Unattended schedules can stop waiting on unanswered tasks after an interval
+the owner chooses.
+
+- `xcb schedules add`, `program`, and `edit` accept `--settle-unanswered-after
+  <seconds>`. The setting is off by default, saved with the schedule, and
+  visible in `show` and JSON output. Set it to 0 when editing to turn it off.
+- When the interval passes without an answer and no worker is still running,
+  the task fails with a recorded reason, without a retry. Waiting programs
+  settle and later schedule wake-ups can proceed. A reply starts a new wait;
+  uncertain and running work is unaffected.
+- Correct the documented disk warning, pause and resume defaults to 24, 8,
+  and 12 GiB.
+
 ## 0.20.7 - 2026-10-09
 
 A slow native build no longer costs an unattended task its work.

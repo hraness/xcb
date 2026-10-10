@@ -1472,8 +1472,8 @@ impl ManagedStore {
         }) {
             return Ok(None);
         }
-        // An owner-dismissed child has no provable outcome; it settles as
-        // failed from its own record once no run holds it.
+        // An owner-closed uncertain or unanswered child has no new worker
+        // outcome; it settles as failed from its record once no run holds it.
         let outcome = if child.state == TaskState::Failed
             && (child.dismissed || child.detail == super::DISMISSED_DETAIL)
         {

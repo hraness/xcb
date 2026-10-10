@@ -598,6 +598,17 @@ pub async fn projects(
     Ok(0)
 }
 
+fn parse_unanswered_seconds(value: &str) -> std::result::Result<u64, String> {
+    let seconds = value
+        .parse::<u64>()
+        .map_err(|_| "expected seconds (0 or 60 to 31536000)".to_owned())?;
+    if seconds == 0 || (60..=31_536_000).contains(&seconds) {
+        Ok(seconds)
+    } else {
+        Err("expected seconds (0 or 60 to 31536000)".into())
+    }
+}
+
 #[derive(Subcommand)]
 pub enum ScheduleCommand {
     /// Schedule a pinned ALGAL planner or a managed-agent program with a
@@ -624,6 +635,10 @@ pub enum ScheduleCommand {
         /// Exact project directory; required when the target is the thread.
         #[arg(long)]
         workspace: Option<PathBuf>,
+        /// Fail unanswered work in this directory after 60 seconds to 365 days.
+        /// Omit or use 0 to leave questions for a person to answer.
+        #[arg(long, value_parser = parse_unanswered_seconds)]
+        settle_unanswered_after: Option<u64>,
     },
     /// Enable a recurring prompt; first wake-up occurs after the interval.
     Add {
@@ -638,6 +653,10 @@ pub enum ScheduleCommand {
         /// Exact project directory; required when the target is the thread.
         #[arg(long)]
         workspace: Option<PathBuf>,
+        /// Fail unanswered work in this directory after 60 seconds to 365 days.
+        /// Omit or use 0 to leave questions for a person to answer.
+        #[arg(long, value_parser = parse_unanswered_seconds)]
+        settle_unanswered_after: Option<u64>,
     },
     /// Pause future wake-ups; already queued work is unchanged.
     Pause {
@@ -684,6 +703,10 @@ pub enum ScheduleCommand {
         /// can go ahead and inspect it. `false` turns this off.
         #[arg(long)]
         dismiss_uncertain: Option<bool>,
+        /// Fail unanswered work in this directory after 60 seconds to 365 days;
+        /// 0 turns this off. Omit to keep the current setting.
+        #[arg(long, value_parser = parse_unanswered_seconds)]
+        settle_unanswered_after: Option<u64>,
     },
     /// Delete a schedule. Tasks it already created keep their history and
     /// finish on their own terms.
@@ -1329,6 +1352,10 @@ fn load_program(
     }
 }
 
+fn unanswered_timeout_ms(seconds: u64) -> Option<u64> {
+    (seconds != 0).then_some(seconds * 1000)
+}
+
 pub async fn schedules(
     root: &Path,
     cwd: &Path,
@@ -1358,6 +1385,7 @@ pub async fn schedules(
             title,
             every,
             workspace,
+            settle_unanswered_after,
         }) => {
             let program = load_program(&manifest, inputs.as_deref(), managed_calls)?;
             let interval = every * 1000;
@@ -1367,13 +1395,14 @@ pub async fn schedules(
             let (conversation, workspace) =
                 entry_target(&store, cwd, &target, workspace.as_deref()).await?;
             let schedule = store
-                .create_program_schedule_at(
+                .create_program_schedule_at_with_timeout(
                     &conversation,
                     workspace.as_deref(),
                     title,
                     program,
                     interval,
                     first,
+                    settle_unanswered_after.and_then(unanswered_timeout_ms),
                 )
                 .await?;
             wake(root)?;
@@ -1406,6 +1435,7 @@ pub async fn schedules(
             prompt,
             every,
             workspace,
+            settle_unanswered_after,
         }) => {
             let interval = every
                 .checked_mul(1000)
@@ -1416,7 +1446,14 @@ pub async fn schedules(
             let (conversation, workspace) =
                 entry_target(&store, cwd, &target, workspace.as_deref()).await?;
             let schedule = store
-                .create_schedule_at(&conversation, workspace.as_deref(), prompt, interval, first)
+                .create_schedule_at_with_timeout(
+                    &conversation,
+                    workspace.as_deref(),
+                    prompt,
+                    interval,
+                    first,
+                    settle_unanswered_after.and_then(unanswered_timeout_ms),
+                )
                 .await?;
             wake(root)?;
             vec![schedule]
@@ -1444,12 +1481,22 @@ pub async fn schedules(
             every,
             next_in,
             dismiss_uncertain,
+            settle_unanswered_after,
         }) => {
             let id = store.resolve_schedule(&id)?;
             let mut revision = revision;
             let mut schedule = None;
             if let Some(dismiss) = dismiss_uncertain {
                 let updated = store.set_schedule_dismissal(&id, revision, dismiss)?;
+                revision = updated.revision;
+                schedule = Some(updated);
+            }
+            if let Some(seconds) = settle_unanswered_after {
+                let updated = store.set_schedule_unanswered_timeout(
+                    &id,
+                    revision,
+                    unanswered_timeout_ms(seconds),
+                )?;
                 revision = updated.revision;
                 schedule = Some(updated);
             }
@@ -1519,6 +1566,9 @@ pub async fn schedules(
                         .map(|detail| format!(" · {}", xcb_core::display_text(detail, 160)))
                         .unwrap_or_default()
                 );
+            }
+            if let Some(timeout) = row.settle_unanswered_after_ms {
+                println!("  unanswered after {}s: fail without retry", timeout / 1000);
             }
             println!("  {}", xcb_core::display_text(&row.prompt, 4096));
         }
@@ -1613,6 +1663,44 @@ mod tests {
             "3600",
             "--workspace",
             "/abs/project"
+        ]));
+        assert!(parses(&[
+            "schedules",
+            "add",
+            "/abs/project",
+            "Inspect",
+            "--every",
+            "3600",
+            "--settle-unanswered-after",
+            "7200"
+        ]));
+        assert!(parses(&[
+            "schedules",
+            "program",
+            "/abs/project",
+            "planner.json",
+            "--every",
+            "3600",
+            "--settle-unanswered-after",
+            "7200"
+        ]));
+        assert!(parses(&[
+            "schedules",
+            "edit",
+            "schedule_test",
+            "--revision",
+            "2",
+            "--settle-unanswered-after",
+            "0"
+        ]));
+        assert!(!parses(&[
+            "schedules",
+            "edit",
+            "schedule_test",
+            "--revision",
+            "2",
+            "--settle-unanswered-after",
+            "59"
         ]));
         assert!(parses(&[
             "daemons",

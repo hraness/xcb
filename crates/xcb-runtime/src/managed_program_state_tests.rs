@@ -1974,3 +1974,106 @@ async fn cancelling_a_program_waiting_on_a_cancelled_child_settles_it_as_cancell
         TaskState::Cancelled
     );
 }
+
+#[tokio::test]
+async fn unanswered_schedule_settles_a_waiting_program_without_retrying_its_child() {
+    let f = fixture().await;
+    let (parent, child) = waiting(&f, 1).await;
+    let schedule = f
+        .managed
+        .create_schedule_at_with_timeout(
+            &f.conversation,
+            None,
+            "inspect the previous program".into(),
+            60_000,
+            now_ms(),
+            Some(60_000),
+        )
+        .await
+        .unwrap();
+    let facts = xcb_core::policy::TurnFacts {
+        terminal: Terminal::Completed,
+        joined: true,
+        effects: EffectState::Settled,
+        pending_attention: true,
+        failure: None,
+    };
+    let question = settle_child_turn(
+        &f,
+        &child,
+        "Which fix should I use?",
+        facts,
+        State::NeedsAnswer,
+    )
+    .await;
+    assert_eq!(question.state, TaskState::NeedsInput);
+    assert_eq!(question.attention, Some(State::NeedsAnswer));
+    assert!(
+        f.store
+            .settled_outcome(
+                question.session.as_ref().unwrap(),
+                question.message_count_before
+            )
+            .unwrap()
+            .is_some()
+    );
+    f.managed.tick_programs(&f.store, true).await.unwrap();
+    assert!(f.managed.task(&parent.id).unwrap().unwrap().program_waiting);
+    f.managed
+        .tick_schedule_unanswered(&f.store, question.updated_at_ms + 60_000)
+        .await
+        .unwrap();
+    let failed = f.managed.task(&child.id).unwrap().unwrap();
+    assert_eq!(failed.state, TaskState::Failed);
+    assert!(failed.dismissed);
+    assert_eq!(failed.attempts, question.attempts);
+    f.managed.tick_programs(&f.store, true).await.unwrap();
+    let stopped = f.managed.task(&parent.id).unwrap().unwrap();
+    assert_eq!(stopped.state, TaskState::Failed);
+    assert!(!stopped.program_waiting);
+    assert!(stopped.detail.contains("settled as failed"));
+    assert!(
+        f.managed
+            .schedule_view(&schedule)
+            .unwrap()
+            .blocker
+            .is_none()
+    );
+    f.managed
+        .tick_schedules(schedule.next_due_ms)
+        .await
+        .unwrap();
+    assert!(
+        f.managed
+            .schedule(&schedule.id)
+            .unwrap()
+            .unwrap()
+            .last_task
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn managed_program_schedule_persists_unanswered_timeout_under_existing_grant() {
+    let f = fixture().await;
+    let created = f
+        .managed
+        .create_program_schedule_at_with_timeout(
+            &f.conversation,
+            None,
+            "planned work".into(),
+            program(1),
+            60_000,
+            now_ms() + 60_000,
+            Some(7_200_000),
+        )
+        .await
+        .unwrap();
+    let loaded = f.managed.schedule(&created.id).unwrap().unwrap();
+    assert_eq!(loaded.settle_unanswered_after_ms, Some(7_200_000));
+    assert!(loaded.program.is_some());
+    assert_eq!(
+        serde_json::to_value(f.managed.schedule_view(&loaded).unwrap()).unwrap()["settle_unanswered_after_ms"],
+        7_200_000
+    );
+}
