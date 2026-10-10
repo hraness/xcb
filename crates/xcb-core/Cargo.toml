@@ -18,4 +18,4 @@ thiserror = "=2.0.21"
 proptest = "=1.11.0"
 
 [target.'cfg(windows)'.dependencies]
-xcb-platform = { version = "0.20.7", path = "../xcb-platform" }
+xcb-platform = { version = "0.20.8", path = "../xcb-platform" }
