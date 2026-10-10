@@ -706,6 +706,21 @@ struct CodexIdentityClaims<'a> {
     user_id: Option<&'a str>,
 }
 
+/// The credential file's `last_refresh` timestamp, when it has a valid one.
+fn codex_last_refresh(bytes: &[u8]) -> Option<time::OffsetDateTime> {
+    #[derive(serde::Deserialize)]
+    struct Stamp<'a> {
+        #[serde(borrow)]
+        last_refresh: Option<&'a str>,
+    }
+    let stamp: Stamp<'_> = serde_json::from_slice(bytes).ok()?;
+    time::OffsetDateTime::parse(
+        stamp.last_refresh?,
+        &time::format_description::well_known::Rfc3339,
+    )
+    .ok()
+}
+
 /// Validate the supported ChatGPT file shape and return a continuity digest
 /// plus the identity-token email. This is not token verification: the provider
 /// must authenticate it. Borrow parsed secrets from zeroized input; never
@@ -1081,6 +1096,27 @@ pub(crate) fn recover_codex_auth(
         return Ok(());
     }
     if current_revision != metadata.original_revision {
+        // Concurrent runs on one account each refresh their own copy of the
+        // original; whichever persists first leaves the others unable to.
+        // Persistent credentials for the same account that were refreshed
+        // strictly after this run's copy supersede it: keep them, discard
+        // the stale copy, and free the run. Anything else stays a conflict.
+        if let Some(saved) = current.as_deref()
+            && codex_identity(saved).is_ok_and(|saved| {
+                metadata
+                    .account_identity
+                    .as_ref()
+                    .is_some_and(|expected| *expected == saved.digest)
+            })
+            && matches!(
+                (codex_last_refresh(saved), codex_last_refresh(&refreshed)),
+                (Some(saved), Some(mine)) if saved > mine
+            )
+        {
+            private::open_file(&target, MAX_CODEX_AUTH_BYTES as u64)?.sync_all()?;
+            private::sync_directory(&persistent)?;
+            return Ok(());
+        }
         return Err(Error::Conflict(
             "persistent credentials changed before recovery",
         ));
@@ -1819,6 +1855,83 @@ mod auth_custody_tests {
             private::read(&target, MAX_CODEX_AUTH_BYTES).unwrap(),
             concurrent
         );
+    }
+
+    fn stamped(account: &str, access: &str, refreshed_at: &str) -> Vec<u8> {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&synthetic_codex_auth(account, access)).unwrap();
+        value["last_refresh"] = refreshed_at.into();
+        serde_json::to_vec(&value).unwrap()
+    }
+
+    #[test]
+    fn stale_run_copy_yields_to_newer_saved_credentials_of_the_same_account() {
+        for (saved_at, recovers) in [
+            ("2026-10-10T10:05:00Z", true),
+            ("2026-10-10T06:45:00Z", false),
+            ("2026-10-10T06:00:00Z", false),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let base = xcb_core::canonical(directory.path()).unwrap();
+            let store = Store::open(&base.join("state")).unwrap();
+            let account = store
+                .add_account(Provider::Codex, "ChatGPT", 1, None)
+                .unwrap();
+            let original = stamped("acct", "original", "2026-10-10T06:00:00Z");
+            let target = codex_auth_path(&store, &account.id).unwrap();
+            private::create(&target, &original).unwrap();
+            let run = store.prepare_probe(&account.id, None, 2).unwrap();
+            let profile = store.root().join("runs/synthetic-run");
+            let snapshot = snapshot_codex_auth(&store, &run, &profile).unwrap();
+            let mine = stamped("acct", "mine", "2026-10-10T06:45:00Z");
+            private::replace(
+                &snapshot.profile().join("auth.json"),
+                &mine,
+                &crate::digest(&original),
+            )
+            .unwrap();
+            let concurrent = stamped("acct", "concurrent", saved_at);
+            private::replace(&target, &concurrent, &crate::digest(&original)).unwrap();
+            let metadata = private::read(&recovery_path(store.root(), &run.id), 32 * 1024).unwrap();
+            let metadata_digest = crate::digest(&metadata);
+
+            let outcome = recover_codex_auth(store.root(), &run, &metadata_digest);
+            assert_eq!(outcome.is_ok(), recovers, "{saved_at}");
+            assert_eq!(
+                private::read(&target, MAX_CODEX_AUTH_BYTES).unwrap(),
+                concurrent,
+                "{saved_at}: saved credentials are never overwritten"
+            );
+        }
+    }
+
+    #[test]
+    fn newer_saved_credentials_of_another_account_do_not_free_the_run() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let account = store
+            .add_account(Provider::Codex, "ChatGPT", 1, None)
+            .unwrap();
+        let original = stamped("acct", "original", "2026-10-10T06:00:00Z");
+        let target = codex_auth_path(&store, &account.id).unwrap();
+        private::create(&target, &original).unwrap();
+        let run = store.prepare_probe(&account.id, None, 2).unwrap();
+        let profile = store.root().join("runs/synthetic-run");
+        let snapshot = snapshot_codex_auth(&store, &run, &profile).unwrap();
+        private::replace(
+            &snapshot.profile().join("auth.json"),
+            &stamped("acct", "mine", "2026-10-10T06:45:00Z"),
+            &crate::digest(&original),
+        )
+        .unwrap();
+        let other = stamped("other-acct", "other", "2026-10-10T10:05:00Z");
+        private::replace(&target, &other, &crate::digest(&original)).unwrap();
+        let metadata = private::read(&recovery_path(store.root(), &run.id), 32 * 1024).unwrap();
+        let metadata_digest = crate::digest(&metadata);
+
+        assert!(recover_codex_auth(store.root(), &run, &metadata_digest).is_err());
+        assert_eq!(private::read(&target, MAX_CODEX_AUTH_BYTES).unwrap(), other);
     }
 
     #[test]

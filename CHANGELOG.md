@@ -9,6 +9,12 @@ holds a summary paragraph followed by a bulleted list of changes. The release
 workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
+- `xcb recover` frees a stopped Codex run when the account's saved sign-in
+  was refreshed after that run's copy, instead of refusing with "persistent
+  credentials changed before recovery". Concurrent runs on one account each
+  refresh their own copy, so all but the first to save used to stay stuck
+  and block their tasks. The saved sign-in is never overwritten, and a
+  different account or an unprovable refresh time still refuses.
 
 ## Unreleased
 
