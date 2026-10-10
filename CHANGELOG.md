@@ -8,7 +8,13 @@ Each version's section is headed `## X.Y.Z` (optionally ` - YYYY-MM-DD`) and
 holds a summary paragraph followed by a bulleted list of changes. The release
 workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
-version bump pull request by renaming `## Unreleased` to the version.
+version bump pull request by renaming `## 0.20.9 - 2026-10-10` to the version.
+
+## Unreleased
+
+A stopped Codex run on a shared account is freed when another run already saved its own refresh.
+
+- `xcb recover` now also frees a run whose Codex copy was refreshed at a different moment than the saved sign-in, as long as both belong to the same account. 0.20.8 only accepted a saved sign-in refreshed later, but concurrent runs often finish with the saved one earlier. The saved sign-in is kept and never overwritten; equal or unreadable refresh times still refuse.
 
 ## 0.20.8 - 2026-10-10
 
