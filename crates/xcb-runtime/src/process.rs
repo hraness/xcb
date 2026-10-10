@@ -1368,9 +1368,13 @@ pub async fn capture_with_input(
     let mut stdout = child.stdout.take().ok_or(Error::Protocol("child stdout"))?;
     let stderr = child.stderr.take().ok_or(Error::Protocol("child stderr"))?;
     let result = tokio::time::timeout(deadline, async {
-        stdin.write_all(input).await?;
-        stdin.shutdown().await?;
-        drop(stdin);
+        // Children may emit a pipeful before reading all stdin; drain concurrently.
+        let feed = async move {
+            stdin.write_all(input).await?;
+            stdin.shutdown().await?;
+            drop(stdin);
+            Ok::<_, Error>(())
+        };
         let output = async {
             let mut bytes = Vec::new();
             (&mut stdout)
@@ -1382,12 +1386,13 @@ pub async fn capture_with_input(
             }
             Ok(bytes)
         };
-        let (bytes, _) = tokio::try_join!(output, drain(stderr, 1024 * 1024))?;
+        let (bytes, _, _) = tokio::try_join!(output, drain(stderr, 1024 * 1024), feed)?;
         Ok::<_, Error>(bytes)
     })
     .await;
     let timed_out = result.is_err();
-    if timed_out {
+    // A read/write error can arrive before the deadline while the child is still running.
+    if timed_out || matches!(&result, Ok(Err(_))) {
         let _ = group.kill();
     }
     let status = match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
@@ -2077,6 +2082,19 @@ mod tests {
             }
             assert!(prove_process_group_absent(pid).is_ok());
         }
+    }
+
+    #[tokio::test]
+    async fn input_capture_stops_a_child_on_output_limit() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "read line; printf too-much; exec sleep 30"]);
+        let result = tokio::time::timeout(
+            Duration::from_secs(4),
+            capture_with_input(command, b"x\n", 1, Duration::from_secs(20)),
+        )
+        .await
+        .expect("output limit should stop the child promptly");
+        assert!(result.is_err(), "an oversized capture must fail");
     }
 
     #[tokio::test]
