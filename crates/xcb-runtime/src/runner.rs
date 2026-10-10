@@ -3095,11 +3095,24 @@ pub(crate) async fn run_prepared<P: Protocol>(
                 diagnostic = Some(detail);
                 return Ok((Terminal::TurnLimit, vec![]));
             }
-            frames += 1;
             let batch = tokio::select! {
+                biased;
                 _ = cancel.changed() => return Ok((Terminal::Cancelled, vec![])),
-                batch = protocol.next(&mut process) => batch?,
+                batch = protocol.next(&mut process) => Some(batch?),
+                _ = tokio::time::sleep(Duration::from_millis(250)) => None,
             };
+            let Some(batch) = batch else {
+                // The owned child may exit while a codec is waiting on a
+                // callback or a pipe whose EOF never arrives. No final event
+                // was observed: let normal joined/effect-checked settlement
+                // record a failed outcome instead of waiting for the full
+                // turn deadline. A foreign PID probe cannot make this claim.
+                if process.owned_group_exited()? {
+                    return Err(Error::Protocol("provider ended without a terminal result"));
+                }
+                continue;
+            };
+            frames += 1;
             byte_count = byte_count
                 .checked_add(batch.bytes)
                 .ok_or(Error::Protocol("total provider output limit"))?;
@@ -4594,6 +4607,106 @@ mod tests {
             assert_eq!(result["isError"], self.mailbox_failure);
             process.send(&json!({"step":1})).await
         }
+    }
+
+    // A codec can be waiting on a callback instead of reading stdout when
+    // its worker exits. The owning runner must still finish this run now.
+    struct NoFinalProtocol(ModelChoice);
+    impl Protocol for NoFinalProtocol {
+        async fn initialize(&mut self, _: &mut StreamProcess, _: &str) -> Result<Vec<ModelChoice>> {
+            Ok(vec![self.0.clone()])
+        }
+        async fn start(&mut self, process: &mut StreamProcess, _: Prompt) -> Result<()> {
+            process.send(&json!({"start":true})).await
+        }
+        async fn next(&mut self, _: &mut StreamProcess) -> Result<crate::protocol::Batch> {
+            std::future::pending().await
+        }
+        async fn receive(&mut self, _: &mut StreamProcess, _: &[u8]) -> Result<Vec<TurnEvent>> {
+            unreachable!("the worker never sent a frame")
+        }
+        async fn reply(&mut self, _: &mut StreamProcess, _: &str, _: Value) -> Result<()> {
+            unreachable!("the worker never requested a tool")
+        }
+    }
+
+    #[tokio::test]
+    async fn exited_owned_worker_without_final_event_records_failed_run() {
+        let root = tempfile::tempdir().unwrap();
+        let base = xcb_core::canonical(root.path()).unwrap();
+        let workspace = base.join("work");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = Arc::new(Store::open(&base.join("state")).unwrap());
+        let account = store
+            .add_account(Provider::Claude, "Fixture", now_ms(), None)
+            .unwrap();
+        let model = ModelChoice {
+            provider: Provider::Claude,
+            id: Id::new("fixture-model").unwrap(),
+            label: "Fixture".into(),
+            mode: Mode::Fixed,
+            resolved: None,
+            effort: None,
+            observed_at_ms: now_ms(),
+        };
+        let session = store
+            .create_session(&account.id, model.clone(), &workspace, now_ms())
+            .unwrap();
+        let message = Message {
+            id: new_id("message"),
+            role: Role::User,
+            text: "Run the worker".into(),
+            at_ms: now_ms(),
+            attachments: vec![],
+            provenance: None,
+        };
+        let session = store
+            .append_message(&session.id, session.revision, &message)
+            .unwrap();
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "IFS= read -r line; exit 0"]);
+        let launch = Launch {
+            command,
+            cwd: base.clone(),
+            bridge: None,
+            artifacts: LaunchArtifacts::create(store.root()).unwrap(),
+            prepared_run: None,
+            codex_credentials: None,
+        };
+        let (_cancel, cancellation) = watch::channel(false);
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_prepared(
+                store.clone(),
+                RunInput {
+                    session: session.clone(),
+                    message,
+                    config: Config::default(),
+                    pane_generation: false,
+                },
+                cancellation,
+                Arc::new(|_| {}),
+                launch,
+                NoFinalProtocol(model),
+                Workspace::open_with_coordination(&workspace, &base.join("coordination")).unwrap(),
+            ),
+        )
+        .await
+        .expect("the owning runner must not wait for the turn deadline")
+        .unwrap();
+        assert_eq!(outcome.facts.terminal, Terminal::Failed);
+        assert!(outcome.facts.joined);
+        assert_eq!(outcome.facts.effects, EffectState::None);
+        assert!(store.unsettled_runs().unwrap().is_empty());
+        assert_eq!(
+            store
+                .latest_settled_outcome(&session.id)
+                .unwrap()
+                .unwrap()
+                .facts
+                .terminal,
+            Terminal::Failed
+        );
     }
 
     #[tokio::test]

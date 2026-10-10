@@ -1194,7 +1194,12 @@ impl StreamProcess {
         .await
     }
     fn signal(&self) {
-        if let Some(group) = &self.group {
+        // Once try_wait has reaped the leader, its group number can be
+        // recycled. Leave any surviving descendants held for explicit
+        // recovery rather than signaling an unrelated process group.
+        if self.exit_status.is_none()
+            && let Some(group) = &self.group
+        {
             let _ = group.kill();
         }
     }
@@ -1210,6 +1215,22 @@ impl StreamProcess {
     /// under SIGKILL.
     pub fn exit_status(&self) -> Option<std::process::ExitStatus> {
         self.exit_status
+    }
+    /// Only this StreamProcess owns the child: a missing PID observed by a
+    /// different process is not a stop witness for this run. Poll while a
+    /// protocol waits for a final frame so a dead worker cannot hold its run
+    /// open until the full turn deadline. Reaping disarms group signaling:
+    /// its numeric ID may be reused once the leader is gone. Descendants
+    /// still in the group cannot be treated as a finished worker.
+    pub(crate) fn owned_group_exited(&mut self) -> Result<bool> {
+        if self.exit_status.is_none() {
+            self.exit_status = self.child.try_wait()?;
+        }
+        Ok(self.exit_status.is_some()
+            && self
+                .group
+                .as_ref()
+                .is_some_and(|group| group.empty() == Some(true)))
     }
     pub async fn join(&mut self) -> bool {
         self.signal();
