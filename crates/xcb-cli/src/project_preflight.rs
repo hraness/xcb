@@ -8,7 +8,18 @@ use std::{
 use tokio::process::Command;
 use xcb_runtime::{Result, managed_program::AdmittedProgram};
 
+const GIT_INDEX_CAPTURE_LIMIT: usize = 64 * 1024 * 1024;
+
 async fn git_bytes(workspace: &Path, args: &[&str], input: Option<&[u8]>) -> Option<Vec<u8>> {
+    git_bytes_bounded(workspace, args, input, 1024 * 1024).await
+}
+
+async fn git_bytes_bounded(
+    workspace: &Path,
+    args: &[&str],
+    input: Option<&[u8]>,
+    max_output: usize,
+) -> Option<Vec<u8>> {
     let mut command = Command::new("git");
     // Unit fixtures own their repository config; never inherit host filters.
     #[cfg(test)]
@@ -32,12 +43,12 @@ async fn git_bytes(workspace: &Path, args: &[&str], input: Option<&[u8]>) -> Opt
         Some(input) => xcb_runtime::process::capture_with_input(
             command,
             input,
-            1024 * 1024,
+            max_output,
             Duration::from_secs(5),
         )
         .await
         .ok(),
-        None => xcb_runtime::process::capture(command, 1024 * 1024, Duration::from_secs(5))
+        None => xcb_runtime::process::capture(command, max_output, Duration::from_secs(5))
             .await
             .ok(),
     }
@@ -50,7 +61,13 @@ async fn git(workspace: &Path, args: &[&str]) -> Option<String> {
 }
 
 async fn safe_status(workspace: &Path) -> Option<String> {
-    let entries = git_bytes(workspace, &["ls-files", "--stage", "-z"], None).await?;
+    let entries = git_bytes_bounded(
+        workspace,
+        &["ls-files", "--stage", "-z"],
+        None,
+        GIT_INDEX_CAPTURE_LIMIT,
+    )
+    .await?;
     let mut paths = Vec::new();
     for entry in entries
         .split(|byte| *byte == 0)
@@ -65,10 +82,11 @@ async fn safe_status(workspace: &Path) -> Option<String> {
         paths.extend_from_slice(&entry[tab + 1..]);
         paths.push(0);
     }
-    let attrs = git_bytes(
+    let attrs = git_bytes_bounded(
         workspace,
         &["check-attr", "-z", "--stdin", "filter"],
         Some(&paths),
+        GIT_INDEX_CAPTURE_LIMIT,
     )
     .await?;
     let fields = attrs.split(|byte| *byte == 0).collect::<Vec<_>>();
@@ -126,7 +144,7 @@ pub(super) async fn inspect(
         None => None,
     };
     if !workspace.is_dir() || root.is_none() || revision.is_none() || status.is_none() {
-        blockers.push("Git inspection failed, exceeded 1 MiB or timed out; require a readable committed checkout without filtered tracked files or submodules".to_owned());
+        blockers.push("Git inspection failed, exceeded a capture limit (64 MiB for index/attributes; 1 MiB for other Git output), or timed out; require a readable committed checkout without filtered tracked files or submodules".to_owned());
     }
     let dirty = status.as_ref().map(|s| !s.is_empty());
     if dirty == Some(true) {
@@ -280,6 +298,126 @@ mod tests {
             std::os::unix::fs::symlink("/etc/hosts", fixture.0.join("escape")).unwrap();
             assert!(required_file(&fixture.0, Path::new("escape")).is_none());
         }
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn preflight_accepts_large_clean_index_but_still_rejects_unsafe_worktrees() {
+        let fixture = Fixture::new().await;
+        // Shared long prefixes keep the fixture small while both Git captures
+        // exceed the ordinary 1 MiB cap.
+        let directory = fixture
+            .0
+            .join("a".repeat(160))
+            .join("b".repeat(160))
+            .join("c".repeat(160));
+        std::fs::create_dir_all(&directory).unwrap();
+        for i in 0..1550 {
+            std::fs::write(
+                directory.join(format!("{i:04}{}.txt", "f".repeat(175))),
+                b"x",
+            )
+            .unwrap();
+        }
+        assert!(git(&fixture.0, &["add", "."]).await.is_some());
+        assert!(
+            git(
+                &fixture.0,
+                &[
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "large index"
+                ]
+            )
+            .await
+            .is_some()
+        );
+        let entries = git_bytes_bounded(
+            &fixture.0,
+            &["ls-files", "--stage", "-z"],
+            None,
+            GIT_INDEX_CAPTURE_LIMIT,
+        )
+        .await
+        .unwrap();
+        assert!(
+            entries.len() > 1024 * 1024,
+            "ls-files was only {} bytes",
+            entries.len()
+        );
+        let paths = entries
+            .split(|byte| *byte == 0)
+            .filter(|entry| !entry.is_empty())
+            .flat_map(|entry| {
+                let tab = entry.iter().position(|byte| *byte == b'\t').unwrap();
+                entry[tab + 1..].iter().copied().chain([0])
+            })
+            .collect::<Vec<_>>();
+        let attrs = git_bytes_bounded(
+            &fixture.0,
+            &["check-attr", "-z", "--stdin", "filter"],
+            Some(&paths),
+            GIT_INDEX_CAPTURE_LIMIT,
+        )
+        .await
+        .unwrap();
+        assert!(
+            attrs.len() > 1024 * 1024,
+            "check-attr was only {} bytes",
+            attrs.len()
+        );
+        let clean = inspect(&fixture.0, &program(), &[], None, None)
+            .await
+            .unwrap();
+        assert_eq!(clean["ready"], true, "{clean}");
+        assert_eq!(clean["dirty"], false);
+
+        std::fs::write(fixture.0.join(".gitattributes"), "*.txt filter=probe\n").unwrap();
+        let filtered = inspect(&fixture.0, &program(), &[], None, None)
+            .await
+            .unwrap();
+        assert_eq!(filtered["ready"], false);
+        assert_eq!(filtered["dirty"], Value::Null);
+        std::fs::remove_file(fixture.0.join(".gitattributes")).unwrap();
+
+        let revision = git(&fixture.0, &["rev-parse", "HEAD"]).await.unwrap();
+        let gitlink = format!("160000,{revision},nested-repo");
+        assert!(
+            git(
+                &fixture.0,
+                &["update-index", "--add", "--cacheinfo", &gitlink]
+            )
+            .await
+            .is_some()
+        );
+        let submodule = inspect(&fixture.0, &program(), &[], None, None)
+            .await
+            .unwrap();
+        assert_eq!(submodule["ready"], false);
+        assert_eq!(submodule["dirty"], Value::Null);
+        assert!(
+            git(
+                &fixture.0,
+                &["update-index", "--force-remove", "nested-repo"]
+            )
+            .await
+            .is_some()
+        );
+
+        std::fs::write(fixture.0.join("plan.md"), "changed").unwrap();
+        let dirty = inspect(&fixture.0, &program(), &[], None, None)
+            .await
+            .unwrap();
+        assert_eq!(dirty["ready"], false);
+        assert_eq!(dirty["dirty"], true);
     }
     #[cfg(unix)]
     #[tokio::test]

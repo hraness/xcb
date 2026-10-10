@@ -1368,9 +1368,13 @@ pub async fn capture_with_input(
     let mut stdout = child.stdout.take().ok_or(Error::Protocol("child stdout"))?;
     let stderr = child.stderr.take().ok_or(Error::Protocol("child stderr"))?;
     let result = tokio::time::timeout(deadline, async {
-        stdin.write_all(input).await?;
-        stdin.shutdown().await?;
-        drop(stdin);
+        // Children may emit a pipeful before reading all stdin; drain concurrently.
+        let feed = async move {
+            stdin.write_all(input).await?;
+            stdin.shutdown().await?;
+            drop(stdin);
+            Ok::<_, Error>(())
+        };
         let output = async {
             let mut bytes = Vec::new();
             (&mut stdout)
@@ -1382,7 +1386,7 @@ pub async fn capture_with_input(
             }
             Ok(bytes)
         };
-        let (bytes, _) = tokio::try_join!(output, drain(stderr, 1024 * 1024))?;
+        let (bytes, _, _) = tokio::try_join!(output, drain(stderr, 1024 * 1024), feed)?;
         Ok::<_, Error>(bytes)
     })
     .await;
