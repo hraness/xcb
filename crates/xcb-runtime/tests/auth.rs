@@ -333,8 +333,8 @@ fn codex_refresh_requires_joined_exclusive_account_custody_and_preserves_rotatio
 }
 
 #[test]
-fn codex_refresh_rejects_account_switch_and_stale_persistent_revision() {
-    for scenario in ["account", "user", "revision", "directory"] {
+fn codex_refresh_rejects_identity_switch_and_stale_directory_but_yields_unchanged_copy() {
+    for scenario in ["account", "user", "revision", "foreign-saved", "directory"] {
         let directory = tempfile::tempdir().unwrap();
         let base = xcb_core::canonical(directory.path()).unwrap();
         let source = private::directory(&base.join("source"))
@@ -381,6 +381,10 @@ fn codex_refresh_rejects_account_switch_and_stale_persistent_revision() {
                 expected = codex_auth_fixture("account-one", "user-one", "synthetic-new-owner");
                 private::replace(&target, &expected, &xcb_runtime::digest(&original)).unwrap();
             }
+            "foreign-saved" => {
+                expected = codex_auth_fixture("other-account", "other-user", "synthetic-new-owner");
+                private::replace(&target, &expected, &xcb_runtime::digest(&original)).unwrap();
+            }
             "directory" => {
                 std::fs::rename(&profile, profile.with_file_name("moved")).unwrap();
                 private::directory(&profile).unwrap();
@@ -388,10 +392,17 @@ fn codex_refresh_rejects_account_switch_and_stale_persistent_revision() {
             }
             _ => unreachable!(),
         }
-        assert!(
-            auth::persist_codex_auth(&store, &run, &snapshot, true).is_err(),
-            "{scenario}"
-        );
+        let result = auth::persist_codex_auth(&store, &run, &snapshot, true);
+        assert_eq!(result.is_ok(), scenario == "revision", "{scenario}");
+        let db = rusqlite::Connection::open(store.root().join("xcb.sqlite")).unwrap();
+        let pending: i64 = db
+            .query_row(
+                "SELECT count(*) FROM tool_effects WHERE run=?1 AND settled=0",
+                [run.id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending, i64::from(scenario != "revision"), "{scenario}");
         assert_eq!(
             private::read(&target, 65536).unwrap(),
             expected,
