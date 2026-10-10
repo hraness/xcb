@@ -1107,6 +1107,34 @@ impl Group {
         }
     }
 
+    /// Non-authoritative exit hint for the owning runner. On Unix, an exited
+    /// leader is still visible as a zombie until reaped, so a group-absence
+    /// probe alone cannot wake a codec waiting on an unrelated callback.
+    /// waitid with NOWAIT checks this process's child without consuming its
+    /// exit status; StreamProcess alone reaps and proves group absence.
+    pub(crate) fn exit_hint(&self) -> bool {
+        #[cfg(all(
+            unix,
+            not(any(
+                target_os = "cygwin",
+                target_os = "horizon",
+                target_os = "openbsd",
+                target_os = "redox",
+                target_os = "wasi"
+            ))
+        ))]
+        {
+            use rustix::process::{WaitId, WaitIdOptions, waitid};
+            let options = WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT;
+            if let Ok(Some(status)) = waitid(WaitId::Pid(self.0), options)
+                && (status.exited() || status.killed() || status.dumped())
+            {
+                return true;
+            }
+        }
+        self.empty() == Some(true)
+    }
+
     /// No member remains: `ESRCH` from a group probe, or a job with no
     /// active process.
     pub(crate) fn empty(&self) -> Option<bool> {
@@ -1215,6 +1243,13 @@ impl StreamProcess {
     /// under SIGKILL.
     pub fn exit_status(&self) -> Option<std::process::ExitStatus> {
         self.exit_status
+    }
+    /// A detached group probe is only a hint to stop waiting on a codec;
+    /// the owning child must still be reaped and the group checked before
+    /// settlement. Keeping the hint separate avoids cancelling a live codec
+    /// future (which may already have consumed a frame or started a reply).
+    pub(crate) fn group_exit_hint(&self) -> Option<Group> {
+        self.group.clone()
     }
     /// Only this StreamProcess owns the child: a missing PID observed by a
     /// different process is not a stop witness for this run. Poll while a

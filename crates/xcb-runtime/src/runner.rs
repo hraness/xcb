@@ -3095,18 +3095,30 @@ pub(crate) async fn run_prepared<P: Protocol>(
                 diagnostic = Some(detail);
                 return Ok((Terminal::TurnLimit, vec![]));
             }
-            let batch = tokio::select! {
-                biased;
-                _ = cancel.changed() => return Ok((Terminal::Cancelled, vec![])),
-                batch = protocol.next(&mut process) => Some(batch?),
-                _ = tokio::time::sleep(Duration::from_millis(250)) => None,
+            // Keep next alive across liveness ticks: it may have consumed a
+            // frame and be awaiting a reply when the timer fires. A detached
+            // group probe only hints that we should drop it and verify the
+            // owned child; it never authorizes settlement on its own.
+            let group_hint = process.group_exit_hint();
+            let batch = {
+                let mut next = std::pin::pin!(protocol.next(&mut process));
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = cancel.changed() => return Ok((Terminal::Cancelled, vec![])),
+                        batch = &mut next => break Some(batch?),
+                        _ = tokio::time::sleep(Duration::from_millis(250)) => {
+                            if group_hint.as_ref().is_some_and(|group| group.exit_hint()) {
+                                break None;
+                            }
+                        }
+                    }
+                }
             };
             let Some(batch) = batch else {
-                // The owned child may exit while a codec is waiting on a
-                // callback or a pipe whose EOF never arrives. No final event
-                // was observed: let normal joined/effect-checked settlement
-                // record a failed outcome instead of waiting for the full
-                // turn deadline. A foreign PID probe cannot make this claim.
+                // A foreign group probe cannot free custody. This runner
+                // alone owns the child and verifies its exit and group absence
+                // before using the normal joined/effect-checked settlement.
                 if process.owned_group_exited()? {
                     return Err(Error::Protocol("provider ended without a terminal result"));
                 }
@@ -4707,6 +4719,100 @@ mod tests {
                 .terminal,
             Terminal::Failed
         );
+    }
+
+    // A codec can consume a frame before asynchronously sending a reply.
+    // Periodic exit checks must not discard that in-flight next future.
+    struct SlowResultProtocol(ModelChoice);
+    impl Protocol for SlowResultProtocol {
+        async fn initialize(&mut self, _: &mut StreamProcess, _: &str) -> Result<Vec<ModelChoice>> {
+            Ok(vec![self.0.clone()])
+        }
+        async fn start(&mut self, process: &mut StreamProcess, _: Prompt) -> Result<()> {
+            process.send(&json!({"start":true})).await
+        }
+        async fn receive(&mut self, _: &mut StreamProcess, _: &[u8]) -> Result<Vec<TurnEvent>> {
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            Ok(vec![
+                TurnEvent::Ready,
+                TurnEvent::Result {
+                    terminal: Terminal::Completed,
+                    text: "Done".into(),
+                    models: vec![],
+                },
+            ])
+        }
+        async fn reply(&mut self, _: &mut StreamProcess, _: &str, _: Value) -> Result<()> {
+            unreachable!("the worker never requested a tool")
+        }
+    }
+
+    #[tokio::test]
+    async fn live_worker_frame_survives_liveness_ticks() {
+        let root = tempfile::tempdir().unwrap();
+        let base = xcb_core::canonical(root.path()).unwrap();
+        let workspace = base.join("work");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = Arc::new(Store::open(&base.join("state")).unwrap());
+        let account = store
+            .add_account(Provider::Claude, "Fixture", now_ms(), None)
+            .unwrap();
+        let model = ModelChoice {
+            provider: Provider::Claude,
+            id: Id::new("fixture-model").unwrap(),
+            label: "Fixture".into(),
+            mode: Mode::Fixed,
+            resolved: None,
+            effort: None,
+            observed_at_ms: now_ms(),
+        };
+        let session = store
+            .create_session(&account.id, model.clone(), &workspace, now_ms())
+            .unwrap();
+        let message = Message {
+            id: new_id("message"),
+            role: Role::User,
+            text: "Run the worker".into(),
+            at_ms: now_ms(),
+            attachments: vec![],
+            provenance: None,
+        };
+        let session = store
+            .append_message(&session.id, session.revision, &message)
+            .unwrap();
+        let launch = Launch {
+            command: Command::new("/bin/cat"),
+            cwd: base.clone(),
+            bridge: None,
+            artifacts: LaunchArtifacts::create(store.root()).unwrap(),
+            prepared_run: None,
+            codex_credentials: None,
+        };
+        let (_cancel, cancellation) = watch::channel(false);
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(3),
+            run_prepared(
+                store.clone(),
+                RunInput {
+                    session,
+                    message,
+                    config: Config::default(),
+                    pane_generation: false,
+                },
+                cancellation,
+                Arc::new(|_| {}),
+                launch,
+                SlowResultProtocol(model),
+                Workspace::open_with_coordination(&workspace, &base.join("coordination")).unwrap(),
+            ),
+        )
+        .await
+        .expect("the live codec must complete across exit checks")
+        .unwrap();
+        assert_eq!(outcome.facts.terminal, Terminal::Completed);
+        assert!(outcome.facts.joined);
+        assert_eq!(outcome.facts.effects, EffectState::None);
+        assert!(store.unsettled_runs().unwrap().is_empty());
     }
 
     #[tokio::test]
