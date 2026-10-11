@@ -4748,6 +4748,38 @@ mod tests {
     }
 
     #[test]
+    fn absent_worker_with_unknown_owner_keeps_run_and_account_held() {
+        let dir = root();
+        let base = xcb_core::canonical(dir.path()).unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
+        let session = store
+            .create_session(&account.id, choice(), &base.join("work"), 2)
+            .unwrap();
+        let prepared = store.prepare_run(&session.id, session.revision, 3).unwrap();
+        let mut running = store.mark_spawned(&prepared, i32::MAX as u32).unwrap();
+        running.owner = None;
+        let payload = serde_json::to_string(&running).unwrap();
+        store
+            .db()
+            .unwrap()
+            .execute(
+                "UPDATE runs SET payload=?1 WHERE id=?2",
+                params![payload, running.id.as_str()],
+            )
+            .unwrap();
+        let (_, digest) = store.recovery_candidate(&running.id).unwrap().unwrap();
+        let prior_session = store.session(&session.id).unwrap().unwrap();
+        assert!(crate::process::prove_process_group_absent(i32::MAX as u32).is_ok());
+        assert!(store.recover_run(&running.id, &digest, 4).is_err());
+        assert_eq!(store.unsettled_runs().unwrap().len(), 1);
+        assert!(store.prepare_probe(&account.id, None, 5).is_err());
+        let unchanged = store.session(&session.id).unwrap().unwrap();
+        assert_eq!(unchanged.revision, prior_session.revision);
+        assert_eq!(unchanged.state, prior_session.state);
+    }
+
+    #[test]
     fn recovery_settles_running_run_and_marks_session_uncertain() {
         let dir = root();
         let base = xcb_core::canonical(dir.path()).unwrap();
