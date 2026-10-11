@@ -81,6 +81,8 @@ pub(super) struct Batch {
 
 pub(super) enum Change<'a> {
     Prepare(&'a Batch),
+    /// Owner closes a settled uncertain task without claiming prompt delivery.
+    AcceptUnreconciled,
     Finish {
         delivered: bool,
         unstarted: bool,
@@ -787,6 +789,48 @@ pub(super) fn transition(
                     batch.message_count as i64,
                     serde_json::to_string(batch)?
                 ],
+            )?;
+        }
+        Some(Change::AcceptUnreconciled) => {
+            if expected.state != TaskState::Uncertain
+                || next.state != TaskState::Failed
+                || !next.dismissed
+            {
+                return Err(Error::Conflict(
+                    "unreconciled reply requires owner dismissal",
+                ));
+            }
+            let batch = batch_from(tx, &next.id)?
+                .ok_or(Error::Conflict("no unreconciled reply to accept"))?;
+            if expected.session.as_ref() != Some(&batch.session)
+                || expected.message_count_before != batch.message_count
+            {
+                return Err(Error::Conflict("inbox settlement turn mismatch"));
+            }
+            for event in &batch.events {
+                let mut current = event_from(tx, &event.id)?
+                    .ok_or(Error::Unavailable("prepared inbox event missing"))?;
+                if current.task != event.task
+                    || current.conversation != event.conversation
+                    || current.sequence != event.sequence
+                    || current.kind != event.kind
+                    || current.text != event.text
+                    || current.created_at_ms != event.created_at_ms
+                    || !matches!(current.status.as_str(), "prepared" | "held")
+                {
+                    return Err(Error::Conflict("prepared inbox event changed"));
+                }
+                write_event(
+                    tx,
+                    &mut current,
+                    "closed",
+                    Some("owner accepted unreconciled reply without asserting delivery; no retry"),
+                    None,
+                )?;
+            }
+            tx.execute(
+                "DELETE FROM inbox_batches WHERE task=?1",
+                [next.id.as_str()],
             )?;
         }
         Some(Change::Finish {

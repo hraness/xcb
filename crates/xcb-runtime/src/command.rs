@@ -400,15 +400,37 @@ enum JobState {
 /// counts as joined only with a joined receipt bound to its custody.
 fn job_joined(job: &Path) -> Result<JobState> {
     private::check_directory(job)?;
-    match std::fs::symlink_metadata(job.join("started.json")) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(JobState::Unstarted);
-        }
+    let started = match std::fs::symlink_metadata(job.join("started.json")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
         Err(error) => return Err(error.into()),
-        Ok(_) => (),
+        Ok(_) => true,
+    };
+    // Incomplete preflight jobs without a start or discard record have never
+    // reached the guest and need no readable custody file.
+    let discard = match private::read(&job.join("discarded.json"), 8192) {
+        Ok(bytes) => Some(bytes),
+        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    if !started && discard.is_none() {
+        return Ok(JobState::Unstarted);
     }
     let custody: CommandCustody =
         serde_json::from_slice(&private::read(&job.join("custody.json"), 8192)?)?;
+    // The owner may explicitly discard only a job with positive no-start
+    // evidence and no recovery files. Keep this durable marker for admission.
+    if let Some(bytes) = discard {
+        let discarded: CommandCustody = serde_json::from_slice(&bytes)?;
+        if discarded != custody || started {
+            return Err(Error::Conflict("command discard proof changed"));
+        }
+        let root = job
+            .parent()
+            .and_then(Path::parent)
+            .ok_or(Error::PrivateState)?;
+        CommandBackend::discard_unstarted_without_receipt(root, &custody)?;
+        return Ok(JobState::Joined);
+    }
     for name in ["outcome.json", "recovered.json"] {
         match private::read(&job.join(name), 2 * 1024 * 1024) {
             Ok(bytes) => {
@@ -446,6 +468,87 @@ fn identifier(value: &Id) -> bool {
 }
 
 impl CommandBackend {
+    /// A missing start record is independent no-dispatch evidence: the host
+    /// persists it before submitting to the guest. Never discard a started
+    /// job, an extant receipt, or a live owner. The file stays for audit.
+    pub fn discard_unstarted_without_receipt(root: &Path, custody: &CommandCustody) -> Result<()> {
+        let root = private::check_directory(root)?;
+        if custody.version != 1
+            || !identifier(&custody.command_id)
+            || !identifier(&custody.run_id)
+            || !hash(&custody.workspace_id)
+            || !hash(&custody.snapshot_sha256)
+            || !hash(&custody.request_sha256)
+            || !hash(&custody.backend_sha256)
+        {
+            return Err(Error::Conflict("invalid recorded command authority"));
+        }
+        let job = private::check_directory(&root.join("jobs").join(custody.command_id.as_str()))?;
+        let recorded: CommandCustody =
+            serde_json::from_slice(&private::read(&job.join("custody.json"), 8192)?)?;
+        if recorded != *custody {
+            return Err(Error::Conflict("recorded command custody changed"));
+        }
+        for name in [
+            "started.json",
+            "outcome.json",
+            "recovered.json",
+            "guest-result.json",
+            "guest-result-binding.json",
+            "changes.json",
+        ] {
+            match std::fs::symlink_metadata(job.join(name)) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                Ok(_) => {
+                    return Err(Error::Conflict(
+                        "command recovery file or start record exists; discard refused",
+                    ));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        match private::read(&job.join("discarded.json"), 8192) {
+            Ok(bytes) if serde_json::from_slice::<CommandCustody>(&bytes)? == *custody => (),
+            Ok(_) => return Err(Error::Conflict("command discard proof changed")),
+            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => return Err(error),
+        }
+        match private::read(&job.join("owner.json"), 8192) {
+            Ok(bytes) => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Owner {
+                    pid: u32,
+                    instance: Id,
+                }
+                let owner: Owner = serde_json::from_slice(&bytes)?;
+                if owner.pid <= 1
+                    || !identifier(&owner.instance)
+                    || crate::os::process_exists(owner.pid) != Some(false)
+                {
+                    return Err(Error::Conflict("command owner stop is unproven"));
+                }
+            }
+            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => return Err(error),
+        }
+        Ok(())
+    }
+
+    /// Persist the checked no-start proof, leaving the job history in place.
+    pub fn mark_discarded(root: &Path, custody: &CommandCustody) -> Result<()> {
+        Self::discard_unstarted_without_receipt(root, custody)?;
+        let job = root.join("jobs").join(custody.command_id.as_str());
+        let bytes = serde_json::to_vec(custody)?;
+        match private::read(&job.join("discarded.json"), 8192) {
+            Ok(existing) if existing == bytes => Ok(()),
+            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                private::create(&job.join("discarded.json"), &bytes)
+            }
+            _ => Err(Error::Conflict("command discard proof changed")),
+        }
+    }
+
     /// Recover an already durable joined result across an explicit backend
     /// refresh. This is read-only and never infers exit from a new VM, a missing
     /// process or the current manifest. Unjoined work still needs its old guest.
@@ -1332,6 +1435,44 @@ mod tests {
         };
         let custody = backend.prepare(&input, &request).unwrap();
         (input, request, custody)
+    }
+
+    #[test]
+    fn command_discard_requires_no_start_and_no_recovery_file() {
+        let (_temp, backend) = fixture();
+        let partial = private::directory(&backend.root.join("jobs").join("cmd_partial")).unwrap();
+        assert_eq!(job_joined(&partial).unwrap(), JobState::Unstarted);
+        let (_, _, first) = prepared(&backend);
+        let job = backend.root.join("jobs").join(first.command_id.as_str());
+        backend.mark_pending(&first.command_id).unwrap();
+        CommandBackend::discard_unstarted_without_receipt(&backend.root, &first).unwrap();
+        CommandBackend::mark_discarded(&backend.root, &first).unwrap();
+        assert_eq!(job_joined(&job).unwrap(), JobState::Joined);
+        assert_eq!(
+            first,
+            serde_json::from_slice::<CommandCustody>(
+                &private::read(&job.join("discarded.json"), 8192).unwrap()
+            )
+            .unwrap()
+        );
+        let (_, _, started) = prepared(&backend);
+        let started_job = backend.root.join("jobs").join(started.command_id.as_str());
+        private::create(&started_job.join("started.json"), b"{}").unwrap();
+        assert!(
+            CommandBackend::discard_unstarted_without_receipt(&backend.root, &started).is_err()
+        );
+        let (_, _, recoverable) = prepared(&backend);
+        let recoverable_job = backend
+            .root
+            .join("jobs")
+            .join(recoverable.command_id.as_str());
+        private::create(&recoverable_job.join("outcome.json"), b"{}").unwrap();
+        assert!(
+            CommandBackend::discard_unstarted_without_receipt(&backend.root, &recoverable).is_err()
+        );
+        assert!(
+            CommandBackend::discard_unstarted_without_receipt(&backend.root, &started).is_err()
+        );
     }
 
     #[test]

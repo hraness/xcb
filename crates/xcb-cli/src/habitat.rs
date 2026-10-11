@@ -83,6 +83,9 @@ pub enum BacklogCommand {
         /// Current task revision; a stale dismissal is rejected.
         #[arg(long)]
         revision: u64,
+        /// Accept that a recorded reply's delivery cannot be proven; do not retry it.
+        #[arg(long)]
+        accept_unreconciled_reply: bool,
     },
     /// Hold work for later; --ready releases it immediately.
     Add {
@@ -1092,10 +1095,16 @@ pub async fn backlog(
             runnable = true;
             task
         }
-        Some(BacklogCommand::Dismiss { id, revision }) => {
+        Some(BacklogCommand::Dismiss {
+            id,
+            revision,
+            accept_unreconciled_reply,
+        }) => {
             let id = store.resolve_task(&id)?;
             let runs = xcb_runtime::store::Store::open(root)?;
-            store.dismiss_uncertain(&runs, &id, revision).await?
+            store
+                .dismiss_uncertain_with_reply(&runs, &id, revision, accept_unreconciled_reply)
+                .await?
         }
         None => {
             let tasks = match workspace {
@@ -1579,8 +1588,19 @@ pub async fn schedules(
 pub fn attention(root: &Path, json: bool) -> Result<i32> {
     let store = ManagedStore::open(root)?;
     let tasks = store.attention(256)?;
+    let runs = xcb_runtime::store::Store::open(root)?;
     if json {
-        crate::print_json(tasks)?;
+        let rows = tasks
+            .iter()
+            .map(|task| {
+                let mut value = serde_json::to_value(task)?;
+                if task.state == xcb_runtime::managed::TaskState::Uncertain {
+                    value["closureBlocker"] = store.uncertain_closure_blocker(&runs, task)?.into();
+                }
+                Ok::<_, Error>(value)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        crate::print_json(rows)?;
     } else if tasks.is_empty() {
         println!("No questions, approvals or actions need attention.");
     } else {
@@ -1598,6 +1618,12 @@ pub fn attention(root: &Path, json: bool) -> Result<i32> {
             if task.attention == Some(State::NeedsApproval) {
                 println!("  Inspect the gated action; a backlog reply does not grant permission.");
             }
+            if task.state == xcb_runtime::managed::TaskState::Uncertain {
+                println!(
+                    "  Closure blocker: {}",
+                    store.uncertain_closure_blocker(&runs, &task)?
+                );
+            }
         }
     }
     Ok(0)
@@ -1610,6 +1636,31 @@ mod tests {
 
     fn parses(args: &[&str]) -> bool {
         crate::Cli::try_parse_from(std::iter::once("xcb").chain(args.iter().copied())).is_ok()
+    }
+
+    #[test]
+    fn explicit_reply_acceptance_requires_a_revision_checked_owner_dismissal() {
+        assert!(parses(&[
+            "backlog",
+            "dismiss",
+            "t_example",
+            "--revision",
+            "6"
+        ]));
+        assert!(parses(&[
+            "backlog",
+            "dismiss",
+            "t_example",
+            "--revision",
+            "6",
+            "--accept-unreconciled-reply"
+        ]));
+        assert!(!parses(&[
+            "backlog",
+            "dismiss",
+            "t_example",
+            "--accept-unreconciled-reply"
+        ]));
     }
 
     #[test]

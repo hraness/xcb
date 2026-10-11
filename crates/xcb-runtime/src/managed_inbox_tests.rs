@@ -1060,3 +1060,137 @@ async fn late_guidance_neutralizes_automatic_checkpoints_but_preserves_explicit_
         }
     }
 }
+
+#[tokio::test]
+async fn owner_may_close_both_stranded_reply_shapes_without_claiming_delivery() {
+    for changed_prompt in [false, true] {
+        let f = fixture().await;
+        let accepted = guidance(&f, "Keep this reply in the task record");
+        let (running, prompt) = prepare(&f, &f.task).await;
+        if changed_prompt {
+            record(&f, "Different prompt", &outcome());
+        } else {
+            let session = f.store.session(&f.session.id).unwrap().unwrap();
+            f.store
+                .append_message(
+                    &session.id,
+                    session.revision,
+                    &Message {
+                        id: new_id("input"),
+                        role: Role::User,
+                        text: prompt.clone(),
+                        attachments: vec![],
+                        at_ms: now_ms(),
+                        provenance: None,
+                    },
+                )
+                .unwrap();
+        }
+        let held = f
+            .managed
+            .finish(&f.store, &running.id, Ok(outcome()))
+            .await
+            .unwrap();
+        assert_eq!(held.state, TaskState::Uncertain);
+        assert!(
+            f.managed
+                .uncertain_closure_blocker(&f.store, &held)
+                .unwrap()
+                .contains("--accept-unreconciled-reply")
+        );
+        assert!(
+            f.managed
+                .reconcile_uncertain(&f.store, &held.id, held.revision)
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            f.managed
+                .dismiss_uncertain(&f.store, &held.id, held.revision)
+                .await,
+            Err(Error::Conflict(
+                "reply delivery is unreconciled; use --accept-unreconciled-reply only after checking it"
+            ))
+        ));
+        assert!(
+            f.managed
+                .dismiss_uncertain_with_reply(&f.store, &held.id, held.revision + 1, true)
+                .await
+                .is_err()
+        );
+        let dismissed = f
+            .managed
+            .dismiss_uncertain_with_reply(&f.store, &held.id, held.revision, true)
+            .await
+            .unwrap();
+        assert_eq!(dismissed.state, TaskState::Failed);
+        assert!(dismissed.dismissed);
+        assert_eq!(dismissed.attempts, held.attempts);
+        assert_eq!(dismissed.user_inputs, held.user_inputs);
+        assert!(dismissed.detail.contains("without asserting delivery"));
+        assert!(prompt.contains(&accepted.text));
+        let after = event(&f, &accepted.id);
+        assert_eq!(after.status, "closed");
+        assert!(after.reason.unwrap().contains("unreconciled reply"));
+        assert!(after.receipt.is_none());
+        assert!(f.managed.inbox_batch(&dismissed.id).unwrap().is_none());
+        assert!(
+            f.managed
+                .dismiss_uncertain_with_reply(&f.store, &dismissed.id, dismissed.revision, true)
+                .await
+                .is_err()
+        );
+        f.managed.verify_task(&dismissed.id).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn live_worker_blocks_explicit_unreconciled_reply_dismissal() {
+    let f = fixture().await;
+    guidance(&f, "Do not lose this reply");
+    let (running, prompt) = prepare(&f, &f.task).await;
+    let session = f.store.session(&f.session.id).unwrap().unwrap();
+    f.store
+        .append_message(
+            &session.id,
+            session.revision,
+            &Message {
+                id: new_id("input"),
+                role: Role::User,
+                text: prompt,
+                attachments: vec![],
+                at_ms: now_ms(),
+                provenance: None,
+            },
+        )
+        .unwrap();
+    let held = f
+        .managed
+        .finish(&f.store, &running.id, Ok(outcome()))
+        .await
+        .unwrap();
+    let session = f.store.session(&f.session.id).unwrap().unwrap();
+    let run = f
+        .store
+        .prepare_run(&session.id, session.revision, now_ms())
+        .unwrap();
+    assert!(
+        f.managed
+            .uncertain_closure_blocker(&f.store, &held)
+            .unwrap()
+            .contains(&run.id.to_string())
+    );
+    assert!(matches!(
+        f.managed
+            .dismiss_uncertain_with_reply(&f.store, &held.id, held.revision, true)
+            .await,
+        Err(Error::Conflict(
+            "worker process or effects still require recovery"
+        ))
+    ));
+    f.store.settle(&run, State::Uncertain, now_ms()).unwrap();
+    assert_eq!(
+        f.managed.task(&held.id).unwrap().unwrap().revision,
+        held.revision
+    );
+}

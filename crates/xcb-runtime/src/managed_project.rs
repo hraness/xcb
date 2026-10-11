@@ -849,8 +849,53 @@ impl ManagedStore {
         id: &Id,
         expected_revision: u64,
     ) -> Result<ManagedTask> {
-        self.dismiss_uncertain_as(store, id, expected_revision, super::DISMISSED_DETAIL)
+        self.dismiss_uncertain_with_reply(store, id, expected_revision, false)
             .await
+    }
+
+    /// The explicit owner-only alternative when a retained reply has no exact
+    /// terminal turn evidence. It never asserts that the worker read the reply.
+    pub async fn dismiss_uncertain_with_reply(
+        &self,
+        store: &Store,
+        id: &Id,
+        expected_revision: u64,
+        accept_unreconciled_reply: bool,
+    ) -> Result<ManagedTask> {
+        self.dismiss_uncertain_as(
+            store,
+            id,
+            expected_revision,
+            super::DISMISSED_DETAIL,
+            accept_unreconciled_reply,
+        )
+        .await
+    }
+
+    pub fn uncertain_closure_blocker(&self, store: &Store, task: &ManagedTask) -> Result<String> {
+        if task.state != TaskState::Uncertain {
+            return Err(Error::Conflict("task is not uncertain"));
+        }
+        if let Some(run) = store.unsettled_runs()?.into_iter().find(|run| {
+            run.session.as_ref().is_some_and(|session| {
+                task.session.as_ref() == Some(session) || task.worker_sessions.contains(session)
+            })
+        }) {
+            return Ok(format!(
+                "run {} is not settled; inspect xcb recover {} before dismissal",
+                run.id, run.id
+            ));
+        }
+        if self.inbox_batch(&task.id)?.is_some() {
+            return Ok(format!(
+                "reply delivery cannot be reconciled; use xcb backlog reconcile {} --revision {} or explicitly accept it with xcb backlog dismiss {} --revision {} --accept-unreconciled-reply",
+                task.id, task.revision, task.id, task.revision
+            ));
+        }
+        Ok(format!(
+            "no unsettled run or reply; use xcb backlog reconcile {} --revision {} or xcb backlog dismiss {} --revision {}",
+            task.id, task.revision, task.id, task.revision
+        ))
     }
 
     pub(super) async fn dismiss_uncertain_as(
@@ -859,6 +904,7 @@ impl ManagedStore {
         id: &Id,
         expected_revision: u64,
         detail: &str,
+        accept_unreconciled_reply: bool,
     ) -> Result<ManagedTask> {
         let task = self
             .task(id)?
@@ -877,10 +923,14 @@ impl ManagedStore {
                 "worker process or effects still require recovery",
             ));
         }
-        if self.inbox_batch(&task.id)?.is_some() {
+        let has_batch = self.inbox_batch(&task.id)?.is_some();
+        if has_batch && !accept_unreconciled_reply {
             return Err(Error::Conflict(
-                "a delivered reply still requires reconciliation",
+                "reply delivery is unreconciled; use --accept-unreconciled-reply only after checking it",
             ));
+        }
+        if !has_batch && accept_unreconciled_reply {
+            return Err(Error::Conflict("no unreconciled reply to accept"));
         }
         let mut next = task.clone();
         next.state = TaskState::Failed;
@@ -889,7 +939,11 @@ impl ManagedStore {
         next.dismissed = true;
         next.next_prompt.clear();
         next.attachments.clear();
-        next.detail = detail.into();
+        next.detail = if has_batch {
+            format!("{detail}; owner accepted unreconciled reply without asserting delivery")
+        } else {
+            detail.into()
+        };
         next.revision += 1;
         next.updated_at_ms = now_ms().max(task.updated_at_ms);
         let message = Self::assistant(
@@ -897,7 +951,20 @@ impl ManagedStore {
             Some(id),
             next.revision,
         );
-        self.transition(&task, next, Some(message)).await
+        if has_batch {
+            self.transition_inbox(
+                &task,
+                next,
+                Some(message),
+                &[],
+                None,
+                None,
+                Some(&inbox::Change::AcceptUnreconciled),
+            )
+            .await
+        } else {
+            self.transition(&task, next, Some(message)).await
+        }
     }
 
     pub async fn reconcile_uncertain(
