@@ -1562,7 +1562,13 @@ impl ManagedStore {
         }
         for task in uncertain {
             match self
-                .dismiss_uncertain_as(store, &task.id, task.revision, SCHEDULE_DISMISSED_DETAIL)
+                .dismiss_uncertain_as(
+                    store,
+                    &task.id,
+                    task.revision,
+                    SCHEDULE_DISMISSED_DETAIL,
+                    false,
+                )
                 .await
             {
                 Ok(_) | Err(Error::Conflict(_)) => {}

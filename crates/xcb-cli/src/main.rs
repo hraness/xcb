@@ -412,6 +412,9 @@ enum Commands {
         /// Apply the recovery instead of only reporting what would change.
         #[arg(long)]
         yes: bool,
+        /// Decline an unsubmitted command only if no recovery file or start record exists.
+        #[arg(long, requires_all = ["run", "yes"], conflicts_with = "launch_artifacts")]
+        discard: bool,
         /// List leftover launch folders; --yes removes only those whose runs
         /// xcb confirmed finished. The rest stay.
         #[arg(long = "launch-artifacts")]
@@ -3643,6 +3646,7 @@ async fn dispatch_inner(
         Some(Commands::Recover {
             run,
             yes,
+            discard,
             launch_artifacts,
         }) => {
             if launch_artifacts {
@@ -3695,6 +3699,11 @@ async fn dispatch_inner(
                 let (run, mut run_digest) = store
                     .recovery_candidate(&run_id)?
                     .ok_or(Error::Unavailable("run not found"))?;
+                if discard && run.command_custody.is_none() {
+                    return Err(Error::Conflict(
+                        "--discard requires an unsubmitted command with custody",
+                    ));
+                }
                 if let Some(info) = store.inspect_claude_auth_recovery(&run_id, &run_digest)? {
                     if !yes {
                         if cli.json {
@@ -3799,7 +3808,11 @@ async fn dispatch_inner(
                 }
                 process::prove_process_group_absent(pid)?;
                 if run.command_custody.is_some() {
-                    xcb_runtime::command_tool::recover(&store, &run, &run_digest).await?;
+                    if discard {
+                        xcb_runtime::command_tool::discard_unstarted(&store, &run, &run_digest)?;
+                    } else {
+                        xcb_runtime::command_tool::recover(&store, &run, &run_digest).await?;
+                    }
                     run_digest = store
                         .recovery_candidate(&run_id)?
                         .ok_or(Error::Unavailable("run not found"))?
@@ -3808,13 +3821,18 @@ async fn dispatch_inner(
                 let recovered = store.recover_run(&run_id, &run_digest, now_ms())?;
                 if cli.json {
                     print_json(
-                        json!({"version":1,"recovered":recovered.id,"phase":recovered.phase,"pid":pid}),
+                        json!({"version":1,"recovered":recovered.id,"phase":recovered.phase,"pid":pid,"discardedUnstartedCommand":discard}),
                     )?;
                 } else {
                     println!(
                         "Recovered run {}: process group {} has exited and its account is free.",
                         recovered.id, pid
                     );
+                    if discard {
+                        println!(
+                            "The unsubmitted command was discarded; no workspace edits were applied."
+                        );
+                    }
                 }
             } else {
                 let runs = store.unsettled_runs()?;
@@ -6021,6 +6039,7 @@ mod tests {
             Some(Commands::Recover {
                 run: None,
                 yes: false,
+                discard: false,
                 launch_artifacts: false
             })
         ));
@@ -6031,6 +6050,7 @@ mod tests {
             Some(Commands::Recover {
                 run: Some(_),
                 yes: false,
+                discard: false,
                 launch_artifacts: false
             })
         ));
@@ -6041,9 +6061,25 @@ mod tests {
             Some(Commands::Recover {
                 run: Some(_),
                 yes: true,
+                discard: false,
                 launch_artifacts: false
             })
         ));
+
+        assert!(Cli::try_parse_from(["xcb", "recover", "r_abc123", "--yes", "--discard"]).is_ok());
+        assert!(Cli::try_parse_from(["xcb", "recover", "r_abc123", "--discard"]).is_err());
+        assert!(Cli::try_parse_from(["xcb", "recover", "--yes", "--discard"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "xcb",
+                "recover",
+                "r_abc123",
+                "--yes",
+                "--discard",
+                "--launch-artifacts"
+            ])
+            .is_err()
+        );
 
         // The disposable-file sweep is a separate subject from run recovery,
         // and asking for both at once is rejected rather than guessed at.
@@ -6053,6 +6089,7 @@ mod tests {
             Some(Commands::Recover {
                 run: None,
                 yes: false,
+                discard: false,
                 launch_artifacts: true
             })
         ));
@@ -6062,6 +6099,7 @@ mod tests {
             Some(Commands::Recover {
                 run: None,
                 yes: true,
+                discard: false,
                 launch_artifacts: true
             })
         ));

@@ -643,3 +643,99 @@ fn pending_scratch_cleanup_preserves_joined_publication() {
         fixture.replacement
     );
 }
+
+#[test]
+fn recovery_discard_refuses_live_owner_stale_digest_and_recoverable_command() {
+    use xcb_core::Provider;
+    let temp = tempfile::tempdir().unwrap();
+    let root = xcb_core::canonical(temp.path()).unwrap();
+    let store = Store::open(&root.join("state")).unwrap();
+    let account = store
+        .add_account(Provider::Codex, "Synthetic", 1, None)
+        .unwrap();
+    let prepared = store.prepare_probe(&account.id, None, 2).unwrap();
+    let live = store.mark_spawned(&prepared, i32::MAX as u32).unwrap();
+    let custody = CommandCustody {
+        version: 1,
+        command_id: new_id("cmd"),
+        run_id: live.id.clone(),
+        workspace_id: "a".repeat(64),
+        snapshot_sha256: "b".repeat(64),
+        request_sha256: "c".repeat(64),
+        backend_sha256: "d".repeat(64),
+        boot_id: "00000000-0000-0000-0000-000000000000".into(),
+    };
+    store.record_command_custody(&live, &custody).unwrap();
+    let command_root = private::directory(&root.join("commands")).unwrap();
+    private::directory(&command_root.join("jobs")).unwrap();
+    let job =
+        private::directory(&command_root.join("jobs").join(custody.command_id.as_str())).unwrap();
+    private::create(
+        &job.join("custody.json"),
+        &serde_json::to_vec(&custody).unwrap(),
+    )
+    .unwrap();
+    let (live, live_digest) = store.recovery_candidate(&live.id).unwrap().unwrap();
+    assert!(discard_unstarted_in(&command_root, &store, &live, &live_digest).is_err());
+    assert_eq!(store.unsettled_runs().unwrap().len(), 1);
+    let dead = store.orphan_run_for_test(&store.run(&live.id).unwrap().unwrap());
+    let (_, digest) = store.recovery_candidate(&dead.id).unwrap().unwrap();
+    dead.verify_recovery_stop().unwrap();
+    assert!(discard_unstarted_in(&command_root, &store, &dead, &live_digest).is_err());
+    private::create(&job.join("outcome.json"), b"{}").unwrap();
+    let refusal = discard_unstarted_in(&command_root, &store, &dead, &digest)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refusal.contains("recovery file or start record exists"),
+        "{refusal}"
+    );
+    assert_eq!(store.unsettled_runs().unwrap().len(), 1);
+    assert!(store.prepare_probe(&account.id, None, 4).is_err());
+}
+
+#[test]
+fn recovery_discard_of_proven_unsubmitted_command_retains_job_and_requires_fresh_run_digest() {
+    use xcb_core::Provider;
+    let temp = tempfile::tempdir().unwrap();
+    let root = xcb_core::canonical(temp.path()).unwrap();
+    let store = Store::open(&root.join("state")).unwrap();
+    let account = store
+        .add_account(Provider::Codex, "Synthetic", 1, None)
+        .unwrap();
+    let prepared = store.prepare_probe(&account.id, None, 2).unwrap();
+    let live = store.mark_spawned(&prepared, i32::MAX as u32).unwrap();
+    let custody = CommandCustody {
+        version: 1,
+        command_id: new_id("cmd"),
+        run_id: live.id.clone(),
+        workspace_id: "a".repeat(64),
+        snapshot_sha256: "b".repeat(64),
+        request_sha256: "c".repeat(64),
+        backend_sha256: "d".repeat(64),
+        boot_id: "00000000-0000-0000-0000-000000000000".into(),
+    };
+    store.record_command_custody(&live, &custody).unwrap();
+    let dead = store.orphan_run_for_test(&store.run(&live.id).unwrap().unwrap());
+    let (_, digest) = store.recovery_candidate(&dead.id).unwrap().unwrap();
+    let command_root = private::directory(&root.join("commands")).unwrap();
+    private::directory(&command_root.join("jobs")).unwrap();
+    let job =
+        private::directory(&command_root.join("jobs").join(custody.command_id.as_str())).unwrap();
+    private::create(
+        &job.join("custody.json"),
+        &serde_json::to_vec(&custody).unwrap(),
+    )
+    .unwrap();
+    assert!(discard_unstarted_in(&command_root, &store, &dead, "stale").is_err());
+    assert!(job.join("discarded.json").exists());
+    assert_eq!(store.unsettled_runs().unwrap().len(), 1);
+    let cleared = discard_unstarted_in(&command_root, &store, &dead, &digest).unwrap();
+    assert!(cleared.command_custody.is_none());
+    assert!(job.join("discarded.json").exists());
+    assert!(store.recover_run(&dead.id, &digest, 4).is_err());
+    let (_, fresh) = store.recovery_candidate(&dead.id).unwrap().unwrap();
+    store.recover_run(&dead.id, &fresh, 4).unwrap();
+    assert_eq!(store.unsettled_runs().unwrap().len(), 0);
+    assert!(store.prepare_probe(&account.id, None, 5).is_ok());
+}

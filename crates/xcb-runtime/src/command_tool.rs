@@ -741,6 +741,35 @@ fn publish(
     (result, effects)
 }
 
+/// An owner can decline an unsubmitted command only when its durable job has
+/// no start record and no recovery file. A stopped provider group alone is
+/// never evidence that a started guest command joined.
+pub fn discard_unstarted(
+    store: &Store,
+    run: &RunRecord,
+    expected_digest: &str,
+) -> Result<RunRecord> {
+    let root = default_root()?;
+    discard_unstarted_in(&root, store, run, expected_digest)
+}
+
+fn discard_unstarted_in(
+    root: &Path,
+    store: &Store,
+    run: &RunRecord,
+    expected_digest: &str,
+) -> Result<RunRecord> {
+    run.verify_recovery_stop()?;
+    let custody = run
+        .command_custody
+        .as_ref()
+        .ok_or(Error::Conflict("run has no command custody"))?;
+    CommandBackend::mark_discarded(root, custody)?;
+    // The positive no-start marker is durable before releasing custody. A
+    // crash or stale digest leaves the run held; the same marker is retryable.
+    store.reconcile_command_custody(&run.id, expected_digest, custody)
+}
+
 /// Explicit recovery reads the exact trusted guest receipt before clearing the
 /// pending marker. It never publishes staged workspace edits during recovery.
 pub async fn recover(store: &Store, run: &RunRecord, expected_digest: &str) -> Result<RunRecord> {
@@ -750,9 +779,30 @@ pub async fn recover(store: &Store, run: &RunRecord, expected_digest: &str) -> R
         .as_ref()
         .ok_or(Error::Conflict("run has no command custody"))?;
     let root = default_root()?;
-    let outcome = match CommandBackend::recover_recorded_join(&root, custody)? {
+    let outcome = match CommandBackend::recover_recorded_join(&root, custody).map_err(|error| {
+        Error::guided(
+            format!(
+                "recorded command recovery file check failed: {error}; account custody retained"
+            ),
+            format!("xcb recover {}", run.id),
+        )
+    })? {
         Some(outcome) => outcome,
-        None => CommandBackend::load(&root)?.recover(custody).await?,
+        None => CommandBackend::load(&root)
+            .map_err(|error| {
+                Error::guided(
+                    format!("command backend check failed: {error}; account custody retained"),
+                    format!("xcb recover {}", run.id),
+                )
+            })?
+            .recover(custody)
+            .await
+            .map_err(|error| {
+                Error::guided(
+                    format!("guest command status check failed: {error}; account custody retained"),
+                    format!("xcb recover {}", run.id),
+                )
+            })?,
     };
     if !outcome.joined || outcome.custody != *custody {
         return Err(Error::Unavailable(
