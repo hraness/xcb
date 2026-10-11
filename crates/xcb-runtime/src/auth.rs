@@ -1098,9 +1098,11 @@ pub(crate) fn recover_codex_auth(
     if current_revision != metadata.original_revision {
         // Concurrent runs on one account each refresh their own copy of the
         // original; whichever persists first leaves the others unable to.
-        // Persistent credentials for the same account that were refreshed
-        // strictly after this run's copy supersede it: keep them, discard
-        // the stale copy, and free the run. Anything else stays a conflict.
+        // Persistent credentials for the same account that record a different
+        // refresh than this run's copy are a sibling of it: refresh tokens are
+        // single-use, so only one branch stays valid, and the saved one is the
+        // branch another writer persisted. Keep it, discard this copy, and free
+        // the run. Identical or unreadable refresh times stay a conflict.
         if let Some(saved) = current.as_deref()
             && codex_identity(saved).is_ok_and(|saved| {
                 metadata
@@ -1110,7 +1112,7 @@ pub(crate) fn recover_codex_auth(
             })
             && matches!(
                 (codex_last_refresh(saved), codex_last_refresh(&refreshed)),
-                (Some(saved), Some(mine)) if saved > mine
+                (Some(saved), Some(mine)) if saved != mine
             )
         {
             // Nothing is written here, so there is nothing to make durable.
@@ -1930,11 +1932,11 @@ mod auth_custody_tests {
     }
 
     #[test]
-    fn stale_run_copy_yields_to_newer_saved_credentials_of_the_same_account() {
+    fn run_copy_yields_to_a_sibling_refresh_saved_for_the_same_account() {
         for (saved_at, recovers) in [
             ("2026-10-10T10:05:00Z", true),
+            ("2026-10-10T06:44:19Z", true),
             ("2026-10-10T06:45:00Z", false),
-            ("2026-10-10T06:00:00Z", false),
         ] {
             let directory = tempfile::tempdir().unwrap();
             let base = xcb_core::canonical(directory.path()).unwrap();
