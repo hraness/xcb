@@ -3825,15 +3825,14 @@ async fn dispatch_inner(
                     )?;
                 } else {
                     println!(
-                        "Recovered run {}: process group {} has exited and its account is free.{}",
-                        recovered.id,
-                        pid,
-                        if discard {
-                            " The unsubmitted command was discarded; no workspace edits were applied."
-                        } else {
-                            ""
-                        }
+                        "Recovered run {}: process group {} has exited and its account is free.",
+                        recovered.id, pid
                     );
+                    if discard {
+                        println!(
+                            "The unsubmitted command was discarded; no workspace edits were applied."
+                        );
+                    }
                 }
             } else {
                 let runs = store.unsettled_runs()?;
