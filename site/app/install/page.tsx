@@ -108,6 +108,15 @@ export default function Install() {
           <p>The <a href="/docs/route">route guide</a> and the <a href="/docs/sdk">SDK quickstart</a> have the details.</p>
         </PageSection>
 
+        <PageSection id="limits" title="Limits">
+          <ul>
+            <li>xcb does not lift provider usage limits or add model access. It spends the quota your subscriptions already have, through your own sign-ins, and never falls back to an API key.</li>
+            <li>Providers use xcb’s file tools and the host MCP servers you register. Provider-native shells and unrelated plugins stay off. On macOS with Apple silicon, tests and builds run offline in a <a href="/docs/workspace">Linux VM</a>; Git is read-only there.</li>
+            <li>Codex and the command runner need macOS ARM64. On Linux, Claude is the supported provider. The native Windows build runs no providers; use WSL2 for provider work.</li>
+            <li>By default each account takes one task at a time. Everything runs on this computer; there are no hosted remote commands.</li>
+          </ul>
+        </PageSection>
+
         <PageSection id="update" title="Update and uninstall">
           <p><code>xcb upgrade</code> installs the newest release the same way the installer did. To remove xcb, let running tasks finish, then run:</p>
           <CodeBlock code={uninstall} />

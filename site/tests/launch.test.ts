@@ -7,8 +7,6 @@ import { LAUNCH_STATUS, launchFacts, launchStatusFor } from "../app/launch/facts
 import {
   attentionRows,
   boardAccounts,
-  dispatchResult,
-  fleetRows,
   routeResponse,
   taskRows,
   threadLines,
@@ -99,7 +97,7 @@ describe("xcb illustration shapes", () => {
     }
   });
 
-  test("local rows match the CLI and historical remote illustrations do not activate a command", async () => {
+  test("local rows match the CLI and no remote illustration remains", async () => {
     const [main, habitat] = await Promise.all([
       read("crates/xcb-cli/src/main.rs"),
       read("crates/xcb-cli/src/habitat.rs"),
@@ -110,10 +108,6 @@ describe("xcb illustration shapes", () => {
     expect(attentionRows[0]).toMatch(/^t_\w+ · \w+ · needs input · .+$/u);
     expect(main).not.toContain("mod remote;");
     expect(await Bun.file(join(repo, "crates/xcb-cli/src/remote.rs")).exists()).toBe(false);
-    for (const row of fleetRows) {
-      expect(row).toMatch(/^d_\w+ · [\w-]+ · (daemon|controller) · (online|offline) · \w+$|^ {2}projection \w+ · rev \d+ · \d+s old( · STALE)?$/u);
-    }
-    expect(dispatchResult).toMatch(/^Posted to d_\w+ as c_\w+ \(idempotency k_\w+\)\.$/u);
   });
 
   test("the route result uses the documented fields", async () => {
