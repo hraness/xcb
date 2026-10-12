@@ -33,7 +33,7 @@ export default function Docs() {
         <header className="xcb-docs-heading">
           <p className="xcb-docs-eyebrow">The field guide</p>
           <h1>{docsHeadline}.</h1>
-          <p className="xcb-docs-lead">Excalibur (xcb) routes coding tasks across the Claude and Codex subscriptions you already pay for. Use it as your coding agent from its terminal, or send it tasks from another agent or your own app.</p>
+          <p className="xcb-docs-lead">Excalibur (xcb) is a control plane for the Claude and Codex subscriptions you already pay for. Sign in once, then send it work from your terminal, from another agent, or from your own app, and let it run unattended.</p>
         </header>
         <div className="xcb-docs-note">
           <ReleaseSummary release={publishedRelease} />

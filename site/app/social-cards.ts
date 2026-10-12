@@ -18,7 +18,7 @@ import { socialSite } from "./social";
 const cardCopy: Readonly<Record<string, { description: string; headline?: string }>> = {
   "/install": { description: "One command on macOS, Linux, or Windows, then connect an account and route a task." },
   "/reflexes": { description: "xcb answers for you once your replies certify it." },
-  "/docs": { headline: "xcb documentation", description: "Install xcb, connect Claude or Codex, and send it work." },
+  "/docs": { headline: "xcb documentation", description: "Install xcb, connect Claude or Codex, and send it work unattended." },
   "/docs/getting-started": { description: "Install xcb, connect a Claude account, and send your first task." },
   "/docs/how-routing-works": { description: "How xcb picks an account and model for each task, and why it holds the account." },
   "/docs/security": { description: "What stays on your machine, what xcb sends out, and where credentials live." },
@@ -43,8 +43,8 @@ const cardCopy: Readonly<Record<string, { description: string; headline?: string
   "/compare/openrouter": { description: "OpenRouter bills per token. xcb sends each task to a plan you already pay for." },
   "/blog": { description: "How xcb routes coding tasks across your Claude and Codex plans." },
   "/blog/one-agent-for-all-your-ai-plans": {
-    headline: "Excalibur operates your AI subscriptions",
-    description: "Log in with all your accounts, then tell your agent to use xcb.",
+    headline: "A control plane for your AI subscriptions",
+    description: "Sign in once, then ask your agent to build any topology.",
   },
   "/blog/introducing-excalibur": { description: "xcb sends each coding task to an idle Claude or Codex account of yours." },
   "/blog/how-xcb-uses-gobstopper": { description: "xcb trims stale tool output and keeps it locally." },

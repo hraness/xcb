@@ -5,9 +5,6 @@ import {
   boardAccounts,
   boardNote,
   boardPick,
-  dispatchCommand,
-  dispatchResult,
-  fleetRows,
   routeRequest,
   routeResponse,
   taskRows,
@@ -105,26 +102,6 @@ export function TasksView({ height, mode, theme }: SurfaceProps) {
       lines={lines}
       theme={theme}
       title="Terminal"
-    />
-  );
-}
-
-/** `xcb fleet` and `xcb dispatch` from a laptop. */
-export function FleetView({ height, theme }: Omit<SurfaceProps, "mode">) {
-  const lines: TerminalLine[] = [
-    { kind: "input", text: "xcb fleet" },
-    ...fleetRows.map((text): TerminalLine => ({ kind: "output", text, tone: text.includes("STALE") || text.includes("offline") ? "warn" : text.startsWith(" ") ? "muted" : undefined, beat: "fleet" })),
-    { kind: "input", text: dispatchCommand, beat: "dispatch" },
-    { kind: "output", text: dispatchResult, tone: "ok", beat: "dispatch" },
-  ];
-  return (
-    <TerminalFrame
-      density="presentation"
-      describe="Illustration of xcb fleet on a laptop: three made-up linked machines, one offline, and a task sent to the desktop at home."
-      height={height}
-      lines={lines}
-      theme={theme}
-      title="travel-laptop"
     />
   );
 }

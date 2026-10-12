@@ -183,7 +183,7 @@ describe("organized documentation", () => {
 
   test("documents pane controls, extensions, and the turn deadline", async () => {
     const html = await renderTopic("customization");
-    expect(html).toContain("The interactive terminal is removed");
+    expect(html).toContain("xcb has no terminal UI of its own");
     expect(textOf(html)).toContain("xcb panes check /absolute/path/to/pane.json");
     expect(html).not.toContain("/pane generate");
     expect(textOf(html)).toContain("xcb plugins disable auto-continue");

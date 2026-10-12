@@ -7,7 +7,6 @@
  * - thread start notice: crates/xcb-runtime (`Started … in … · named …`)
  * - running and limit lines: crates/xcb-runtime/src/managed.rs
  * - `xcb tasks`: crates/xcb-cli/src/main.rs; `xcb attention`: habitat.rs
- * - `xcb fleet` and `xcb dispatch`: crates/xcb-cli/src/remote.rs
  * - route request and result: docs/route.md
  *
  * tests/launch.test.ts reads those sources and fails when a shape drifts.
@@ -96,18 +95,6 @@ export const attentionRows = [
   "t_77c0 · thread · needs input · Which name: billing or invoicing?",
   "  Both names appear in the code. I can rename either way.",
 ] as const;
-
-/** `xcb fleet`: `<device> · <label> · <class> · <online|offline> · <status>`, then projection rows. */
-export const fleetRows = [
-  "d_513c · studio-desktop · daemon · online · active",
-  "  projection thread · rev 41 · 3s old",
-  "d_a90e · travel-laptop · controller · online · active",
-  "d_2f47 · build-box · daemon · offline · active",
-  "  projection thread · rev 12 · 5400s old · STALE",
-] as const;
-
-export const dispatchCommand = "xcb dispatch d_513c ~/src/invoice-app -p \"Run the parser tests and fix what fails\"";
-export const dispatchResult = "Posted to d_513c as c_91ad (idempotency k_3e70).";
 
 /** A route request and a trimmed result, in the shape docs/route.md documents. */
 export const routeRequest = `{

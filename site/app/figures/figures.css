@@ -1,0 +1,105 @@
+/* Landing figures: flat surfaces, hairlines, kit tokens. Motion is a single
+   CSS loop on the routing figure and stops under reduced motion. */
+.xcb-home {
+  --xcb-fig-ok: light-dark(#2d6a4f, #6fcf97);
+  --xcb-fig-warn: light-dark(#b4532a, #e38a66);
+}
+
+.xcb-routing-figure,
+.xcb-pressure,
+.xcb-mechanism { margin: 0; max-inline-size: 52rem; }
+.xcb-routing-figure figcaption,
+.xcb-pressure figcaption { margin-block-start: .9rem; color: var(--muted); font-size: var(--xcb-meta); line-height: 1.6; }
+
+.xcb-routing-figure__canvas {
+  display: block;
+  inline-size: 100%;
+  block-size: auto;
+  border: 1px solid var(--line);
+  border-radius: .75rem;
+  background: var(--hraness-material-plane, var(--surface));
+  font: 500 13px/1 var(--font-mono, ui-monospace, monospace);
+}
+.xcb-routing-figure__canvas text { fill: var(--foreground); }
+.xcb-routing-figure__canvas .xcb-routing-figure__small { font-size: 11px; font-weight: 400; fill: var(--muted); }
+.xcb-routing-figure__task rect,
+.xcb-routing-figure__account rect { fill: var(--surface); stroke: var(--line); stroke-width: 1; }
+.xcb-routing-figure__task path { fill: none; stroke: var(--line); stroke-width: 1.5; }
+.xcb-routing-figure__hub rect { fill: var(--foreground); }
+.xcb-routing-figure__hub text { fill: var(--background, var(--surface)); }
+.xcb-routing-figure__route { fill: none; stroke: var(--xcb-fig-ok); stroke-width: 2; }
+.xcb-routing-figure__route--dropped { stroke: var(--xcb-fig-warn); stroke-dasharray: 4 5; opacity: .35; }
+.xcb-routing-figure__account--limited rect { stroke: var(--xcb-fig-warn); }
+.xcb-routing-figure__account--limited text { fill: var(--muted); }
+.xcb-routing-figure__account--limited .xcb-routing-figure__small { fill: var(--xcb-fig-warn); }
+
+@media (prefers-reduced-motion: no-preference) {
+  .xcb-routing-figure__route--dropped { animation: xcb-route-drop 8s ease-in-out infinite; }
+  .xcb-routing-figure__route--shifted { animation: xcb-route-shift 8s ease-in-out infinite; }
+  .xcb-routing-figure__account--limited rect { animation: xcb-account-limit 8s ease-in-out infinite; }
+  .xcb-routing-figure__account--limited text { animation: xcb-account-dim 8s ease-in-out infinite; }
+}
+@keyframes xcb-route-drop {
+  0%, 35% { opacity: 1; stroke: var(--xcb-fig-ok); stroke-dasharray: none; }
+  45%, 100% { opacity: .35; stroke: var(--xcb-fig-warn); stroke-dasharray: 4 5; }
+}
+@keyframes xcb-route-shift {
+  0%, 45% { opacity: 0; }
+  55%, 100% { opacity: 1; }
+}
+@keyframes xcb-account-limit {
+  0%, 35% { stroke: var(--line); }
+  45%, 100% { stroke: var(--xcb-fig-warn); }
+}
+@keyframes xcb-account-dim {
+  0%, 35% { opacity: 1; }
+  45%, 100% { opacity: .75; }
+}
+
+/* Mechanism diagram */
+.xcb-mechanism .hraness-diagram__canvas { font: 500 14px/1 var(--font-text, system-ui, sans-serif); }
+.xcb-mechanism text { fill: var(--foreground); }
+.xcb-mechanism .xcb-mechanism__small { font-size: 12px; font-weight: 400; fill: var(--muted); }
+.xcb-mechanism__box rect { fill: var(--surface); stroke: var(--line); stroke-width: 1; }
+.xcb-mechanism__box--hub > rect { fill: var(--hraness-material-plane, var(--surface)); }
+.xcb-mechanism__primitive rect { fill: var(--surface); stroke: var(--line); }
+.xcb-mechanism__primitive text { font-family: var(--font-mono, ui-monospace, monospace); font-size: 13px; }
+.xcb-mechanism__arrows path { fill: none; stroke: var(--muted); stroke-width: 1.5; }
+
+/* Pressure figure */
+.xcb-pressure__grid { display: grid; grid-template-columns: minmax(0, 1fr) 11rem; gap: 1.5rem; border: 1px solid var(--line); border-radius: .75rem; padding: 1.25rem 1.5rem; background: var(--hraness-material-plane, var(--surface)); }
+.xcb-pressure__signals { margin: 0; display: grid; gap: 1rem; }
+.xcb-pressure__signal dt { font-weight: 600; font-size: .9rem; }
+.xcb-pressure__signal dd { margin: .25rem 0 0; display: grid; gap: .35rem; }
+.xcb-pressure__value { font: 500 .85rem/1.3 var(--font-mono, ui-monospace, monospace); }
+.xcb-pressure__bar { display: block; block-size: .4rem; border-radius: .2rem; background: var(--line); overflow: hidden; }
+.xcb-pressure__bar > span { display: block; block-size: 100%; background: var(--xcb-fig-ok); }
+.xcb-pressure__note { color: var(--muted); font-size: var(--xcb-meta); line-height: 1.5; }
+.xcb-pressure__pool { display: grid; align-content: center; justify-items: center; gap: .4rem; border-inline-start: 1px solid var(--line); padding-inline-start: 1.5rem; }
+.xcb-pressure__pool-label, .xcb-pressure__pool-note { color: var(--muted); font-size: var(--xcb-meta); }
+.xcb-pressure__pool-count { font: 600 2.5rem/1 var(--font-text, system-ui, sans-serif); letter-spacing: -.03em; }
+.xcb-pressure__pool-dots { display: grid; grid-template-columns: repeat(4, .8rem); gap: .35rem; }
+.xcb-pressure__pool-dots > span { inline-size: .8rem; block-size: .8rem; border-radius: 50%; background: var(--line); }
+.xcb-pressure__pool-dots > span[data-active="true"] { background: var(--xcb-fig-ok); }
+
+/* Idea section: one owner quote with its date. */
+.xcb-idea { margin: 0; max-inline-size: var(--xcb-prose); padding-inline-start: 1.25rem; border-inline-start: 2px solid var(--line); }
+.xcb-idea p { margin: 0 0 .75rem; font-size: 1.25rem; line-height: 1.5; }
+.xcb-idea cite { display: block; color: var(--muted); font-size: var(--xcb-meta); font-style: normal; }
+
+/* Hero proof: the route dry run beside the copy. */
+.xcb-route-proof { margin: 0; inline-size: 100%; }
+.xcb-route-proof .xcb-route-proof__pre { margin: 0; padding: 1rem 1.15rem; overflow-x: auto; font: var(--hraness-type-code-size, .82rem)/1.6 var(--font-mono, ui-monospace, monospace); white-space: pre; color: var(--foreground); background: var(--hraness-material-plane, var(--surface)); }
+.xcb-route-proof__comment { color: var(--muted); }
+.xcb-route-proof__key { color: var(--muted); }
+.xcb-route-proof__pick { color: var(--xcb-fig-ok); font-weight: 600; }
+
+@media (max-width: 48rem) {
+  .xcb-pressure__grid { grid-template-columns: 1fr; }
+  .xcb-pressure__pool { border-inline-start: 0; border-block-start: 1px solid var(--line); padding-inline-start: 0; padding-block-start: 1rem; }
+}
+@media (forced-colors: active) {
+  .xcb-routing-figure__hub rect { fill: CanvasText; }
+  .xcb-routing-figure__hub text { fill: Canvas; }
+  .xcb-pressure__bar > span, .xcb-pressure__pool-dots > span[data-active="true"] { background: Highlight; }
+}

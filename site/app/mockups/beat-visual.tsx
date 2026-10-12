@@ -1,10 +1,10 @@
 import type { LaunchBeat } from "@hraness/design-kit/launch";
 
 import type { RouterMode } from "./fixtures";
-import { AccountsBoard, FleetView, InstallView, RouteSplit, RunDiagram, TasksView, ThreadView } from "./surfaces";
+import { AccountsBoard, InstallView, RouteSplit, RunDiagram, TasksView, ThreadView } from "./surfaces";
 
 /** The mockup ids a launch beat can name, each drawn by one component. */
-export const beatMockupIds = ["thread", "accounts", "tasks", "fleet", "run", "route", "install"] as const;
+export const beatMockupIds = ["thread", "accounts", "tasks", "run", "route", "install"] as const;
 export type BeatMockupId = (typeof beatMockupIds)[number];
 
 function modeOf(state: Readonly<Record<string, string>>): RouterMode {
@@ -23,8 +23,6 @@ export function BeatVisual({ beat }: Readonly<{ beat: LaunchBeat }>) {
       return <AccountsBoard mode={modeOf(visual.state)} />;
     case "tasks":
       return <TasksView mode={modeOf(visual.state)} />;
-    case "fleet":
-      return <FleetView />;
     case "run":
       return <RunDiagram focus={visual.state["focus"] === "limits" ? "limits" : "all"} />;
     case "route":

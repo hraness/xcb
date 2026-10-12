@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 /** The docs overview's headline and meta description, shared with its share card. */
 export const docsHeadline = "Set up xcb and route your first task";
-export const docsDescription = "Install xcb, connect Claude or Codex accounts, and send work through the headless CLI, JSON contract, or SDK.";
+export const docsDescription = "Install xcb, connect Claude or Codex accounts, and send it work from your terminal, from another agent as JSON, or from the SDK.";
 
 /** Sidebar and overview groups, in order: both readers, then each reader. */
 export const docsGroups = [

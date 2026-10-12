@@ -49,5 +49,6 @@
   "type": "module",
   "overrides": {
     "fast-glob": "npm:tinyglobby@0.2.17"
-  }
+  },
+  "description": "Excalibur (xcb) is a control plane for Codex and Claude Code subscriptions. Sign in once, then agents route work by quota and health and run unattended."
 }

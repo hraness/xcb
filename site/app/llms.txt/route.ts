@@ -1,6 +1,7 @@
 import { blogPostPath, indexableBlogPosts } from "../blog/posts";
 import { providerStatus, supportedBuilds } from "../docs/provider-status";
 import { docsTopics } from "../docs/topics";
+import { productMessaging } from "../messaging";
 import { nativePlatforms, publicationMarkdown, publishedRelease } from "../publication";
 
 // llms.txt is a machine-readable site summary. Its release claim comes from
@@ -22,9 +23,9 @@ const blogLines = indexableBlogPosts.map((entry) => `- [${entry.title}](https://
 
 const body = `# Excalibur (xcb)
 
-> Excalibur (xcb) is a tool for operating AI subscriptions. Log in with all your Claude and Codex accounts, then tell your agent to use xcb.
+> ${productMessaging.meta}
 
-xcb is a command-line router for developers who pay for more than one coding agent, and for the agents and apps that work for them. Each task runs on an account that is signed in, idle, and not at a known usage limit, on a model that fits the work, and xcb holds that account until the provider process exits. It is MIT licensed. ${releaseLine}
+xcb is a command-line control plane for developers who pay for more than one coding agent, and for the agents and apps that work for them. There is no app or terminal UI: you sign in to your Claude and Codex accounts once, then an agent creates projects, tasks, schedules, routes, and hooks through xcb's commands. Each task runs on an account that is signed in, idle, and not at a known usage limit, on a model that fits the work, and xcb holds that account until the provider process exits. Agents coordinate through the backlog and the attention queue, and with resource protection on, xcb defers new workers under memory, disk, or swap pressure. It is MIT licensed. ${releaseLine}
 
 ## Use it as a coding agent
 

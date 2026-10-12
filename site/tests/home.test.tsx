@@ -50,7 +50,7 @@ test("the homepage leads with the registry headline and installs with one comman
   new HTMLRewriter().on('header[aria-labelledby="hero-title"] .hraness-marketing-hero__summary', { text(chunk) { heroSummary.push(chunk.text); } }).transform(html);
   expect(heroSummary.join("")).toBe(productMessaging.hero.summary);
   for (const provider of ["Claude", "Codex"]) expect(heroSummary.join("")).toContain(provider);
-  expect(heroSummary.join("")).toContain("account");
+  expect(heroSummary.join("")).toContain("subscriptions");
   if (publishedRelease === null) {
     expect(html).toContain("./scripts/install-native.sh");
   } else {
@@ -145,18 +145,24 @@ test("the shared header keeps a named home link and exact-artwork foil fallback"
   }
 });
 
-test("keeps the hero code limited to installation and highlights terminal examples", () => {
+test("keeps the hero code to installation and one route proof, and highlights terminal examples", () => {
   const html = renderToStaticMarkup(<Home />);
   const heroCode: string[] = [];
   const heroInstallCode: string[] = [];
+  const heroProofCode: string[] = [];
   const terminalCode: string[] = [];
   new HTMLRewriter()
     .on('header[aria-labelledby="hero-title"] pre', { text(chunk) { heroCode.push(chunk.text); } })
     .on('header[aria-labelledby="hero-title"] .hraness-marketing-hero__install pre', { text(chunk) { heroInstallCode.push(chunk.text); } })
+    .on('header[aria-labelledby="hero-title"] .xcb-route-proof pre', { text(chunk) { heroProofCode.push(chunk.text); } })
     .on('.xcb-code--terminal code.syntax-code', { element(element) { terminalCode.push(element.getAttribute("data-language") ?? ""); } })
     .transform(html);
-  expect(heroCode.join("")).toBe(heroInstallCode.join(""));
+  expect(heroCode.join("")).toBe(heroInstallCode.join("") + heroProofCode.join(""));
   expect(heroInstallCode.join("")).not.toBe("");
+  // The proof object is the documented dry run of the route command, the
+  // shape tests/launch.test.ts also pins to docs/route.md.
+  expect(textOf(heroProofCode.join(""))).toContain('"dryRun": true');
+  expect(textOf(heroProofCode.join(""))).toContain('"status": "selected"');
   expect(terminalCode).toContain("shell");
   expect(html).toContain("hraness-marketing-proof-frame__chrome");
   expect(html).not.toContain("--help");

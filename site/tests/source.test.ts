@@ -1,3 +1,4 @@
+import { productMessaging } from "../app/messaging";
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -175,7 +176,7 @@ describe("xcb site source contract", () => {
     expect(llms).toContain("https://xcb.sh/README.md");
     expect(llms).not.toContain("http://");
     // The canonical one-line description leads, verbatim.
-    expect(llms.split("\n")[2]).toBe("> Excalibur (xcb) is a tool for operating AI subscriptions. Log in with all your Claude and Codex accounts, then tell your agent to use xcb.");
+    expect(llms.split("\n")[2]).toBe(`> ${productMessaging.meta}`);
     // Every current docs page is listed, and repository links follow main, not an old tag.
     for (const topic of docsTopics) expect(llms).toContain(`(https://xcb.sh/docs/${topic.slug})`);
     expect(llms).not.toMatch(/github\.com\/hraness\/xcb\/blob\/v\d/u);

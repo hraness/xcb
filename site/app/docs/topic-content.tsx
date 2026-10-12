@@ -159,7 +159,7 @@ function Security() {
       <ul>
         <li><strong>Supported builds:</strong> about once an hour, xcb reads the list of reviewed provider builds from this repository’s <code>qualified-builds.json</code> on GitHub.</li>
         <li><strong>Updates:</strong> <code>xcb update check</code>, <code>xcb upgrade</code>, and the optional daily check read release data from GitHub.</li>
-        <li><strong>Remote devices:</strong> hosted remote commands are removed from the current source build. Valhalla transport is planned and does not synchronize tasks yet.</li>
+        <li><strong>Other machines:</strong> xcb has no hosted remote commands. It sends nothing to another computer, and each installation runs its own tasks.</li>
       </ul>
       <h2 id="extensions">Extensions that run code</h2>
       <p>Hooks run programs you choose at session and turn events. They are off by default and need their own <code>xcb plugins enable hooks</code>. Panes change only what the terminal shows; they cannot run code or grant a provider new tools.</p>
@@ -173,7 +173,7 @@ function Security() {
 function ProjectsAndTasks() {
   return (
     <>
-      <p>Use local commands or another agent to submit and inspect managed tasks. The background supervisor owns this work, so it can outlive the caller. The interactive terminal is removed from the current source build.</p>
+      <p>Use local commands or another agent to submit and inspect managed tasks. The background supervisor runs this work, so it outlives the caller. xcb has no app or terminal UI; your terminal, another agent, or your app drives it through these commands.</p>
       <h2 id="choose-folder">Choose the task’s folder explicitly</h2>
       <Code>{`xcb backlog add /absolute/path/to/your/project "Fix the failing parser test" --ready --json
 xcb --cwd /absolute/path/to/your/project conversations --new --json`}</Code>
@@ -331,7 +331,7 @@ function Customization() {
 xcb panes
 xcb plugins`}</Code>
       <h2 id="panes">Build your own view</h2>
-      <p>The interactive terminal is removed from the current source build. Another agent or your app can build a view from local JSON results. Pane declarations remain bounded presentation data for clients that choose to use them; they do not install a terminal UI.</p>
+      <p>xcb has no terminal UI of its own. Another agent or your app can build a view from local JSON results. Pane declarations describe a layout for clients that choose to use them; they do not install a terminal UI.</p>
       <Code>{`xcb panes show focus
 xcb panes check /absolute/path/to/pane.json
 xcb panes install /absolute/path/to/pane.json`}</Code>
@@ -717,7 +717,7 @@ function Reference() {
         [<code key="o">-V, --version</code>, "The installed version"],
       ]} />
       <h2 id="commands">Commands</h2>
-      <p>Grouped as in <code>xcb --help</code>. Plain <code>xcb</code> prints a short start screen. Use <code>xcb run</code>, the JSON route, or managed task commands; the interactive terminal and hosted remote commands are removed.</p>
+      <p>Grouped as in <code>xcb --help</code>. Plain <code>xcb</code> prints a short start screen. Use <code>xcb run</code>, the JSON route, or the managed task commands; there is no interactive terminal and no hosted remote command.</p>
       {commandGroups.map((group) => (
         <section aria-labelledby={group.id} key={group.id}>
           <h3 id={group.id}>{group.title}</h3>
@@ -757,7 +757,7 @@ function Reference() {
       <Table label="Exit codes" head={["Code", "Meaning"]} rows={[
         ["0", "Success"],
         ["1", <>Failure. <code>xcb run</code> and <code>xcb --json route</code> also exit 1 unless the turn completed, the provider exited, and nothing waits for an answer. <code>xcb doctor</code> exits 1 when it finds no provider.</>],
-        ["2", <>Usage error: an unknown command or flag, including a removed interactive or remote command.</>],
+        ["2", "Usage error: an unknown command or flag."],
       ]} />
       <h2 id="json">JSON output</h2>
       <p>With <code>--json</code>, or when xcb detects that an agent is running it, a failed command prints one line on stdout:</p>
