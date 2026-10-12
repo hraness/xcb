@@ -10,6 +10,13 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.20.11 - 2026-10-12
+
+Uncertain tasks can now be closed deliberately after their workers stop, even when a reply is still waiting.
+
+- `xcb backlog dismiss <task> --revision <current> --accept-unreconciled-reply` lets an owner explicitly accept that a waiting reply was not delivered after the task's runs stop, then close the task without retrying it or claiming delivery. `xcb attention` explains what still prevents closure.
+- `xcb recover <run> --yes --discard` can discard an unsubmitted command only when it has no recovery file, its owner and process group have stopped, and its run and account custody are verified. Started or recoverable commands remain held.
+
 ## 0.20.10 - 2026-10-11
 
 A stopped Codex run on a shared account is freed when another run already saved its own refresh. (0.20.9 was tagged with a mis-edited changelog heading and never published; this release carries its change.)
