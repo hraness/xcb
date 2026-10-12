@@ -12,7 +12,7 @@ export function releaseStatusLabel(release: PublishedRelease | null): string {
 }
 
 /** The platforms the release pipeline builds native archives for, as running text. */
-export const nativePlatformSentence = "The release pipeline builds native archives for macOS ARM64 (darwin-aarch64) and Linux x86_64 (linux-x86_64). Other hosts build from source, and the updater installs nothing on them.";
+export const nativePlatformSentence = "The release pipeline builds native archives for macOS ARM64 (darwin-aarch64), Linux x86_64 (linux-x86_64), Linux ARM64 (linux-aarch64), and Windows x86_64 (windows-x86_64). Other hosts build from source, and the updater installs nothing on them.";
 
 /**
  * One truthful sentence about the latest verified release. Every public page

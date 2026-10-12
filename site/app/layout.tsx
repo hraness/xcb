@@ -20,7 +20,7 @@ import "./calm.css";
  */
 const initialPalette = getDesignPaletteTheme("tokyo-night", "light");
 
-const title = `${productName} · ${productMessaging.hero.heading.replace(/\.$/u, "")}`;
+const title = `${productName} · ${productMessaging.tagline}`;
 const description = productMessaging.meta;
 
 export const metadata: Metadata = {
