@@ -1,38 +1,53 @@
 <!-- hraness:xcb-landing:start -->
 # Excalibur (xcb)
 
-> ⚔️ Excalibur (xcb) operates your AI subscriptions. Log in with all your Codex
-> and Claude accounts, then tell your agent to use xcb. I like asking mine to
-> run long jobs that scale their parallelism to the load and the usage left on
-> each account. xcb exposes nearly every feature in Claude Code and Codex, so
-> you can build any setup you want, and apps on top of it.
+> ⚔️ Excalibur (xcb) is an AI subscription router and herder: a control plane
+> for Codex and Claude Code subscriptions, built for unattended use. There is
+> no app or TUI. You sign into your accounts once in xcb, then ask an agent to
+> create whatever topology you want using xcb's primitives. xcb routes tasks
+> to accounts based on subscription quotas and health signals, agents
+> coordinate through a simple backlog and attention system, and work scales
+> up or down with memory, disk, and token pressure.
 >
 > Tell your agent to set it up: https://xcb.sh
 >
 > — Ben Guo
 
-xcb routes each task to a Claude or Codex account that is signed in, idle, and
-not at a known usage limit, on a model that fits the work. Send work through
-the headless CLI, JSON contract, or SDK. The former interactive terminal and
-hosted remote commands are removed from the current source build.
+Excalibur (xcb) is a control plane for Codex and Claude Code subscriptions,
+built for unattended use. Sign in once, and agents route tasks by quota and
+health, coordinate through a backlog, and scale with resource pressure.
 <!-- hraness:xcb-landing:end -->
 
 **Status:** [Latest release](https://github.com/hraness/xcb/releases/latest)
-for macOS ARM64, Linux x86_64 and ARM64, and Windows x86_64; other hosts build from source. MIT licensed.
-
-This guide follows the current source build. Unreleased commands require a
-source build until they appear in the [release notes](https://github.com/hraness/xcb/releases/latest).
+for macOS ARM64, Linux x86_64 and ARM64, and Windows x86_64; other hosts build
+from source. MIT licensed. Commands below match the latest release; a command
+that only exists in source appears in the
+[release notes](https://github.com/hraness/xcb/releases/latest) when it ships.
 
 [Site](https://xcb.sh) · [Docs](https://xcb.sh/docs) ·
 [Getting started](https://xcb.sh/docs/getting-started) ·
 [Route contract](docs/route.md) · [TypeScript SDK](docs/sdk.md) ·
 [Compare](https://xcb.sh/compare) · [Changelog](CHANGELOG.md)
 
-With fresh Claude and Codex usage reports, xcb favors unused quota approaching
-a reset while preserving the task's quality requirements and your chosen
-provider, account, or model. You can also [continue a Claude or Codex
-conversation](#continue-a-claude-or-codex-conversation) by importing work
-active in the last 24 hours.
+## Why xcb
+
+- **One pool instead of one login.** Every task goes to an account that can
+  take it now: supported build, signed in, idle, not at a known quota limit,
+  with a recently seen model. Fresh usage reports rank unused quota that is
+  about to reset first. xcb adds no quota of its own and never falls back to
+  an API key.
+- **Topologies an agent builds.** Projects, tasks, schedules, routes, and hooks
+  are commands, so the agent you already use can set up a factory of workers
+  and check on it through `xcb tasks` and `xcb attention`. There is no app or
+  terminal UI to keep open.
+- **Work that scales with pressure.** With resource protection on, xcb samples
+  memory, swap, and disk every 30 seconds, stops starting workers when a
+  threshold trips, and resumes after three healthy samples. Quota limits a
+  provider reports take an account out of the pool until it resets.
+- **Your sign-ins, the provider's own tool.** Each task runs Claude Code or
+  Codex under your own account in an OS sandbox with xcb's file tools. xcb
+  never touches API traffic, and credentials stay on your computer outside your
+  projects.
 
 ## Install
 
@@ -99,7 +114,7 @@ rustup toolchain install 1.97.1 --profile minimal
 [Upgrade and uninstall](https://xcb.sh/docs/upgrade-and-uninstall) covers
 updates and removal.
 
-## Use it as your coding agent
+## Your first task
 
 Install Claude Code 2.1.268 or later, then connect an account and run a task:
 
@@ -118,21 +133,88 @@ for sign-in and import options.
 
 `xcb run` picks an account and model and prints the result. `xcb --json route`
 runs exactly one turn and returns a JSON result; its caller owns any retry.
-For durable managed work, submit an explicitly scoped backlog item with
-`xcb backlog add /absolute/path/to/project "Fix the failing test" --ready`.
-Inspect it with `xcb tasks` and `xcb tasks show <task-id> --json`.
+
+## How work moves
+
+Sign in once. Then an agent, or you, creates projects, tasks, schedules,
+routes, and hooks. xcb runs each task on one account and keeps the backlog
+and the attention queue so agents can coordinate without you watching.
+
+```text
+ your agent ──creates──▶  xcb primitives   ──one task,──▶  your accounts
+ (Claude Code,            projects · tasks    one account    Claude and Codex
+  Codex, or an app)       schedules · routes                 subscriptions
+            ◀──questions,  hooks              ◀──quota, limits──
+               results    backlog · attention
+```
+
+For durable managed work, submit an explicitly scoped backlog item:
+
+```sh
+xcb backlog add /absolute/path/to/project "Fix the failing test" --ready
+xcb schedules add /absolute/path/to/project "Review previous work" --every 3600
+xcb tasks                                # managed tasks across projects
+xcb attention                            # questions and approvals waiting on you
+```
+
+Backlog tasks run in xcb's background supervisor and outlive the terminal that
+created them; `xcb service install` starts the supervisor at login on macOS and
+Linux. Inspect a task with `xcb tasks show <task-id> --json`.
 
 - `xcb tasks cancel <task-id> --revision <revision>` requests cancellation.
 - `xcb steer <task-id> <guidance>` adds guidance for the task's next turn.
 - `xcb attention` shows questions; `xcb backlog reply` answers one.
 - `xcb conversations --new --json` creates a project view without opening a UI.
 
-The [headless command guide](docs/terminal.md) covers retained local operations.
+[Project controls](docs/project-agents.md) cover grants, programs, and
+schedules; the [headless command guide](docs/terminal.md) covers local
+operations.
+
+## Use available quota before it resets
+
+1. **Filter:** keep the accounts that can take the task now: supported provider build, signed in, enabled, idle, not at a known usage limit, with a recently seen model.
+2. **Rank:** order those models by relative quality, cost, and speed for the kind of task. Fresh Claude and Codex usage reports favor unused quota approaching a reset within the task's quality requirements. Long prompts get the highest-quality model available.
+3. **Hold:** lock the chosen account so no other task can use it, and run the provider in an OS sandbox with xcb's file tools for one project folder.
+4. **Record:** when the provider process exits, record how the run ended. If xcb can't confirm that, it keeps the account held and doesn't retry.
+
+[How routing works](https://xcb.sh/docs/how-routing-works) covers each step.
+
+Tasks that require an existing signed-in browser or native desktop control
+stay with Codex and prefer Astra, including after a retry or handoff. Use
+`xcb run --signed-in-browser` or `xcb run --desktop` to state that requirement.
+Claude can hand these tasks to Codex after their current run ends
+safely. `xcb tools setup-computer` connects the installed desktop computer-use
+plugin on macOS. `xcb tools setup-browser` shares Claude's Chrome extension
+across providers and opens full Claude sign-in when needed. This sign-in uses
+a dedicated xcb Keychain entry on macOS. See
+[browser and shared tools](docs/tools.md).
+
+## Run unattended
+
+`xcb resources enable` turns on resource protection. The supervisor then
+samples memory pressure, swap, and available disk every 30 seconds and defers
+new workers when the host runs short, using these defaults:
+
+| Condition | Behavior |
+| --- | --- |
+| Disk available space at or below 24 GiB | Include a resource advisory at the next worker turn |
+| A known volume reaches 8 GiB | Defer new workers using it |
+| A paused volume recovers above 12 GiB | Require three healthy samples before resuming |
+| Memory warning or critical pressure lasts at least 60 seconds | Defer new workers until three normal samples arrive |
+| Required measurements fail or are older than 120 seconds | Defer new workers until measurements recover |
+
+An advisory is host telemetry only; xcb never kills a process or deletes a
+cache in response. Thresholds live in the `resources` section of
+`config.json`. Schedules can stop waiting on an unanswered task after an
+interval you choose with `--settle-unanswered-after <seconds>`. The
+[unattended operation guide](docs/unattended.md) covers the login service,
+recovery of uncertain work, and what still needs a person.
 
 ## Continue a Claude or Codex conversation
 
 Bring conversation context into xcb so your next task can use its account and
-model selection. Discovery and import use a 24-hour activity window by default:
+model selection. Discovery and import find work active in the last 24 hours by
+default:
 
 ```sh
 xcb sessions discover
@@ -186,25 +268,6 @@ example.
 
 xcb checks each provider executable's version, and for Codex its
 exact SHA-256, before it runs anything. `xcb doctor` shows what it found.
-
-## Use available quota before it resets
-
-1. **Filter:** keep the accounts that can take the task now: supported provider build, signed in, enabled, idle, not at a known usage limit, with a recently seen model.
-2. **Rank:** order those models by relative quality, cost, and speed for the kind of task. Fresh Claude and Codex usage reports favor unused quota approaching a reset within the task's quality requirements. Long prompts get the highest-quality model available.
-3. **Hold:** lock the chosen account so no other task can use it, and run the provider in an OS sandbox with xcb's file tools for one project folder.
-4. **Record:** when the provider process exits, record how the run ended. If xcb can't confirm that, it keeps the account held and doesn't retry.
-
-[How routing works](https://xcb.sh/docs/how-routing-works) covers each step.
-
-Tasks that require an existing signed-in browser or native desktop control
-stay with Codex and prefer Astra, including after a retry or handoff. Use
-`xcb run --signed-in-browser` or `xcb run --desktop` to state that requirement.
-Claude can hand these tasks to Codex after their current run ends
-safely. `xcb tools setup-computer` connects the installed desktop computer-use
-plugin on macOS. `xcb tools setup-browser` shares Claude's Chrome extension
-across providers and opens full Claude sign-in when needed. This sign-in uses
-a dedicated xcb Keychain entry on macOS. See
-[browser and shared tools](docs/tools.md).
 
 ## Everyday commands
 
@@ -271,8 +334,16 @@ connected. Quota left on each subscription stays in `xcb accounts`.
 - **Tools:** providers use xcb's workspace tools and registered host MCP servers. Native commands require separate provider qualification and workspace grants; unrelated provider plugins remain unavailable. See [provider permissions](docs/provider-permissions.md) and [browser and shared tools](docs/tools.md).
 - **Tests and builds:** the [offline command runner](docs/command-runner.md) uses a Linux VM on macOS ARM64 with read-only Git. Separately granted native execution can run host builds and delivery commands; it never substitutes for a failed offline replay.
 - **Concurrency:** each account runs one provider turn at a time by default; `max_runs_per_account` in `config.json` (1–32) raises how many tasks may share an account, while sign-in and account checks still take the account alone. Tasks in the same project folder take turns.
-- **Remote devices:** the hosted remote commands are removed. Valhalla integration is planned, not shipped ([north star](docs/vision.md)).
-- **Managed harness:** the self-tuning harness is in development; the current build does not run self-modifying routing policies ([design](docs/managed-harness.md)).
+- **One machine:** xcb runs the accounts and tasks on the computer it is installed on. There are no hosted remote commands.
+- **Managed harness:** the self-tuning harness is in development; the current build does not run self-modifying routing policies.
+
+## Check it
+
+Every release is built and checked in a public GitHub Actions run linked from
+the [install page](https://xcb.sh/install), and the installer verifies the
+archive's SHA-256 checksum before it installs anything. On your machine,
+`xcb doctor` reports the provider builds it found and any unfinished runs, and
+`xcb tasks verify <task-id>` replays a task's local record offline.
 
 ## Compared with
 
