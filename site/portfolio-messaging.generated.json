@@ -5,7 +5,7 @@
   "portfolio": {
     "contract": "hraness.portfolio-public/v1",
     "url": "https://hraness.com/portfolio.json",
-    "digest": "sha256:9fee76882f7ddfe3eadffc0a1acad6a8975b7b2fa8580433efadfcffe469c757"
+    "digest": "sha256:45343ad13ad23d32630f5eeae74138e51b67bdf4bfe8d3c5643f62209173ddce"
   },
   "messaging": {
     "formatVersion": 1,
@@ -27,7 +27,7 @@
     "long": "Excalibur (xcb) is a control plane for Codex and Claude Code subscriptions, built for unattended use. There is no app and no TUI. You sign into your accounts once, then ask an agent to build whatever topology you want from xcb's primitives: projects, tasks, schedules, routes, and hooks. xcb routes each task to an account based on subscription quotas and health signals such as rate-limit errors, so a pool of subscriptions behaves like one intelligence budget you can scale up or down month to month. Agents coordinate through a simple backlog and attention system, and the whole factory scales work up or down with memory, disk, and token pressure. Every run leaves a record you can inspect, replay, and measure.",
     "hero": {
       "heading": "Run agents unattended on every subscription you pay for.",
-      "summary": "Excalibur (xcb) is a control plane for Codex and Claude Code subscriptions. Sign in once, then ask an agent to build any topology from its primitives. It routes tasks by quota and health, coordinates through a backlog, and scales with load.",
+      "summary": "Excalibur (xcb) is a control plane for Codex and Claude Code subscriptions. Sign in once, then ask an agent to build any topology from its primitives: tasks routed by quota and health, coordinated through a backlog, scaled with load.",
       "primaryAction": "Install xcb",
       "secondaryAction": "See how routing works"
     },
