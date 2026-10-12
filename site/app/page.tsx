@@ -60,7 +60,7 @@ const readiness = [
 ] as const;
 
 /**
- * Figures from the owner's post of 12 October 2026 about one month of
+ * Figures from the owner's post of 12 October 2026 (hraness.substack.com/p/a-love-letter-to-typing-code-by-hand) about one month of
  * unattended work across Hraness's own projects. They describe that month,
  * not xcb's performance, and the source line says so.
  */
@@ -145,10 +145,10 @@ export default function Home() {
             <a className="xcb-text-link" href={`${repository}/blob/main/docs/unattended.md`}>Unattended operation ↗</a>
           </MarketingSection>
 
-          <MarketingSection id="idea" heading="Built for weeks of unattended work" headingId="idea-title" summary="Hraness runs its own projects on xcb. The owner’s post of 12 October 2026 describes the setup and the month that led to it.">
+          <MarketingSection id="idea" heading="Built for weeks of unattended work" headingId="idea-title" summary="Hraness runs its own projects on xcb. The owner’s post of 12 October 2026, A love letter to typing code by hand, describes the setup and the month that led to it.">
             <blockquote className="xcb-idea">
               <p>“I have an intelligence budget that I scale up or down from month to month. I assign my pool of intelligence to a set of projects, and I let it cook for weeks unattended.”</p>
-              <cite>From the Hraness post of 12 October 2026</cite>
+              <cite>From <a className="xcb-text-link" href="https://hraness.substack.com/p/a-love-letter-to-typing-code-by-hand" rel="noopener">A love letter to typing code by hand</a>, the Hraness post of 12 October 2026</cite>
             </blockquote>
             <MarketingStatStrip
               ariaLabel="One month of unattended work at Hraness"
