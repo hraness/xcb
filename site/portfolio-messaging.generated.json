@@ -5,7 +5,7 @@
   "portfolio": {
     "contract": "hraness.portfolio-public/v1",
     "url": "https://hraness.com/portfolio.json",
-    "digest": "sha256:45343ad13ad23d32630f5eeae74138e51b67bdf4bfe8d3c5643f62209173ddce"
+    "digest": "sha256:f22d8bdf1b765586ce4e862e410156bf18ff889feeacd2b55aad668e9d9f1022"
   },
   "messaging": {
     "formatVersion": 1,
@@ -33,7 +33,7 @@
     },
     "blurb": {
       "emoji": "⚔️",
-      "text": "Excalibur (xcb) is an AI subscription router and herder: a control plane for Codex and Claude Code subscriptions, built for unattended use. There is no app or TUI. You sign into your accounts once in xcb, then ask an agent to create whatever topology you want using xcb's primitives. xcb routes tasks to accounts based on subscription quotas and health signals, agents coordinate through a simple backlog and attention system, and work scales up or down with memory, disk, and token pressure.",
+      "text": "Excalibur (xcb) is a control plane for Codex and Claude Code subscriptions, built to run unattended. Sign into your accounts once, then ask an agent to build whatever topology you want from xcb's primitives. Tasks route by quota and health, agents coordinate through a shared backlog, and work scales with memory, disk, and token pressure.",
       "cta": {
         "label": "Tell your agent to set it up",
         "url": "https://xcb.sh"
@@ -192,7 +192,7 @@
       "messaging": {
         "names": {
           "name": "Sponge",
-          "command": "spongev2"
+          "command": "sponge"
         },
         "short": "Local deep research agent that writes cited reports and improves with each run",
         "tagline": "Deep research that runs on your machine"
