@@ -10,6 +10,13 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.20.12 - 2026-10-13
+
+Codex completed-turn failures now identify which protocol invariant failed, so unattended tasks can be diagnosed without relaxing their completion checks.
+
+- Separate a provider-reported turn error from unfinished items in the fixed, sanitized diagnostic. Unresolved tool calls still fail first; no provider payload or item content is exposed. This is diagnostic only, not a fix for the underlying failure; inspect fresh failures after installation before changing completion handling.
+- Refresh the xcb site and package description with control-plane messaging and the cited owner post.
+
 ## 0.20.11 - 2026-10-12
 
 Uncertain tasks can now be closed deliberately after their workers stop, even when a reply is still waiting.
