@@ -1,7 +1,7 @@
 {
   "name": "@hraness/xcb",
   "version": "0.20.11",
-  "description": "TypeScript SDK and compatibility CLI for Excalibur (xcb), which routes coding tasks across the Claude and Codex subscriptions you already pay for.",
+  "description": "Excalibur (xcb) is a control plane for Codex and Claude Code subscriptions. Sign in once, then agents route work by quota and health and run unattended.",
   "type": "module",
   "license": "MIT",
   "packageManager": "bun@1.3.14",
