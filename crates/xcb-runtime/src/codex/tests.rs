@@ -1392,6 +1392,48 @@ fn native_input_echo_can_exceed_one_mib_without_relaxing_tool_bounds() {
 }
 
 #[test]
+fn completed_turn_reports_error_or_unfinished_items_without_provider_data() {
+    for (has_error, pending_item, expected) in [
+        (true, false, "Codex completed turn reported an error"),
+        (false, true, "Codex completed turn has unfinished items"),
+        (true, true, "Codex completed turn reported an error"),
+    ] {
+        let mut c = started();
+        let answer =
+            json!({"id":"answer1","type":"agentMessage","text":"done","phase":"final_answer"});
+        c.accept(notice("item/started", answer.clone())).unwrap();
+        c.accept(notice("item/completed", answer)).unwrap();
+        if pending_item {
+            c.accept(notice(
+                "item/started",
+                json!({"id":"private-item","type":"reasoning","content":["SYNTHETIC_ITEM_SECRET"]}),
+            ))
+            .unwrap();
+        }
+        let error = if has_error {
+            json!({"message":"SYNTHETIC_ERROR_SECRET user@example.invalid","data":{"token":"SYNTHETIC_TOKEN_SECRET"}})
+        } else {
+            Value::Null
+        };
+        let terminal = json!({"method":"turn/completed","params":{"threadId":"thread1","turn":{"id":"turn1","status":"completed","error":error}}});
+        let diagnostic = c.accept(terminal).unwrap_err().to_string();
+        assert_eq!(diagnostic, format!("provider protocol error: {expected}"));
+        assert!(!diagnostic.contains("SYNTHETIC") && !diagnostic.contains("example.invalid"));
+        assert!(!c.completed);
+    }
+    // An unacknowledged tool effect must still fail before either diagnostic;
+    // it cannot be silently promoted to a successful terminal result.
+    let mut c = started();
+    c.accept(notice("item/started", call_item())).unwrap();
+    let error = c.accept(json!({"method":"turn/completed","params":{"threadId":"thread1","turn":{"id":"turn1","status":"completed","error":{"message":"SYNTHETIC_ERROR_SECRET"}}}})).unwrap_err();
+    assert!(matches!(
+        error,
+        Error::Protocol("Codex terminal with unresolved calls")
+    ));
+    assert!(!c.completed && !c.calls["call1"].completed);
+}
+
+#[test]
 fn completed_status_alone_cannot_claim_a_successful_answer() {
     let terminal = json!({"method":"turn/completed","params":{"threadId":"thread1","turn":{"id":"turn1","status":"completed","error":null}}});
     assert!(started().accept(terminal.clone()).is_err());
