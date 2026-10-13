@@ -20,7 +20,7 @@ export function MechanismDiagram() {
       width={width}
       height={height}
       label="Your agent uses xcb's primitives (projects, tasks, schedules, routes, hooks). xcb runs each task on one of your Claude or Codex accounts. The backlog and the attention queue carry questions and results back to the agent."
-      caption={<>Sign in once. Then an agent, or you, creates projects, tasks, schedules, routes, and hooks. xcb runs each task on one account and keeps the backlog and attention queue so agents can coordinate without you watching.</>}
+      caption={<>Agents coordinate through the backlog and the attention queue, so you check in instead of watching.</>}
     >
       <defs><DiagramArrowhead id="xcb-mechanism-arrow" /></defs>
       <g className="xcb-mechanism__box">

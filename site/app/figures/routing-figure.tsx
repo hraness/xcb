@@ -69,7 +69,7 @@ export function RoutingFigure() {
           </g>
         ))}
       </svg>
-      <figcaption id="routing-figure-caption">Each task goes to one account that can take it now. When a provider reports a usage limit on an account, xcb stops sending work there and the task moves on with its original instructions. Account names are invented.</figcaption>
+      <figcaption id="routing-figure-caption">When an account reports a usage limit, its task moves to another account with its original instructions.</figcaption>
     </figure>
   );
 }
