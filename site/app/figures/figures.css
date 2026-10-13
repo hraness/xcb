@@ -90,7 +90,7 @@
 
 /* Route dry run: the integration example in the interfaces section. */
 .xcb-route-proof { margin: 0; inline-size: 100%; }
-.xcb-route-proof .xcb-route-proof__pre { margin: 0; padding: 1rem 1.15rem; overflow-x: auto; font: var(--hraness-type-code-size, .82rem)/1.6 var(--font-mono, ui-monospace, monospace); white-space: pre; color: var(--foreground); background: var(--hraness-material-plane, var(--surface)); }
+.xcb-route-proof .xcb-route-proof__pre { margin: 0; padding: 1rem 1.15rem; overflow-x: auto; font: var(--hraness-type-code-size, .82rem)/1.6 var(--font-mono, ui-monospace, monospace); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--foreground); background: var(--hraness-material-plane, var(--surface)); }
 .xcb-route-proof__comment { color: var(--muted); }
 .xcb-route-proof__key { color: var(--muted); }
 .xcb-route-proof__pick { color: var(--xcb-fig-ok); font-weight: 600; }
