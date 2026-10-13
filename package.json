@@ -1,6 +1,6 @@
 {
   "name": "@hraness/xcb",
-  "version": "0.20.11",
+  "version": "0.20.12",
   "description": "Excalibur (xcb) is a control plane for Codex and Claude Code subscriptions. Sign in once, then agents route work by quota and health and run unattended.",
   "type": "module",
   "license": "MIT",
