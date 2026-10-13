@@ -1715,10 +1715,15 @@ impl CodexProtocol {
                 let terminal = match turn["status"].as_str() {
                     Some("completed") => {
                         require(unresolved == 0, "Codex terminal with unresolved calls")?;
+                        // Report which invariant failed without copying provider
+                        // error fields or item content into task diagnostics.
                         require(
-                            turn["error"].is_null()
-                                && self.items.values().all(|item| item.completed),
-                            "Codex successful turn has error or unfinished items",
+                            turn["error"].is_null(),
+                            "Codex completed turn reported an error",
+                        )?;
+                        require(
+                            self.items.values().all(|item| item.completed),
+                            "Codex completed turn has unfinished items",
                         )?;
                         require(
                             self.final_text
