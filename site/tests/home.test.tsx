@@ -145,24 +145,29 @@ test("the shared header keeps a named home link and exact-artwork foil fallback"
   }
 });
 
-test("keeps the hero code to installation and one route proof, and highlights terminal examples", () => {
+test("keeps the hero code to installation, shows the pool panel, and highlights terminal examples", () => {
   const html = renderToStaticMarkup(<Home />);
   const heroCode: string[] = [];
   const heroInstallCode: string[] = [];
-  const heroProofCode: string[] = [];
+  const proofCode: string[] = [];
   const terminalCode: string[] = [];
+  const poolLabels: string[] = [];
   new HTMLRewriter()
     .on('header[aria-labelledby="hero-title"] pre', { text(chunk) { heroCode.push(chunk.text); } })
     .on('header[aria-labelledby="hero-title"] .hraness-marketing-hero__install pre', { text(chunk) { heroInstallCode.push(chunk.text); } })
-    .on('header[aria-labelledby="hero-title"] .xcb-route-proof pre', { text(chunk) { heroProofCode.push(chunk.text); } })
+    .on('header[aria-labelledby="hero-title"] .xcb-pool[role="img"]', { element(element) { poolLabels.push(element.getAttribute("aria-label") ?? ""); } })
+    .on('#use .xcb-route-proof pre', { text(chunk) { proofCode.push(chunk.text); } })
     .on('.xcb-code--terminal code.syntax-code', { element(element) { terminalCode.push(element.getAttribute("data-language") ?? ""); } })
     .transform(html);
-  expect(heroCode.join("")).toBe(heroInstallCode.join("") + heroProofCode.join(""));
+  // The hero's only code is the installer; its proof object is the pool panel.
+  expect(heroCode.join("")).toBe(heroInstallCode.join(""));
   expect(heroInstallCode.join("")).not.toBe("");
-  // The proof object is the documented dry run of the route command, the
-  // shape tests/launch.test.ts also pins to docs/route.md.
-  expect(textOf(heroProofCode.join(""))).toContain('"dryRun": true');
-  expect(textOf(heroProofCode.join(""))).toContain('"status": "selected"');
+  expect(poolLabels).toHaveLength(1);
+  expect(poolLabels[0]).toContain("every 30 seconds");
+  // The integration example is the documented dry run of the route command,
+  // the shape tests/launch.test.ts also pins to docs/route.md.
+  expect(textOf(proofCode.join(""))).toContain('"dryRun": true');
+  expect(textOf(proofCode.join(""))).toContain('"status": "selected"');
   expect(terminalCode).toContain("shell");
   expect(html).toContain("hraness-marketing-proof-frame__chrome");
   expect(html).not.toContain("--help");
