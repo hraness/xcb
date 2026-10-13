@@ -19,7 +19,7 @@ export function SiteHeader({ active }: Readonly<{ active?: "home" | "docs" | "co
           { href: "/blog", label: "Blog", current: active === "blog" },
           { href: "https://github.com/hraness/xcb", label: "GitHub ↗" },
         ]}
-        action={{ href: "/install", label: productMessaging.hero.primaryAction, emphasis: "secondary" }}
+        action={{ href: "/install", label: productMessaging.hero.primaryAction, emphasis: "primary" }}
         trailing={<ThemeMenuButton aria-label="Appearance" />}
       />
     </div>
