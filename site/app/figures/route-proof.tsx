@@ -1,4 +1,5 @@
 import { MarketingProofFrame, SyntaxCode } from "@hraness/design-kit/react/server";
+import { publishedRelease } from "../publication";
 
 /**
  * The integration example: a dry run of `xcb --json route`, the one command
@@ -25,7 +26,7 @@ export function RouteProof() {
       chrome="terminal"
       className="xcb-route-proof"
       title="xcb --json route < task.json"
-      credit="Dry run as documented in docs/route.md for v0.20.11, checked 2026-10-13."
+      credit={`Dry run as documented in docs/route.md${publishedRelease === null ? "" : ` for v${publishedRelease.version}`}, checked 2026-10-13.`}
     >
       <pre className="xcb-route-proof__pre" tabIndex={0}>
         <span className="xcb-route-proof__comment">{"# task.json sets \"dryRun\": true\n"}</span>
