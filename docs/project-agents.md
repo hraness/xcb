@@ -30,14 +30,18 @@ xcb backlog complete <deferred-task-id> "Already covered by the passing parser t
 xcb attention
 xcb backlog reply <task-id> "Use the existing project conventions"
 xcb backlog reconcile <uncertain-task-id> --revision 4
-xcb backlog dismiss <uncertain-task-id> --revision 4
+xcb backlog dismiss <uncertain-task-id> --revision 4 --accept-unreconciled-effects
 ```
 
 `backlog reconcile` closes uncertain work only when xcb kept proof of how it
 ended. When there is no proof, check the project yourself, then
-`backlog dismiss` the task: it is marked failed, nothing is retried, and the
-project's schedules can start again. Dismissal waits until the task's worker
-has stopped.
+`backlog dismiss` with the current revision and explicit acceptance of
+unreconciled effects. It marks the task failed without retrying it; schedules
+can then start again. Dismissal waits for proof that the worker and any tool
+servers stopped. A missing tool-server process ID without a recorded launch
+boot keeps the account held; a newer xcb build cannot infer stop from silence.
+If reply delivery is also unproven, inspect it and additionally pass
+`--accept-unreconciled-reply`.
 
 `xcb backlog --workspace <dir>` lists work in that directory from every
 conversation; `--conversation <conversation-id>` filters by one

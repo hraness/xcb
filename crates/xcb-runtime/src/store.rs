@@ -416,6 +416,10 @@ pub struct RunRecord {
     /// durable before spawning; older strict readers cannot release this run.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub capability_processes: BTreeMap<String, Option<u32>>,
+    /// Launch-boot identity is durable before a tool server can spawn.
+    /// Legacy intents have no witness and remain held if PID publication was lost.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub capability_boots: BTreeMap<String, String>,
 }
 
 impl RunRecord {
@@ -424,6 +428,10 @@ impl RunRecord {
     /// A refusal because a recorded process still exists names that process
     /// and what to check; the account stays held either way.
     pub fn verify_recovery_stop(&self) -> Result<()> {
+        self.verify_recovery_stop_with_boot(None)
+    }
+
+    fn verify_recovery_stop_with_boot(&self, current_boot: Option<&str>) -> Result<()> {
         if self.phase != "running" {
             return Err(Error::Conflict("run is not in running phase"));
         }
@@ -466,11 +474,31 @@ impl RunRecord {
             )),
             proof => proof,
         }?;
-        for pid in self.capability_processes.values() {
-            let pid = pid.ok_or(Error::Conflict(
-                "tool server launch has no recorded process group; stop cannot be proven",
-            ))?;
-            crate::process::prove_process_group_absent(pid)?;
+        for (server, pid) in &self.capability_processes {
+            if let Some(pid) = pid {
+                crate::process::prove_process_group_absent(*pid)?;
+            } else {
+                let recorded = self.capability_boots.get(server).ok_or_else(|| Error::Guided {
+                    message: format!(
+                        "run {} tool server {server} has no recorded process group or run-bound boot witness; stopping an unidentified process or using --yes cannot prove this launch stopped. Retain custody until independent evidence for this exact run establishes stop",
+                        self.id
+                    ),
+                    next: None,
+                })?;
+                let changed_boot = current_boot
+                    .and_then(|boot| uuid::Uuid::parse_str(boot).ok())
+                    .zip(uuid::Uuid::parse_str(recorded).ok())
+                    .is_some_and(|(current, launch)| current != launch);
+                if !changed_boot {
+                    return Err(Error::Guided {
+                        message: format!(
+                            "tool server {server} launched for run {} without a recorded process group; its stop is unproven on the launch boot. Stopping an unidentified process is insufficient; only a changed host boot can prove this run's server stopped",
+                            self.id
+                        ),
+                        next: None,
+                    });
+                }
+            }
         }
         Ok(())
     }
@@ -485,7 +513,18 @@ impl RunRecord {
             }
             validate_command_custody(&self.id, custody)?;
         }
-        if !self.capability_processes.is_empty() {
+        if !self.capability_processes.is_empty() || !self.capability_boots.is_empty() {
+            if self
+                .capability_boots
+                .keys()
+                .any(|server| !self.capability_processes.contains_key(server))
+                || self
+                    .capability_boots
+                    .values()
+                    .any(|boot| uuid::Uuid::parse_str(boot).is_err())
+            {
+                return Err(xcb_core::Error::Invalid("tool server boot witness").into());
+            }
             if self.custody_version != 1
                 || !matches!(self.phase.as_str(), "prepared" | "running")
                 || self.capability_processes.len() > 32
@@ -1689,6 +1728,7 @@ impl Store {
             owner: Some(self.owner()),
             command_custody: None,
             capability_processes: BTreeMap::new(),
+            capability_boots: BTreeMap::new(),
         };
         tx.execute(
             "INSERT INTO runs VALUES(?1,?2,?3,?4,?5)",
@@ -1758,6 +1798,7 @@ impl Store {
             owner: Some(self.owner()),
             command_custody: None,
             capability_processes: BTreeMap::new(),
+            capability_boots: BTreeMap::new(),
         };
         tx.execute(
             "INSERT INTO runs VALUES(?1,NULL,?2,'prepared',?3)",
@@ -1862,13 +1903,41 @@ impl Store {
     }
 
     pub(crate) fn mark_capability_starting(&self, run: &RunRecord, server: &str) -> Result<()> {
-        self.update_capability_custody(run, server, |servers| {
-            if servers.contains_key(server) {
-                return Err(Error::Conflict("tool server already has custody"));
-            }
-            servers.insert(server.to_owned(), None);
-            Ok(())
-        })
+        self.mark_capability_starting_with_boot(run, server, None)
+    }
+
+    pub(crate) fn mark_capability_starting_with_boot(
+        &self,
+        run: &RunRecord,
+        server: &str,
+        boot: Option<&str>,
+    ) -> Result<()> {
+        if boot.is_some_and(|boot| uuid::Uuid::parse_str(boot).is_err()) {
+            return Err(Error::Conflict("invalid tool server boot witness"));
+        }
+        Id::new(server)?;
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (mut current, payload) = self.owned_run_from(&tx, run)?;
+        if current.capability_processes.contains_key(server) {
+            return Err(Error::Conflict("tool server already has custody"));
+        }
+        current.capability_processes.insert(server.to_owned(), None);
+        if let Some(boot) = boot {
+            current
+                .capability_boots
+                .insert(server.to_owned(), boot.to_owned());
+        }
+        current.validate()?;
+        if tx.execute(
+            "UPDATE runs SET payload=?1 WHERE id=?2 AND payload=?3",
+            params![serde_json::to_string(&current)?, run.id.as_str(), payload],
+        )? != 1
+        {
+            return Err(Error::Conflict("run authority changed"));
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     pub(crate) fn mark_capability_spawned(
@@ -1888,12 +1957,24 @@ impl Store {
 
     /// Only the owning manager calls this after its independent group join.
     pub(crate) fn clear_capability_custody(&self, run: &RunRecord, server: &str) -> Result<()> {
-        self.update_capability_custody(run, server, |servers| {
-            if servers.remove(server).is_none() {
-                return Err(Error::Conflict("tool server custody is absent"));
-            }
-            Ok(())
-        })
+        Id::new(server)?;
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (mut current, payload) = self.owned_run_from(&tx, run)?;
+        if current.capability_processes.remove(server).is_none() {
+            return Err(Error::Conflict("tool server custody is absent"));
+        }
+        current.capability_boots.remove(server);
+        current.validate()?;
+        if tx.execute(
+            "UPDATE runs SET payload=?1 WHERE id=?2 AND payload=?3",
+            params![serde_json::to_string(&current)?, run.id.as_str(), payload],
+        )? != 1
+        {
+            return Err(Error::Conflict("run authority changed"));
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// Persist before launching any guest command. A second pending command,
@@ -2880,6 +2961,33 @@ impl Store {
             .transpose()
     }
     pub fn recover_run(&self, run_id: &Id, expected_digest: &str, now: u64) -> Result<RunRecord> {
+        self.recover_run_with_boot(run_id, expected_digest, now, None)
+    }
+
+    /// A missing-PID launch intent requires a durable launch-boot identity and
+    /// a freshly observed different host boot. No caller-supplied boot assertion.
+    pub async fn verify_recovery_stop_after_boot_change(&self, run: &RunRecord) -> Result<()> {
+        let boot = crate::managed::host_boot_identity().await?;
+        run.verify_recovery_stop_with_boot(Some(&boot))
+    }
+
+    pub async fn recover_run_after_boot_change(
+        &self,
+        run_id: &Id,
+        expected_digest: &str,
+        now: u64,
+    ) -> Result<RunRecord> {
+        let boot = crate::managed::host_boot_identity().await?;
+        self.recover_run_with_boot(run_id, expected_digest, now, Some(&boot))
+    }
+
+    fn recover_run_with_boot(
+        &self,
+        run_id: &Id,
+        expected_digest: &str,
+        now: u64,
+        boot: Option<&str>,
+    ) -> Result<RunRecord> {
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let payload: String = tx
@@ -2917,7 +3025,7 @@ impl Store {
                 "command guest stop is unproven; reconcile command custody before recovery",
             ));
         }
-        run.verify_recovery_stop()?;
+        run.verify_recovery_stop_with_boot(boot)?;
         let pending_auth: Vec<(String, String, String)> = {
             let mut query = tx.prepare(PENDING_CREDENTIAL_RECEIPTS)?;
             query
@@ -2968,6 +3076,7 @@ impl Store {
         let settled = RunRecord {
             phase: "settled".into(),
             capability_processes: BTreeMap::new(),
+            capability_boots: BTreeMap::new(),
             ..run.clone()
         };
         if tx.execute(
@@ -5494,6 +5603,138 @@ mod tests {
         dead.capability_processes
             .insert("browser".into(), Some(i32::MAX as u32));
         dead.verify_recovery_stop().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_tool_pid_requires_a_run_bound_changed_boot_before_recovery() {
+        use std::os::unix::process::CommandExt;
+        let dir = root();
+        let store = Store::open(&xcb_core::canonical(dir.path()).unwrap().join("state")).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Test", 1, None)
+            .unwrap();
+        let session = store
+            .create_session(
+                &account.id,
+                choice(),
+                &xcb_core::canonical(dir.path()).unwrap().join("work"),
+                2,
+            )
+            .unwrap();
+        let prepared = store.prepare_run(&session.id, session.revision, 3).unwrap();
+        let launch_boot = "abcdef00-0000-0000-0000-000000000001";
+        let next_boot = "abcdef00-0000-0000-0000-000000000002";
+        store
+            .mark_capability_starting_with_boot(&prepared, "browser", Some(launch_boot))
+            .unwrap();
+        let (_, stale_digest) = store.recovery_candidate(&prepared.id).unwrap().unwrap();
+        // Simulate the fatal window: the server spawned, but its process-group
+        // number never made it into the run's durable launch intent.
+        let mut server = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let running = store.mark_spawned(&prepared, i32::MAX as u32).unwrap();
+        let orphan = orphaned(&store, &running);
+        let (_, digest) = store.recovery_candidate(&orphan.id).unwrap().unwrap();
+        assert_eq!(orphan.capability_processes["browser"], None);
+        assert_eq!(orphan.capability_boots["browser"], launch_boot);
+        assert!(orphan.verify_recovery_stop().is_err());
+        assert!(
+            orphan
+                .verify_recovery_stop_with_boot(Some(launch_boot))
+                .is_err()
+        );
+        assert!(store.recover_run(&orphan.id, &digest, 4).is_err());
+        assert_eq!(store.unsettled_runs().unwrap().len(), 1);
+        server.kill().unwrap();
+        server.wait().unwrap();
+        // Even an exited child cannot be identified from a missing PID on this boot.
+        assert!(
+            orphan
+                .verify_recovery_stop_with_boot(Some(launch_boot))
+                .is_err()
+        );
+        assert!(
+            store
+                .recover_run_with_boot(&orphan.id, &digest, 4, Some(launch_boot))
+                .is_err()
+        );
+        // UUID spelling is not boot identity: upper case still names this boot.
+        assert!(
+            store
+                .recover_run_with_boot(&orphan.id, &digest, 4, Some(&launch_boot.to_uppercase()))
+                .is_err()
+        );
+        assert!(
+            store
+                .recover_run_with_boot(&orphan.id, &stale_digest, 4, Some(next_boot))
+                .is_err()
+        );
+        let settled = store
+            .recover_run_with_boot(&orphan.id, &digest, 4, Some(next_boot))
+            .unwrap();
+        assert_eq!(settled.phase, "settled");
+        assert_eq!(
+            store.session(&session.id).unwrap().unwrap().state,
+            State::Uncertain
+        );
+        assert!(
+            store
+                .recover_run_with_boot(&orphan.id, &digest, 5, Some(next_boot))
+                .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recorded_live_tool_group_and_legacy_missing_witness_keep_custody() {
+        use std::os::unix::process::CommandExt;
+        let dir = root();
+        let store = Store::open(&xcb_core::canonical(dir.path()).unwrap().join("state")).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Test", 1, None)
+            .unwrap();
+        let prepared = store.prepare_probe(&account.id, None, 2).unwrap();
+        let mut server = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let boot = "00000000-0000-0000-0000-000000000001";
+        let other = "00000000-0000-0000-0000-000000000002";
+        store
+            .mark_capability_starting_with_boot(&prepared, "browser", Some(boot))
+            .unwrap();
+        store
+            .mark_capability_spawned(&prepared, "browser", server.id())
+            .unwrap();
+        let orphan = orphaned(
+            &store,
+            &store.mark_spawned(&prepared, i32::MAX as u32).unwrap(),
+        );
+        let (_, digest) = store.recovery_candidate(&orphan.id).unwrap().unwrap();
+        assert!(orphan.verify_recovery_stop_with_boot(Some(other)).is_err());
+        assert!(
+            store
+                .recover_run_with_boot(&orphan.id, &digest, 3, Some(other))
+                .is_err()
+        );
+        server.kill().unwrap();
+        server.wait().unwrap();
+        assert_eq!(store.unsettled_runs().unwrap().len(), 1);
+        let mut legacy = orphan.clone();
+        legacy.capability_processes.insert("browser".into(), None);
+        legacy.capability_boots.clear();
+        assert!(
+            legacy
+                .verify_recovery_stop_with_boot(Some(other))
+                .unwrap_err()
+                .to_string()
+                .contains("no recorded process group or run-bound boot witness")
+        );
     }
 
     #[test]

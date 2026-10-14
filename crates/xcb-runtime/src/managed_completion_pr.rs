@@ -134,7 +134,7 @@ struct ObserverCustody {
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-async fn boot_identity() -> Result<String> {
+pub(super) async fn boot_identity() -> Result<String> {
     #[cfg(target_os = "macos")]
     let boot = {
         let mut command = Command::new("/usr/sbin/sysctl");
@@ -163,7 +163,7 @@ async fn boot_identity() -> Result<String> {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-async fn boot_identity() -> Result<String> {
+pub(super) async fn boot_identity() -> Result<String> {
     Err(Error::Unavailable(
         "completion observer boot identity unsupported",
     ))

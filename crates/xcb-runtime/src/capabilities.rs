@@ -23,6 +23,14 @@ const MAX_TOOLS: usize = 128;
 const MAX_INVENTORY_BYTES: usize = 256 * 1024;
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
+fn optional_boot_witness(observed: Result<String>) -> Result<Option<String>> {
+    match observed {
+        Ok(boot) => Ok(Some(boot)),
+        Err(error) if error.is_cleanup_unproven() => Err(error),
+        Err(_) => Ok(None),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilityFeature {
@@ -435,6 +443,10 @@ impl CapabilityManager {
             command.env(name, value);
         }
         command.envs(&config.environment);
+        // Persist a host-generated witness with the launch intent when the OS
+        // exposes one. An unavailable identity must not disable host tools:
+        // a missing-PID launch without a witness simply retains custody.
+        let boot = optional_boot_witness(crate::managed::host_boot_identity().await)?;
         if config.name == crate::chrome_connector::SERVER_NAME {
             let account = config
                 .credential_account
@@ -482,12 +494,19 @@ impl CapabilityManager {
                 }
             }
             if let Some(probe) = &self.credential_runs[index] {
-                self.store.mark_capability_starting(probe, &config.name)?;
+                self.store.mark_capability_starting_with_boot(
+                    probe,
+                    &config.name,
+                    boot.as_deref(),
+                )?;
             }
         }
         // Persist a starting marker first: a crash between spawn and pid
         // publication must never make recovery mistake this for no process.
-        if let Err(error) = self.store.mark_capability_starting(&self.run, &config.name) {
+        if let Err(error) =
+            self.store
+                .mark_capability_starting_with_boot(&self.run, &config.name, boot.as_deref())
+        {
             if let Some(probe) = &self.credential_runs[index] {
                 self.store.clear_capability_custody(probe, &config.name)?;
                 self.store.require_settled_tools(probe)?;
@@ -1461,6 +1480,23 @@ fn validate_result(result: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_boot_witness_preserves_launch_but_unjoined_observer_does_not() {
+        assert_eq!(
+            optional_boot_witness(Ok("exact-boot".into())).unwrap(),
+            Some("exact-boot".into())
+        );
+        assert_eq!(
+            optional_boot_witness(Err(Error::Unavailable("host boot identity unavailable")))
+                .unwrap(),
+            None
+        );
+        assert!(matches!(
+            optional_boot_witness(Err(Error::CleanupUnproven)),
+            Err(Error::CleanupUnproven)
+        ));
+    }
 
     fn config() -> CapabilityServer {
         CapabilityServer {

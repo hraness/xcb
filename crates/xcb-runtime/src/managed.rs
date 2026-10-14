@@ -56,6 +56,11 @@ pub use habitat::{HabitatSchedule, ScheduleView, WorkMemory};
 mod completion;
 #[path = "managed_completion_pr.rs"]
 mod completion_pr;
+
+/// Trusted, bounded host boot identity used for run-bound recovery witnesses.
+pub(crate) async fn host_boot_identity() -> Result<String> {
+    completion_pr::boot_identity().await
+}
 #[path = "managed_project.rs"]
 mod project;
 pub use completion::CompletionReview;

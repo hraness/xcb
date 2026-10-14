@@ -882,18 +882,18 @@ impl ManagedStore {
             })
         }) {
             return Ok(format!(
-                "run {} is not settled; inspect xcb recover {} before dismissal",
+                "run {} is not settled; inspect xcb recover {} for missing stop proof before any dismissal",
                 run.id, run.id
             ));
         }
         if self.inbox_batch(&task.id)?.is_some() {
             return Ok(format!(
-                "reply delivery cannot be reconciled; use xcb backlog reconcile {} --revision {} or explicitly accept it with xcb backlog dismiss {} --revision {} --accept-unreconciled-reply",
+                "reply delivery cannot be reconciled; use xcb backlog reconcile {} --revision {} or explicitly accept it with xcb backlog dismiss {} --revision {} --accept-unreconciled-effects --accept-unreconciled-reply",
                 task.id, task.revision, task.id, task.revision
             ));
         }
         Ok(format!(
-            "no unsettled run or reply; use xcb backlog reconcile {} --revision {} or xcb backlog dismiss {} --revision {}",
+            "no unsettled run or reply; use xcb backlog reconcile {} --revision {} or xcb backlog dismiss {} --revision {} --accept-unreconciled-effects",
             task.id, task.revision, task.id, task.revision
         ))
     }
