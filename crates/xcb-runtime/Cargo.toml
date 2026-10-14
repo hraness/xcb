@@ -34,10 +34,10 @@ thiserror = "=2.0.21"
 time = { version = "=0.3.55", features = ["parsing"] }
 tokio = { version = "=1.47.1", features = ["rt-multi-thread", "macros", "process", "io-util", "io-std", "net", "sync", "time", "signal"] }
 tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring", "tls12"] }
-uuid = { version = "=1.27.0", features = ["v4", "v7", "serde"] }
+uuid = { version = "=1.28.0", features = ["v4", "v7", "serde"] }
 webpki-roots = "=1.0.9"
 xcb-core = { version = "0.20.12", path = "../xcb-core" }
-zeroize = "=1.9.0"
+zeroize = "=1.9.1"
 
 [target.'cfg(unix)'.dependencies]
 # The shared custody crate and rustix's fs/process modules are Unix-only;
