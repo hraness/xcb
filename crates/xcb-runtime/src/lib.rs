@@ -233,3 +233,6 @@ pub fn digest(bytes: impl AsRef<[u8]>) -> String {
 
 #[cfg(test)]
 mod authentication_tests;
+
+#[cfg(all(test, target_os = "macos"))]
+mod boot_witness_live;

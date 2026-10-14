@@ -83,6 +83,9 @@ pub enum BacklogCommand {
         /// Current task revision; a stale dismissal is rejected.
         #[arg(long)]
         revision: u64,
+        /// Explicitly accept unreconciled effects; closure fails without retry.
+        #[arg(long)]
+        accept_unreconciled_effects: bool,
         /// Accept that a recorded reply's delivery cannot be proven; do not retry it.
         #[arg(long)]
         accept_unreconciled_reply: bool,
@@ -1098,8 +1101,10 @@ pub async fn backlog(
         Some(BacklogCommand::Dismiss {
             id,
             revision,
+            accept_unreconciled_effects,
             accept_unreconciled_reply,
         }) => {
+            require_effects_acceptance(accept_unreconciled_effects)?;
             let id = store.resolve_task(&id)?;
             let runs = xcb_runtime::store::Store::open(root)?;
             store
@@ -1629,6 +1634,15 @@ pub fn attention(root: &Path, json: bool) -> Result<i32> {
     Ok(0)
 }
 
+fn require_effects_acceptance(accepted: bool) -> Result<()> {
+    if !accepted {
+        return Err(Error::Conflict(
+            "dismissal requires explicit --accept-unreconciled-effects; no retry will be launched",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1640,6 +1654,11 @@ mod tests {
 
     #[test]
     fn explicit_reply_acceptance_requires_a_revision_checked_owner_dismissal() {
+        assert_eq!(
+            require_effects_acceptance(false).unwrap_err().to_string(),
+            "conflict: dismissal requires explicit --accept-unreconciled-effects; no retry will be launched"
+        );
+        assert!(require_effects_acceptance(true).is_ok());
         assert!(parses(&[
             "backlog",
             "dismiss",
@@ -1653,6 +1672,15 @@ mod tests {
             "t_example",
             "--revision",
             "6",
+            "--accept-unreconciled-effects"
+        ]));
+        assert!(parses(&[
+            "backlog",
+            "dismiss",
+            "t_example",
+            "--revision",
+            "6",
+            "--accept-unreconciled-effects",
             "--accept-unreconciled-reply"
         ]));
         assert!(!parses(&[

@@ -193,6 +193,7 @@ impl Store {
         let settled = RunRecord {
             phase: "settled".into(),
             capability_processes: BTreeMap::new(),
+            capability_boots: BTreeMap::new(),
             ..run
         };
         if tx.execute(

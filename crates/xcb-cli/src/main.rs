@@ -3792,7 +3792,12 @@ async fn dispatch_inner(
                         "run isn't running; recovery needs a running run with a recorded process ID",
                     ));
                 }
-                run.verify_recovery_stop()?;
+                let missing_tool_pid = run.capability_processes.values().any(Option::is_none);
+                if missing_tool_pid {
+                    store.verify_recovery_stop_after_boot_change(&run).await?;
+                } else {
+                    run.verify_recovery_stop()?;
+                }
                 if !yes {
                     if cli.json {
                         print_json(
@@ -3818,7 +3823,13 @@ async fn dispatch_inner(
                         .ok_or(Error::Unavailable("run not found"))?
                         .1;
                 }
-                let recovered = store.recover_run(&run_id, &run_digest, now_ms())?;
+                let recovered = if missing_tool_pid {
+                    store
+                        .recover_run_after_boot_change(&run_id, &run_digest, now_ms())
+                        .await?
+                } else {
+                    store.recover_run(&run_id, &run_digest, now_ms())?
+                };
                 if cli.json {
                     print_json(
                         json!({"version":1,"recovered":recovered.id,"phase":recovered.phase,"pid":pid,"discardedUnstartedCommand":discard}),
