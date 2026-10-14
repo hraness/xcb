@@ -1,30 +1,53 @@
 name: Dependabot auto-merge
 
-# Dependabot pull requests merge themselves once the Required check passes.
-# The workflow only flips auto-merge on; branch policy still decides.
+# GITHUB_TOKEN merges suppress push workflows. Merge only after a successful
+# Check on the exact Dependabot head, using the existing release-tagger app's
+# contents:write token so the resulting push starts Check on main.
 on:
-  pull_request_target:
-    types: [opened, synchronize, reopened]
+  workflow_run:
+    workflows: [Check]
+    types: [completed]
 
 permissions:
   contents: read
 
 concurrency:
-  group: dependabot-auto-merge-${{ github.ref }}
-  cancel-in-progress: true
+  group: dependabot-auto-merge-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
 
 jobs:
-  enable:
-    name: Enable auto-merge
-    if: github.actor == 'dependabot[bot]'
+  merge:
+    name: Merge checked Dependabot PR
+    if: github.repository == 'hraness/xcb' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
+      pull-requests: read
     steps:
-      - name: Enable squash auto-merge
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test the merge gate
+        run: python3 -I .github/scripts/dependabot-auto-merge.test.py
+      - name: Select the PR for the completed check
+        id: select
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-        run: gh pr merge --auto --squash "$PR_URL"
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I .github/scripts/dependabot-auto-merge.py
+      - name: Mint the release-tagger token
+        if: steps.select.outputs.number
+        id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.RELEASE_TAGGER_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TAGGER_PRIVATE_KEY }}
+          permission-contents: write
+      - name: Squash merge the checked head
+        if: steps.select.outputs.number
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ steps.select.outputs.number }}
+          SHA: ${{ steps.select.outputs.sha }}
+        run: gh api -X PUT "repos/$REPO/pulls/$NUMBER/merge" -f merge_method=squash -f sha="$SHA"
