@@ -1175,7 +1175,7 @@ fn pin_model(provider: Provider, id: &str, effort: Option<&str>) -> xcb_core::mo
 #[tokio::test]
 async fn backlog_add_resolves_a_model_pin_to_its_observed_key() {
     let f = fixture().await;
-    let xcb = Store::open(f.managed.root()).unwrap();
+    let xcb = Store::open(f.managed.root().parent().unwrap()).unwrap();
     xcb.set_models(
         Provider::Codex,
         &[
@@ -1215,7 +1215,7 @@ async fn backlog_add_resolves_a_model_pin_to_its_observed_key() {
 #[tokio::test]
 async fn backlog_add_refuses_unresolvable_or_ambiguous_model_pins() {
     let f = fixture().await;
-    let xcb = Store::open(f.managed.root()).unwrap();
+    let xcb = Store::open(f.managed.root().parent().unwrap()).unwrap();
     xcb.set_models(
         Provider::Codex,
         &[
@@ -1260,15 +1260,17 @@ async fn backlog_add_refuses_unresolvable_or_ambiguous_model_pins() {
 #[tokio::test]
 async fn backlog_add_refuses_a_never_excluded_pin() {
     let f = fixture().await;
-    let xcb = Store::open(f.managed.root()).unwrap();
+    let xcb = Store::open(f.managed.root().parent().unwrap()).unwrap();
     xcb.set_models(
         Provider::Codex,
         &[pin_model(Provider::Codex, "gpt-6-sol", Some("ultra"))],
     )
     .unwrap();
-    let (mut config, revision) = Config::load(f.managed.root()).unwrap();
+    let (mut config, revision) = Config::load(f.managed.root().parent().unwrap()).unwrap();
     config.routing.never.push("codex/gpt-*-sol/*".into());
-    config.save(f.managed.root(), revision.as_deref()).unwrap();
+    config
+        .save(f.managed.root().parent().unwrap(), revision.as_deref())
+        .unwrap();
     assert!(
         f.managed
             .enqueue_backlog_at(
@@ -1289,7 +1291,7 @@ async fn backlog_add_refuses_a_never_excluded_pin() {
 #[tokio::test]
 async fn backlog_add_refuses_a_pin_that_contradicts_a_required_provider() {
     let f = fixture().await;
-    let xcb = Store::open(f.managed.root()).unwrap();
+    let xcb = Store::open(f.managed.root().parent().unwrap()).unwrap();
     xcb.set_models(
         Provider::Codex,
         &[pin_model(Provider::Codex, "gpt-6-sol", Some("ultra"))],
