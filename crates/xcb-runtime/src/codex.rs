@@ -41,6 +41,13 @@ pub struct Metadata {
     pub quotas: Vec<QuotaPoint>,
 }
 
+// The old 15s per-RPC timer could expire while a cold app-server was still
+// resolving account, catalog or connector state. Permit a delayed reply (3x
+// that window), but cap the *whole* initialize exchange as well: pagination
+// and notifications must not renew an unresponsive startup forever. The
+// runner's own turn timeout and cancellation still take precedence.
+const CODEX_RPC_TIMEOUT: Duration = Duration::from_secs(45);
+const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_CALLS: usize = 1024;
 const MAX_ITEMS: usize = 4096;
 // Backstop only: the host ends a turn gracefully at MAX_TURN_FRAMES, and this
@@ -104,6 +111,7 @@ pub(crate) struct CodexProtocol {
     turn_rpc: Option<u64>,
     early_turn: Option<String>,
     initialized: bool,
+    startup_deadline: Option<tokio::time::Instant>,
     ready: bool,
     completed: bool,
     interrupted: bool,
@@ -562,6 +570,7 @@ impl CodexProtocol {
             turn_rpc: None,
             early_turn: None,
             initialized: false,
+            startup_deadline: None,
             ready: false,
             completed: false,
             interrupted: false,
@@ -1039,17 +1048,48 @@ impl CodexProtocol {
         method: &'static str,
         params: Value,
     ) -> Result<Value> {
+        self.rpc_with_timeout(process, method, params, CODEX_RPC_TIMEOUT)
+            .await
+    }
+    async fn rpc_with_timeout(
+        &mut self,
+        process: &mut StreamProcess,
+        method: &'static str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value> {
         require(
             crate::provider_methods::codex_rpc_supported(method),
             "Codex method is not integrated",
         )?;
+        let per_rpc_deadline = tokio::time::Instant::now() + timeout;
+        let deadline = self
+            .startup_deadline
+            .map_or(per_rpc_deadline, |startup| per_rpc_deadline.min(startup));
+        // A spent overall budget must not send another request whose response
+        // cannot be accepted. Send and receive share the same fixed deadline.
+        if tokio::time::Instant::now() >= deadline {
+            return Err(Error::CodexDeadline {
+                method,
+                phase: "before send",
+                traffic: "startup budget exhausted",
+            });
+        }
         self.next_id += 1;
         require(self.next_id <= 256, "Codex RPC bound")?;
         let id = self.next_id;
-        process
-            .send(&json!({"id":id,"method":method,"params":params}))
-            .await?;
-        tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::time::timeout_at(
+            deadline,
+            process.send(&json!({"id":id,"method":method,"params":params})),
+        )
+        .await
+        .map_err(|_| Error::CodexDeadline {
+            method,
+            phase: "send",
+            traffic: "no reply expected",
+        })??;
+        let mut notices = false;
+        tokio::time::timeout_at(deadline, async {
             loop {
                 let frame = process
                     .frame()
@@ -1058,6 +1098,7 @@ impl CodexProtocol {
                 let value = self.envelope(&frame)?;
                 if value.get("method").is_some() {
                     self.startup_notice(&value)?;
+                    notices = true;
                     continue;
                 }
                 require(value["id"] == id, "Codex unexpected RPC response")?;
@@ -1068,7 +1109,15 @@ impl CodexProtocol {
             }
         })
         .await
-        .map_err(|_| Error::Protocol("Codex initialization deadline"))?
+        .map_err(|_| Error::CodexDeadline {
+            method,
+            phase: "response",
+            traffic: if notices {
+                "notifications only"
+            } else {
+                "no complete frames"
+            },
+        })?
     }
     fn thread_request(&self, instructions: &str) -> Value {
         let effort = self.options.model.effort.as_ref().map(Id::as_str);
@@ -1970,13 +2019,23 @@ impl Protocol for CodexProtocol {
                 .as_bytes(),
             "Codex launch configuration changed",
         )?;
+        self.startup_deadline = Some(tokio::time::Instant::now() + INITIALIZE_TIMEOUT);
         let initialized = self.rpc(process, "initialize", initialize_params()).await?;
         require(
             initialized["codexHome"] == json!(self.options.account_home),
             "Codex account home changed",
         )?;
         text(&initialized["userAgent"], 1024)?;
-        process.send(&json!({"method":"initialized"})).await?;
+        tokio::time::timeout_at(
+            self.startup_deadline.expect("initialization budget"),
+            process.send(&json!({"method":"initialized"})),
+        )
+        .await
+        .map_err(|_| Error::CodexDeadline {
+            method: "initialized",
+            phase: "send",
+            traffic: "no reply expected",
+        })??;
         let account = self
             .rpc(process, "account/read", json!({"refreshToken":false}))
             .await?;
@@ -2050,6 +2109,7 @@ impl Protocol for CodexProtocol {
         )?;
         self.initialized = true;
         if self.options.metadata_only {
+            self.startup_deadline = None;
             return Ok(models);
         }
         require(
@@ -2082,6 +2142,7 @@ impl Protocol for CodexProtocol {
             )?;
             self.native_ready = true;
         }
+        self.startup_deadline = None;
         Ok(models)
     }
     async fn start(&mut self, process: &mut StreamProcess, prompt: Prompt) -> Result<()> {

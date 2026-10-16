@@ -84,6 +84,100 @@ async fn unimplemented_client_controls_never_write_a_provider_request() {
     assert!(process.join().await);
 }
 
+// An app-server that actually replies after the former 15s cutoff is not a
+// broken exchange. This uses a real pipe, not a mocked timer or a provider
+// account, and verifies that the delayed response remains bound to its RPC.
+#[tokio::test]
+async fn delayed_app_server_startup_reply_is_accepted() {
+    let mut c = codec();
+    let mut command = tokio::process::Command::new("/bin/sh");
+    command.arg("-c").arg(
+        "IFS= read -r request; sleep 16; printf '%s\\n' '{\"id\":1,\"result\":{\"requiresOpenaiAuth\":true}}'",
+    );
+    let mut process = StreamProcess::spawn(command).unwrap();
+    let started = tokio::time::Instant::now();
+    let reply = c
+        .rpc(&mut process, "account/read", json!({"refreshToken":false}))
+        .await
+        .unwrap();
+    assert!(started.elapsed() >= Duration::from_secs(15));
+    assert_eq!(reply["requiresOpenaiAuth"], true);
+    assert_eq!(c.next_id, 1);
+    assert!(process.join().await);
+}
+
+#[tokio::test]
+async fn silent_or_notification_only_app_server_stops_with_safe_phase_diagnostics() {
+    for (prefix, traffic) in [
+        ("", "no complete frames"),
+        (
+            "printf '%s\\n' '{\"method\":\"deprecationNotice\",\"params\":{\"summary\":\"SYNTHETIC_PRIVATE\"}}'; ",
+            "notifications only",
+        ),
+    ] {
+        let mut c = codec();
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(format!("IFS= read -r request; {prefix}sleep 5"));
+        let mut process = StreamProcess::spawn(command).unwrap();
+        let error = c
+            .rpc_with_timeout(
+                &mut process,
+                "account/read",
+                json!({"refreshToken":false}),
+                Duration::from_millis(200),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::CodexDeadline {
+                    method: "account/read",
+                    phase: "response",
+                    traffic: observed
+                } if observed == traffic
+            ),
+            "{error:?}"
+        );
+        assert!(!error.to_string().contains("SYNTHETIC_PRIVATE"));
+        assert!(process.join().await);
+        assert!(!c.initialized && c.thread_id.is_none() && !c.native_ready);
+    }
+}
+
+#[tokio::test]
+async fn exhausted_startup_budget_sends_no_new_rpc_and_bad_identity_fails_immediately() {
+    let mut c = codec();
+    c.startup_deadline = Some(tokio::time::Instant::now() - Duration::from_millis(1));
+    let mut process = StreamProcess::spawn(tokio::process::Command::new("/bin/cat")).unwrap();
+    assert!(matches!(
+        c.rpc(&mut process, "model/list", json!({})).await,
+        Err(Error::CodexDeadline {
+            method: "model/list",
+            phase: "before send",
+            ..
+        })
+    ));
+    process.stdin.take();
+    assert!(process.frame().await.unwrap().is_none());
+    assert_eq!(c.next_id, 0);
+    assert!(process.join().await);
+
+    let mut c = codec();
+    let mut command = tokio::process::Command::new("/bin/sh");
+    command
+        .arg("-c")
+        .arg("IFS= read -r request; printf '%s\\n' '{\"id\":2,\"result\":{}}'");
+    let mut process = StreamProcess::spawn(command).unwrap();
+    assert!(matches!(
+        c.rpc(&mut process, "initialize", initialize_params()).await,
+        Err(Error::Protocol("Codex unexpected RPC response"))
+    ));
+    assert!(process.join().await);
+}
+
 #[tokio::test]
 async fn observational_quota_inspection_never_consumes_reset_credits() {
     let mut c = codec();
