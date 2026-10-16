@@ -113,6 +113,14 @@ pub enum Error {
     Unavailable(&'static str),
     #[error("provider protocol error: {0}")]
     Protocol(&'static str),
+    /// Only host-selected RPC methods and fixed phase/traffic labels are
+    /// rendered. No provider frame, payload, path or account identifier.
+    #[error("Codex {method} {phase} deadline ({traffic})")]
+    CodexDeadline {
+        method: &'static str,
+        phase: &'static str,
+        traffic: &'static str,
+    },
     #[error("Codex unadmitted notification (method SHA-256 {method_sha256})")]
     CodexNotification { method_sha256: String },
     /// Provider-reported counters that do not reconcile. Values are provider

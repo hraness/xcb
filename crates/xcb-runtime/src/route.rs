@@ -388,6 +388,7 @@ fn settle(
                 Error::Conflict(_) => RouteCode::Busy,
                 Error::LaunchNotStarted(_)
                 | Error::Protocol(_)
+                | Error::CodexDeadline { .. }
                 | Error::CodexRpc { .. }
                 | Error::DevinRpc { .. }
                 | Error::DevinModelChoices { .. } => RouteCode::ProviderError,
@@ -587,6 +588,30 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(failure.code, RouteCode::Cancelled);
+    }
+
+    #[test]
+    fn codex_startup_deadline_keeps_provider_and_cancellation_classification() {
+        for (cancelled, code) in [
+            (false, RouteCode::ProviderError),
+            (true, RouteCode::Cancelled),
+        ] {
+            let failure = settle(
+                &Id::new("route_fixture").unwrap(),
+                Id::new("s_fixture").unwrap(),
+                fixture_route(),
+                Err(Error::CodexDeadline {
+                    method: "account/read",
+                    phase: "response",
+                    traffic: "no complete frames",
+                }),
+                cancelled,
+            )
+            .unwrap_err();
+            assert_eq!(failure.code, code);
+            // Failure classification never manufactures a join/effect witness.
+            assert!(failure.joined.is_none() && failure.effects.is_none());
+        }
     }
 
     #[test]

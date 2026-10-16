@@ -69,6 +69,7 @@ impl Diagnostic {
             | Error::Conflict(_)
             | Error::Unavailable(_)
             | Error::CodexRpc { .. }
+            | Error::CodexDeadline { .. }
             | Error::CodexUsage { .. }
             | Error::CodexNotification { .. }
             | Error::CodexNativeTool { .. }
