@@ -20,7 +20,7 @@ class Leases implements AccountLeaseStore {
 const model = (id = "synthetic-model") => ({ id, model: id, displayName: "Synthetic model", hidden: false, isDefault: true,
   supportedReasoningEfforts: [{ reasoningEffort: "high", description: "High" }, { reasoningEffort: "ultra", description: "Ultra" }], defaultReasoningEffort: "high",
   serviceTiers: [{ id: "priority", name: "Priority", description: "Synthetic tier" }], defaultServiceTier: "priority" });
-function fixture(options: { leases?: Leases; factoryFailure?: boolean; operationTimeoutMs?: number; closeTimeoutMs?: number; processGeneration?: number } = {}) {
+function fixture(options: { leases?: Leases; factoryFailure?: boolean; operationTimeoutMs?: number; closeTimeoutMs?: number; processGeneration?: number; now?: () => number } = {}) {
   const leases = options.leases ?? new Leases(), calls: string[] = [], requests: CodexAccountRequest[] = [];
   let binding: CodexAccountBinding | undefined, event: ((value: CodexAccountEvent) => void) | undefined;
   let account: unknown = { account: { type: "chatgpt", email: "private-email@example.invalid", planType: "plus", token: "ignored-token" }, requiresOpenaiAuth: true };
@@ -43,7 +43,7 @@ function fixture(options: { leases?: Leases; factoryFailure?: boolean; operation
     async listModels(request) { calls.push(`models:${request.cursor ?? "first"}`); requests.push(request); return wrap(request, pages[pageIndex++] ?? { data: [], nextCursor: null }); },
     async close() { calls.push("close"); onClose?.(); if (closeGate) await closeGate.promise; return { binding: binding!, processExited: true, processGroupStopped: true, stdoutEnded: true, stderrEnded: true, writesSettled: true, requestsSettled: true, notificationsSettled: true, ...receiptOverrides }; },
   };
-  const controller = createManagedCodexAccountController({ accountId: "account-one", owner: "owner-one", processGeneration: options.processGeneration ?? 3, leases,
+  const controller = createManagedCodexAccountController({ accountId: "account-one", owner: "owner-one", processGeneration: options.processGeneration ?? 3, leases, ...(options.now === undefined ? {} : { now: options.now }),
     ...(options.operationTimeoutMs === undefined ? {} : { operationTimeoutMs: options.operationTimeoutMs }),
     ...(options.closeTimeoutMs === undefined ? {} : { closeTimeoutMs: options.closeTimeoutMs }),
     transportFactory(value, onEvent) { calls.push("factory"); binding = value; event = onEvent; if (options.factoryFailure) throw new Error("private-launch-error"); return transport; } });
@@ -115,7 +115,8 @@ describe("managed Codex account controller", () => {
     expect((await f.controller.startLogin("chatgptDeviceCode")).loginId).toBe("login-one"); await f.controller.close();
   });
   test.each(["abort", "timeout"] as const)("dispatched login %s retains unresolved custody and discards its late challenge", async kind => {
-    const f = fixture({ operationTimeoutMs: kind === "timeout" ? 5 : 1000, closeTimeoutMs: 5 });
+    // The held login still proves the first close times out; the retry needs a realistic CI deadline.
+    const f = fixture({ operationTimeoutMs: kind === "timeout" ? 5 : 1000, closeTimeoutMs: 1000 });
     const gate = f.holdLogin(), abort = new AbortController();
     const started = f.controller.startLogin("chatgptDeviceCode", abort.signal);
     await f.loginEntered.promise; const generation = f.controller.snapshot().accountGeneration;
@@ -137,6 +138,21 @@ describe("managed Codex account controller", () => {
     expect(f.controller.snapshot().pendingLoginId).toBeNull(); expect(f.leases.releases).toBe(1);
     expect(JSON.stringify(f.controller.snapshot())).not.toContain("ABCD-EFGH");
     await expect(f.controller.startLogin("chatgptDeviceCode")).rejects.toThrow("CODEX_ACCOUNT_UNAVAILABLE");
+  });
+  test("synthetic delay after gate release exhausts the close deadline", async () => {
+    let time = 0;
+    const f = fixture({ closeTimeoutMs: 1000, now: () => time }), gate = f.holdLogin(), abort = new AbortController();
+    const started = f.controller.startLogin("chatgptDeviceCode", abort.signal);
+    await f.loginEntered.promise; abort.abort(); await expect(started).rejects.toThrow("CODEX_ACCOUNT_ABORTED");
+    expect(await f.controller.close()).toEqual({ released: false, state: "recovery-required" });
+    expect(f.leases.releases).toBe(0);
+    gate.resolve();
+    f.onClose(() => { time += 1000; }); // Emulate a scheduler stall inside close after its deadline starts.
+    expect(await f.controller.close()).toEqual({ released: false, state: "recovery-required" });
+    expect(f.leases.current).toBeDefined(); expect(f.leases.releases).toBe(0);
+    f.onClose(() => {});
+    expect(await f.controller.close()).toEqual({ released: true, state: "closed" });
+    expect(f.leases.releases).toBe(1);
   });
   test("unknown native login polling cannot be retried after a provider rejection", async () => {
     const f = fixture(); f.loginFailure();
