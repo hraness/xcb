@@ -431,7 +431,7 @@ impl RunRecord {
         self.verify_recovery_stop_with_boot(None)
     }
 
-    fn verify_recovery_stop_with_boot(&self, current_boot: Option<&str>) -> Result<()> {
+    pub(crate) fn verify_recovery_stop_with_boot(&self, current_boot: Option<&str>) -> Result<()> {
         if self.phase != "running" {
             return Err(Error::Conflict("run is not in running phase"));
         }
@@ -2032,11 +2032,25 @@ impl Store {
     /// Called only by trusted backend recovery after its exact guest/stream
     /// join proof. Repeat host stop and complete run/custody identity under the
     /// writer lock. The account remains leased until ordinary run recovery.
+    #[cfg(test)]
     pub(crate) fn reconcile_command_custody(
         &self,
         run_id: &Id,
         expected_digest: &str,
         custody: &crate::command::CommandCustody,
+    ) -> Result<RunRecord> {
+        self.reconcile_command_custody_with_boot(run_id, expected_digest, custody, None)
+    }
+
+    /// `current_boot` must come from the trusted host boot observer, never a
+    /// caller's claim. Recheck that witness under the same writer transaction
+    /// as the run/custody CAS; a CLI preflight alone cannot release custody.
+    pub(crate) fn reconcile_command_custody_with_boot(
+        &self,
+        run_id: &Id,
+        expected_digest: &str,
+        custody: &crate::command::CommandCustody,
+        current_boot: Option<&str>,
     ) -> Result<RunRecord> {
         validate_command_custody(run_id, custody)?;
         let mut db = self.db()?;
@@ -2053,7 +2067,7 @@ impl Store {
         if current.id != *run_id || current.command_custody.as_ref() != Some(custody) {
             return Err(Error::Conflict("command custody changed"));
         }
-        current.verify_recovery_stop()?;
+        current.verify_recovery_stop_with_boot(current_boot)?;
         current.command_custody = None;
         if tx.execute("UPDATE runs SET payload=?1 WHERE id=?2 AND account=?3 AND phase='running' AND payload=?4", params![serde_json::to_string(&current)?, run_id.as_str(), current.account.as_str(), payload])? != 1 {
             return Err(Error::Conflict("run changed since command recovery proof"));

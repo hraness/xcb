@@ -676,14 +676,14 @@ fn recovery_discard_refuses_live_owner_stale_digest_and_recoverable_command() {
     )
     .unwrap();
     let (live, live_digest) = store.recovery_candidate(&live.id).unwrap().unwrap();
-    assert!(discard_unstarted_in(&command_root, &store, &live, &live_digest).is_err());
+    assert!(discard_unstarted_in(&command_root, &store, &live, &live_digest, None).is_err());
     assert_eq!(store.unsettled_runs().unwrap().len(), 1);
     let dead = store.orphan_run_for_test(&store.run(&live.id).unwrap().unwrap());
     let (_, digest) = store.recovery_candidate(&dead.id).unwrap().unwrap();
     dead.verify_recovery_stop().unwrap();
-    assert!(discard_unstarted_in(&command_root, &store, &dead, &live_digest).is_err());
+    assert!(discard_unstarted_in(&command_root, &store, &dead, &live_digest, None).is_err());
     private::create(&job.join("outcome.json"), b"{}").unwrap();
-    let refusal = discard_unstarted_in(&command_root, &store, &dead, &digest)
+    let refusal = discard_unstarted_in(&command_root, &store, &dead, &digest, None)
         .unwrap_err()
         .to_string();
     assert!(
@@ -727,10 +727,10 @@ fn recovery_discard_of_proven_unsubmitted_command_retains_job_and_requires_fresh
         &serde_json::to_vec(&custody).unwrap(),
     )
     .unwrap();
-    assert!(discard_unstarted_in(&command_root, &store, &dead, "stale").is_err());
+    assert!(discard_unstarted_in(&command_root, &store, &dead, "stale", None).is_err());
     assert!(job.join("discarded.json").exists());
     assert_eq!(store.unsettled_runs().unwrap().len(), 1);
-    let cleared = discard_unstarted_in(&command_root, &store, &dead, &digest).unwrap();
+    let cleared = discard_unstarted_in(&command_root, &store, &dead, &digest, None).unwrap();
     assert!(cleared.command_custody.is_none());
     assert!(job.join("discarded.json").exists());
     assert!(store.recover_run(&dead.id, &digest, 4).is_err());
@@ -738,4 +738,282 @@ fn recovery_discard_of_proven_unsubmitted_command_retains_job_and_requires_fresh
     store.recover_run(&dead.id, &fresh, 4).unwrap();
     assert_eq!(store.unsettled_runs().unwrap().len(), 0);
     assert!(store.prepare_probe(&account.id, None, 5).is_ok());
+}
+
+// No VM or credential is needed: these receipts model one exact started guest
+// command while the run, lease and revision live in a real isolated store.
+const COMMAND_LAUNCH_BOOT: &str = "abcdef00-0000-0000-0000-000000000001";
+const COMMAND_NEXT_BOOT: &str = "abcdef00-0000-0000-0000-000000000002";
+
+struct RecoveryFixture {
+    _directory: tempfile::TempDir,
+    store: Store,
+    run: RunRecord,
+    run_digest: String,
+    command_root: PathBuf,
+    job: PathBuf,
+    original: PathBuf,
+}
+
+fn recovery_fixture(launch_boot: Option<&str>, orphan: bool) -> RecoveryFixture {
+    let directory = tempfile::tempdir().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
+    let store = Store::open(&base.join("state")).unwrap();
+    let account = store
+        .add_account(xcb_core::Provider::Codex, "Recovery test", 1, None)
+        .unwrap();
+    let prepared = store.prepare_probe(&account.id, None, 2).unwrap();
+    store
+        .mark_capability_starting_with_boot(&prepared, "tool-server", launch_boot)
+        .unwrap();
+    let running = store.mark_spawned(&prepared, i32::MAX as u32).unwrap();
+    let custody = CommandCustody {
+        version: 1,
+        command_id: new_id("cmd"),
+        run_id: running.id.clone(),
+        workspace_id: "a".repeat(64),
+        snapshot_sha256: "b".repeat(64),
+        request_sha256: "c".repeat(64),
+        backend_sha256: "d".repeat(64),
+        boot_id: COMMAND_LAUNCH_BOOT.into(),
+    };
+    store.record_command_custody(&running, &custody).unwrap();
+    let running = store.run(&running.id).unwrap().unwrap();
+    if orphan {
+        store.orphan_run_for_test(&running);
+    }
+    let (run, run_digest) = store.recovery_candidate(&running.id).unwrap().unwrap();
+    let command_root = private::directory(&base.join("commands")).unwrap();
+    let jobs = private::directory(&command_root.join("jobs")).unwrap();
+    let job = private::directory(&jobs.join(custody.command_id.as_str())).unwrap();
+    private::create(
+        &job.join("custody.json"),
+        &serde_json::to_vec(&custody).unwrap(),
+    )
+    .unwrap();
+    private::create(&job.join("started.json"), b"{\"started\":true}").unwrap();
+    let original = base.join("original.txt");
+    std::fs::write(&original, b"original, never publish recovered edits").unwrap();
+    RecoveryFixture {
+        _directory: directory,
+        store,
+        run,
+        run_digest,
+        command_root,
+        job,
+        original,
+    }
+}
+
+fn recorded_command_join(fixture: &RecoveryFixture) {
+    let custody = fixture.run.command_custody.as_ref().unwrap();
+    let changes = b"staged edit, never publish";
+    private::create(&fixture.job.join("changes.json"), changes).unwrap();
+    let raw = serde_json::to_vec(&json!({
+        "version": 1, "custody": custody, "joined": true,
+        "cgroup": {"path": format!("/sys/fs/cgroup/system.slice/xcb-command-{}.service/worker", custody.command_id), "dev":1, "ino":2},
+        "exitCode": 0, "stdout": "ok", "stderr": "", "timedOut": false,
+        "cancelled": false, "truncated": false, "error": null,
+        "changesBase64": STANDARD.encode(changes), "changesSha256": digest(changes)
+    })).unwrap();
+    private::create(&fixture.job.join("guest-result.json"), &raw).unwrap();
+    private::create(
+        &fixture.job.join("guest-result-binding.json"),
+        &serde_json::to_vec(&json!({
+            "version": 1, "custody": custody, "resultSha256": digest(&raw)
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let outcome = CommandOutcome {
+        custody: custody.clone(),
+        joined: true,
+        error: None,
+        output: Some(CommandOutput {
+            exit_code: Some(0),
+            stdout: "ok".into(),
+            stderr: String::new(),
+            timed_out: false,
+            cancelled: false,
+            truncated: false,
+            changes_path: Some(fixture.job.join("changes.json")),
+            changes_sha256: Some(digest(changes)),
+            cleanup_pending: false,
+        }),
+    };
+    private::create(
+        &fixture.job.join("recovered.json"),
+        &serde_json::to_vec(&outcome).unwrap(),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn command_recovery_rechecks_changed_boot_and_exact_join_without_publishing() {
+    let fixture = recovery_fixture(Some(COMMAND_LAUNCH_BOOT), true);
+    recorded_command_join(&fixture);
+    assert!(fixture.run.verify_recovery_stop().is_err());
+    assert!(
+        recover_in(
+            &fixture.command_root,
+            &fixture.store,
+            &fixture.run,
+            &fixture.run_digest,
+            Some(COMMAND_LAUNCH_BOOT)
+        )
+        .await
+        .is_err()
+    );
+    let result = recover_in(
+        &fixture.command_root,
+        &fixture.store,
+        &fixture.run,
+        &fixture.run_digest,
+        Some(COMMAND_NEXT_BOOT),
+    )
+    .await
+    .unwrap();
+    assert!(result.command_custody.is_none());
+    assert_eq!(result.phase, "running"); // Ordinary run recovery still owns the lease.
+    assert_eq!(
+        std::fs::read(&fixture.original).unwrap(),
+        b"original, never publish recovered edits"
+    );
+    assert_eq!(
+        std::fs::read(fixture.job.join("changes.json")).unwrap(),
+        b"staged edit, never publish"
+    );
+    assert!(
+        fixture
+            .store
+            .unsettled_runs()
+            .unwrap()
+            .iter()
+            .any(|run| run.id == result.id)
+    );
+}
+
+#[tokio::test]
+async fn command_recovery_refuses_unusable_file_missing_guest_witness_live_worker_and_stale_revision()
+ {
+    for case in 0..5 {
+        let fixture = recovery_fixture(
+            if case == 2 {
+                None
+            } else {
+                Some(COMMAND_LAUNCH_BOOT)
+            },
+            case != 3,
+        );
+        if case == 0 {
+            private::create(&fixture.job.join("recovered.json"), b"{broken").unwrap();
+        } else {
+            recorded_command_join(&fixture);
+        }
+        if case == 1 {
+            std::fs::remove_file(fixture.job.join("guest-result-binding.json")).unwrap();
+        }
+        let revision = if case == 4 {
+            "stale"
+        } else {
+            &fixture.run_digest
+        };
+        let error = recover_in(
+            &fixture.command_root,
+            &fixture.store,
+            &fixture.run,
+            revision,
+            Some(COMMAND_NEXT_BOOT),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        match case {
+            0 | 1 => assert!(
+                error.contains("recovery file")
+                    && error.contains("custody-bound joined guest receipt"),
+                "{error}"
+            ),
+            2 => assert!(
+                error.contains("no recorded process group or run-bound boot witness"),
+                "{error}"
+            ),
+            3 => assert!(error.contains("still running"), "{error}"),
+            4 => assert!(
+                error.contains("run changed since command recovery proof"),
+                "{error}"
+            ),
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            fixture
+                .store
+                .run(&fixture.run.id)
+                .unwrap()
+                .unwrap()
+                .command_custody,
+            fixture.run.command_custody
+        );
+        assert_eq!(fixture.store.unsettled_runs().unwrap().len(), 1);
+        assert_eq!(
+            std::fs::read(&fixture.original).unwrap(),
+            b"original, never publish recovered edits"
+        );
+        assert!(
+            fixture
+                .store
+                .prepare_probe(&fixture.run.account, None, 4)
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn unsubmitted_discard_rechecks_run_bound_boot_without_relaxing_no_start_rule() {
+    let fixture = recovery_fixture(Some(COMMAND_LAUNCH_BOOT), true);
+    let custody = fixture.run.command_custody.as_ref().unwrap();
+    // A boot witness cannot justify discarding a command that reached the guest.
+    assert!(
+        discard_unstarted_in(
+            &fixture.command_root,
+            &fixture.store,
+            &fixture.run,
+            &fixture.run_digest,
+            Some(COMMAND_NEXT_BOOT)
+        )
+        .is_err()
+    );
+    assert!(!fixture.job.join("discarded.json").exists());
+    std::fs::remove_file(fixture.job.join("started.json")).unwrap();
+    assert!(
+        discard_unstarted_in(
+            &fixture.command_root,
+            &fixture.store,
+            &fixture.run,
+            &fixture.run_digest,
+            Some(COMMAND_LAUNCH_BOOT)
+        )
+        .is_err()
+    );
+    let settled = discard_unstarted_in(
+        &fixture.command_root,
+        &fixture.store,
+        &fixture.run,
+        &fixture.run_digest,
+        Some(COMMAND_NEXT_BOOT),
+    )
+    .unwrap();
+    assert!(settled.command_custody.is_none());
+    assert!(fixture.job.join("discarded.json").exists());
+    assert!(
+        fixture
+            .store
+            .recover_run(&fixture.run.id, &fixture.run_digest, 4)
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read(&fixture.original).unwrap(),
+        b"original, never publish recovered edits"
+    );
+    assert_eq!(custody.run_id, fixture.run.id);
 }
