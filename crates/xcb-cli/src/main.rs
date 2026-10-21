@@ -3814,7 +3814,20 @@ async fn dispatch_inner(
                 process::prove_process_group_absent(pid)?;
                 if run.command_custody.is_some() {
                     if discard {
-                        xcb_runtime::command_tool::discard_unstarted(&store, &run, &run_digest)?;
+                        if missing_tool_pid {
+                            xcb_runtime::command_tool::discard_unstarted_after_boot_change(
+                                &store,
+                                &run,
+                                &run_digest,
+                            )
+                            .await?;
+                        } else {
+                            xcb_runtime::command_tool::discard_unstarted(
+                                &store,
+                                &run,
+                                &run_digest,
+                            )?;
+                        }
                     } else {
                         xcb_runtime::command_tool::recover(&store, &run, &run_digest).await?;
                     }
