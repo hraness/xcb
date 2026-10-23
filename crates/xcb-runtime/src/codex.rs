@@ -110,6 +110,9 @@ pub(crate) struct CodexProtocol {
     turn_id: Option<String>,
     turn_rpc: Option<u64>,
     early_turn: Option<String>,
+    /// This launch's model/list advertisement of the selected pair. Not the
+    /// stored catalog timestamp and never evidence that a later request works.
+    selected_catalog_at_ms: Option<u64>,
     initialized: bool,
     startup_deadline: Option<tokio::time::Instant>,
     ready: bool,
@@ -219,7 +222,49 @@ fn rpc_failure(method: &'static str, error: &Value) -> Error {
         method,
         code: error["code"].as_i64().unwrap_or(-32603),
         category,
+        detail: None,
     }
+}
+
+// Closed labels preserve useful provider evidence without ever copying the
+// message or nested codexErrorInfo value (both may carry credentials).
+fn turn_error_evidence(error: &Value) -> (&'static str, &'static str, &'static str) {
+    let tag = match error_tag(error) {
+        "usageLimitExceeded" => "usageLimitExceeded",
+        "unauthorized" => "unauthorized",
+        "contextWindowExceeded" => "contextWindowExceeded",
+        "flexUnavailable" => "flexUnavailable",
+        "serverOverloaded" => "serverOverloaded",
+        "cyberPolicy" => "cyberPolicy",
+        "misalignmentPolicyViolation" => "misalignmentPolicyViolation",
+        "sandboxError" => "sandboxError",
+        "tooManyDenials" => "tooManyDenials",
+        "" => "absent",
+        _ => "unrecognized (omitted)",
+    };
+    let message = error["message"].as_str().unwrap_or("");
+    let message: String = message
+        .chars()
+        .take(8192)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let reason = [
+        "not supported",
+        "unsupported",
+        "not available",
+        "does not exist",
+        "invalid",
+    ]
+    .into_iter()
+    .find(|phrase| message.contains(phrase));
+    let subject = if reason.is_some() && message.contains("reasoning effort") {
+        "reasoning effort"
+    } else if reason.is_some() && message.contains("model") {
+        "model"
+    } else {
+        "no recognized model/effort message clue"
+    };
+    (tag, subject, reason.unwrap_or("unclassified"))
 }
 
 fn error_tag(error: &Value) -> &str {
@@ -569,6 +614,7 @@ impl CodexProtocol {
             turn_id: None,
             turn_rpc: None,
             early_turn: None,
+            selected_catalog_at_ms: None,
             initialized: false,
             startup_deadline: None,
             ready: false,
@@ -600,6 +646,38 @@ impl CodexProtocol {
             native_ready: false,
             unhandled_startup_notice_sha256: None,
         })
+    }
+
+    fn observe_selected_catalog(&mut self, models: &[ModelChoice]) -> Result<()> {
+        let observed = models.iter().find(|choice| {
+            choice.id == self.options.model.id
+                && (self.options.model.effort.is_none()
+                    || choice.effort == self.options.model.effort)
+        });
+        require(observed.is_some(), "Codex model or effort unavailable")?;
+        self.selected_catalog_at_ms = observed.map(|choice| choice.observed_at_ms);
+        Ok(())
+    }
+
+    fn turn_rpc_failure(&self, method: &'static str, error: &Value) -> Error {
+        let mut failure = rpc_failure(method, error);
+        if let Error::CodexRpc { detail, .. } = &mut failure {
+            let catalog = self.selected_catalog_at_ms.map_or_else(
+                || "model/list observation unavailable".to_owned(),
+                |at| format!("model/list advertised selected pair at {at} ms"),
+            );
+            let (tag, subject, reason) = turn_error_evidence(error);
+            *detail = Some(format!(
+                "; selected model={}, effort={}; catalog: {catalog}; provider tag: {tag}; message clue: {subject} {reason}",
+                self.options.model.id,
+                self.options
+                    .model
+                    .effort
+                    .as_ref()
+                    .map_or("provider default", Id::as_str),
+            ));
+        }
+        failure
     }
 
     #[cfg(target_os = "macos")]
@@ -1381,7 +1459,7 @@ impl CodexProtocol {
                 "Codex unexpected turn response",
             )?;
             if let Some(error) = value.get("error") {
-                return Err(rpc_failure("turn/start", error));
+                return Err(self.turn_rpc_failure("turn/start", error));
             }
             let turn = identity(&value["result"]["turn"]["id"])?;
             require(
@@ -1738,7 +1816,7 @@ impl CodexProtocol {
                 }
                 if p["willRetry"] == false {
                     events.push(Event::Diagnostic(crate::runner::Diagnostic::from_error(
-                        &rpc_failure("turn/error", &p["error"]),
+                        &self.turn_rpc_failure("turn/error", &p["error"]),
                     )));
                 }
             }
@@ -1810,7 +1888,7 @@ impl CodexProtocol {
                             });
                         }
                         events.push(Event::Diagnostic(crate::runner::Diagnostic::from_error(
-                            &rpc_failure("turn/completed", &turn["error"]),
+                            &self.turn_rpc_failure("turn/completed", &turn["error"]),
                         )));
                         if tag == "contextWindowExceeded" {
                             Terminal::TokenLimit
@@ -1824,9 +1902,14 @@ impl CodexProtocol {
                     for call in self.calls.values_mut() {
                         call.completed = true;
                     }
-                    events.push(Event::Diagnostic(crate::runner::Diagnostic::notice(
-                        "Codex ended the turn with unresolved tool calls; they were abandoned",
-                    )));
+                    // The runner retains the last diagnostic. Do not replace
+                    // the scoped provider failure with this secondary notice.
+                    events.insert(
+                        0,
+                        Event::Diagnostic(crate::runner::Diagnostic::notice(
+                            "Codex ended the turn with unresolved tool calls; they were abandoned",
+                        )),
+                    );
                 }
                 self.completed = true;
                 let output = self
@@ -2112,14 +2195,7 @@ impl Protocol for CodexProtocol {
             self.startup_deadline = None;
             return Ok(models);
         }
-        require(
-            models.iter().any(|m| {
-                m.id == self.options.model.id
-                    && (self.options.model.effort.is_none()
-                        || m.effort == self.options.model.effort)
-            }),
-            "Codex model or effort unavailable",
-        )?;
+        self.observe_selected_catalog(&models)?;
         let params = self.thread_request(instructions);
         let response = self.rpc(process, "thread/start", params).await?;
         self.thread_id = Some(self.thread_readback(&response)?);

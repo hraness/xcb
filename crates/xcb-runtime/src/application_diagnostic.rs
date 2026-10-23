@@ -166,6 +166,7 @@ fn classify(error: &Error) -> (Category, Option<Operation>, Option<i64>) {
             method,
             code,
             category,
+            ..
         } => {
             return (rpc_category(category), Some(operation(method)), Some(*code));
         }
@@ -302,6 +303,7 @@ mod tests {
                     method: "turn/start",
                     code: 401,
                     category: "authentication rejected; reconnect this account",
+                    detail: None,
                 },
                 Category::Authentication,
                 Some(Operation::TurnStart),
