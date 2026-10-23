@@ -134,11 +134,15 @@ pub enum Error {
         server_sha256: String,
         tool_sha256: String,
     },
-    #[error("Codex {method} failed (RPC {code}): {category}")]
+    // `detail` is assembled only from validated selected Ids, the fresh
+    // model/list observation, and fixed evidence labels. Never pass raw
+    // provider message, error data, account identity or paths to it.
+    #[error("Codex {method} failed (RPC {code}): {category}{}", detail.as_deref().unwrap_or(""))]
     CodexRpc {
         method: &'static str,
         code: i64,
         category: &'static str,
+        detail: Option<String>,
     },
     #[error("Devin model choices have unsupported shape {shape} (count {count:?})")]
     DevinModelChoices {

@@ -964,6 +964,8 @@ fn turn_start_errors_are_sanitized_only_after_matching_the_expected_rpc() {
     ));
     let displayed = failure.to_string();
     assert!(displayed.contains("authentication rejected"));
+    assert!(displayed.contains("selected model=gpt-6-astra, effort=ultra"));
+    assert!(displayed.contains("model/list observation unavailable"));
     assert!(!displayed.contains("SYNTHETIC"));
     assert!(!displayed.contains("example.invalid"));
     assert!(!c.ready && c.turn_id.is_none());
@@ -1789,6 +1791,16 @@ fn failed_terminal_classifies_and_abandons_unresolved_tool_calls() {
             ..
         }
     )));
+    let diagnostics: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Diagnostic(detail) => Some(detail.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(diagnostics.len(), 2);
+    assert!(diagnostics[0].contains("unresolved tool calls"));
+    assert!(diagnostics[1].contains("selected model=gpt-6-astra, effort=ultra"));
     assert!(c.completed && c.calls["call1"].completed);
     // An interrupted turn abandons the same way; a completed turn still
     // requires every call resolved.
@@ -1831,6 +1843,65 @@ fn failed_terminal_classifies_and_abandons_unresolved_tool_calls() {
     assert!(
         c.accept(json!({"method":"turn/completed","params":{"threadId":"thread1","turn":{"id":"turn1","status":"completed","error":null}}}))
             .is_err()
+    );
+}
+
+#[test]
+fn failed_turn_records_selected_pair_fresh_catalog_and_safe_provider_evidence() {
+    let page = json!({"data":[{"id":"gpt-6-astra","model":"gpt-6-astra","displayName":"Astra",
+        "hidden":false,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[
+            {"reasoningEffort":"medium"},{"reasoningEffort":"ultra"}]}],"nextCursor":null});
+    let models = parse_models(&page, 1234567).unwrap();
+    let mut c = started();
+    c.observe_selected_catalog(&models).unwrap();
+    let provider_error = json!({"code":-32603,
+        "message":"reasoning effort ultra is not supported: Bearer SYNTHETIC_SECRET user@example.invalid /private/auth.json",
+        "codexErrorInfo":{"unknownTag":{"token":"SYNTHETIC_NESTED_SECRET"}},
+        "data":{"authorization":"SYNTHETIC_DATA_SECRET"}});
+    let (events, replies) = c
+        .accept(json!({"method":"turn/completed","params":{
+        "threadId":"thread1","turn":{"id":"turn1","status":"failed","error":provider_error}}}))
+        .unwrap();
+    assert!(replies.is_empty());
+    let detail = events
+        .iter()
+        .find_map(|event| match event {
+            Event::Diagnostic(detail) => Some(detail.as_str()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(detail.contains("turn/completed failed (RPC -32603)"));
+    assert!(detail.contains("selected model=gpt-6-astra, effort=ultra"));
+    assert!(detail.contains("model/list advertised selected pair at 1234567 ms"));
+    assert!(detail.contains("provider tag: unrecognized (omitted)"));
+    assert!(detail.contains("message clue: reasoning effort not supported"));
+    assert!(detail.len() <= 512);
+    for private in ["SYNTHETIC", "example.invalid", "/private/", "Bearer"] {
+        assert!(!detail.contains(private), "leaked {private}");
+    }
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::Result {
+            terminal: Terminal::Failed,
+            ..
+        }
+    )));
+
+    // The local catalog is not evidence of an advertised *effort*: a missing
+    // selected pair still refuses initialization, never changes the pin.
+    let mut absent = started();
+    let without_ultra = parse_models(
+        &json!({"data":[{"id":"gpt-6-astra","model":"gpt-6-astra",
+        "displayName":"Astra","hidden":false,"defaultReasoningEffort":"medium",
+        "supportedReasoningEfforts":[{"reasoningEffort":"medium"}]}],"nextCursor":null}),
+        9876,
+    )
+    .unwrap();
+    assert!(absent.observe_selected_catalog(&without_ultra).is_err());
+    assert!(absent.selected_catalog_at_ms.is_none());
+    assert_eq!(
+        absent.options.model.effort.as_ref().unwrap().as_str(),
+        "ultra"
     );
 }
 
