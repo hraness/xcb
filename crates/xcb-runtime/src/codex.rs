@@ -329,15 +329,22 @@ pub fn parse_models(value: &Value, observed_at_ms: u64) -> Result<Vec<ModelChoic
     Ok(choices)
 }
 
-fn usage(value: &Value) -> Result<(Counters, u64)> {
-    // Telemetry: the known counters must still reconcile exactly, but a new
-    // provider-side counter is drift to tolerate, not a reason to fail a turn.
+fn usage(value: &Value) -> Result<(Option<Counters>, u64)> {
+    // Codex 0.159.0's TokenUsageInfo::fill_to_context_window reports a
+    // context-window estimate in totalTokens with every breakdown counter
+    // zero. This is valid telemetry, but not measured model token usage.
+    // All other known counters must still reconcile exactly; tolerate only
+    // unknown provider-side fields as drift.
     object(value)?;
     let input = count(&value["inputTokens"])?;
     let cache_read = count(&value["cachedInputTokens"])?;
     let cache_write = optional_count(&value["cacheWriteInputTokens"])?;
     let output = count(&value["outputTokens"])?;
     let total = count(&value["totalTokens"])?;
+    let reasoning = count(&value["reasoningOutputTokens"])?;
+    if total > 0 && [input, cache_read, cache_write, output, reasoning] == [0; 5] {
+        return Ok((None, total));
+    }
     if input.checked_add(output) != Some(total) {
         return Err(Error::CodexUsage {
             input,
@@ -354,10 +361,10 @@ fn usage(value: &Value) -> Result<(Counters, u64)> {
         cache_read,
         cache_write,
         output,
-        reasoning: Some(count(&value["reasoningOutputTokens"])?),
+        reasoning: Some(reasoning),
     };
     require(counters.total()? == total, "Codex counter accounting")?;
-    Ok((counters, total))
+    Ok((Some(counters), total))
 }
 
 fn quota_windows(
@@ -1689,18 +1696,32 @@ impl CodexProtocol {
             "thread/tokenUsage/updated" => {
                 self.scope(p)?;
                 let (next, total) = usage(&p["tokenUsage"]["total"])?;
-                let (_, last) = usage(&p["tokenUsage"]["last"])?;
+                let (last_usage, last) = usage(&p["tokenUsage"]["last"])?;
+                // A synthetic context-window total may have a zero last delta;
+                // otherwise the total and last breakdowns must agree on whether
+                // usage is measured. Never turn an unknown output into zero.
+                let consistent = match (next, last_usage) {
+                    (Some(_), Some(_)) | (None, None) => true,
+                    (None, Some(last)) => last.total()? == 0,
+                    (Some(_), None) => false,
+                };
                 // Cached/uncached proportions may change; total and generated
                 // tokens are cumulative, and cache counts are never double counted.
                 require(
-                    total >= self.total_tokens
+                    consistent
+                        && total >= self.total_tokens
                         && last <= total
-                        && self.usage.is_none_or(|old| next.output >= old.output),
+                        && self
+                            .usage
+                            .zip(next)
+                            .is_none_or(|(old, now)| now.output >= old.output),
                     "Codex usage regressed",
                 )?;
                 self.total_tokens = total;
-                self.usage = Some(next);
-                events.push(Event::OutputTokens(next.output));
+                self.usage = next;
+                if let Some(next) = next {
+                    events.push(Event::OutputTokens(next.output));
+                }
             }
             "account/updated" => account_identity_notice(p)?,
             "account/rateLimits/updated" => {
