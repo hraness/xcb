@@ -128,6 +128,7 @@ pub fn code(error: &Error) -> &'static str {
         Error::Conflict(_) => "conflict",
         Error::Unavailable(_) | Error::Message(_) | Error::Guided { .. } => "unavailable",
         Error::Protocol(_)
+        | Error::CodexDeadline { .. }
         | Error::CodexRpc { .. }
         | Error::CodexUsage { .. }
         | Error::CodexNotification { .. }

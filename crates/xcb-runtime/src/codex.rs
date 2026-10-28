@@ -41,6 +41,13 @@ pub struct Metadata {
     pub quotas: Vec<QuotaPoint>,
 }
 
+// The old 15s per-RPC timer could expire while a cold app-server was still
+// resolving account, catalog or connector state. Permit a delayed reply (3x
+// that window), but cap the *whole* initialize exchange as well: pagination
+// and notifications must not renew an unresponsive startup forever. The
+// runner's own turn timeout and cancellation still take precedence.
+const CODEX_RPC_TIMEOUT: Duration = Duration::from_secs(45);
+const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_CALLS: usize = 1024;
 const MAX_ITEMS: usize = 4096;
 // Backstop only: the host ends a turn gracefully at MAX_TURN_FRAMES, and this
@@ -103,7 +110,11 @@ pub(crate) struct CodexProtocol {
     turn_id: Option<String>,
     turn_rpc: Option<u64>,
     early_turn: Option<String>,
+    /// This launch's model/list advertisement of the selected pair. Not the
+    /// stored catalog timestamp and never evidence that a later request works.
+    selected_catalog_at_ms: Option<u64>,
     initialized: bool,
+    startup_deadline: Option<tokio::time::Instant>,
     ready: bool,
     completed: bool,
     interrupted: bool,
@@ -211,7 +222,49 @@ fn rpc_failure(method: &'static str, error: &Value) -> Error {
         method,
         code: error["code"].as_i64().unwrap_or(-32603),
         category,
+        detail: None,
     }
+}
+
+// Closed labels preserve useful provider evidence without ever copying the
+// message or nested codexErrorInfo value (both may carry credentials).
+fn turn_error_evidence(error: &Value) -> (&'static str, &'static str, &'static str) {
+    let tag = match error_tag(error) {
+        "usageLimitExceeded" => "usageLimitExceeded",
+        "unauthorized" => "unauthorized",
+        "contextWindowExceeded" => "contextWindowExceeded",
+        "flexUnavailable" => "flexUnavailable",
+        "serverOverloaded" => "serverOverloaded",
+        "cyberPolicy" => "cyberPolicy",
+        "misalignmentPolicyViolation" => "misalignmentPolicyViolation",
+        "sandboxError" => "sandboxError",
+        "tooManyDenials" => "tooManyDenials",
+        "" => "absent",
+        _ => "unrecognized (omitted)",
+    };
+    let message = error["message"].as_str().unwrap_or("");
+    let message: String = message
+        .chars()
+        .take(8192)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let reason = [
+        "not supported",
+        "unsupported",
+        "not available",
+        "does not exist",
+        "invalid",
+    ]
+    .into_iter()
+    .find(|phrase| message.contains(phrase));
+    let subject = if reason.is_some() && message.contains("reasoning effort") {
+        "reasoning effort"
+    } else if reason.is_some() && message.contains("model") {
+        "model"
+    } else {
+        "no recognized model/effort message clue"
+    };
+    (tag, subject, reason.unwrap_or("unclassified"))
 }
 
 fn error_tag(error: &Value) -> &str {
@@ -568,7 +621,9 @@ impl CodexProtocol {
             turn_id: None,
             turn_rpc: None,
             early_turn: None,
+            selected_catalog_at_ms: None,
             initialized: false,
+            startup_deadline: None,
             ready: false,
             completed: false,
             interrupted: false,
@@ -598,6 +653,38 @@ impl CodexProtocol {
             native_ready: false,
             unhandled_startup_notice_sha256: None,
         })
+    }
+
+    fn observe_selected_catalog(&mut self, models: &[ModelChoice]) -> Result<()> {
+        let observed = models.iter().find(|choice| {
+            choice.id == self.options.model.id
+                && (self.options.model.effort.is_none()
+                    || choice.effort == self.options.model.effort)
+        });
+        require(observed.is_some(), "Codex model or effort unavailable")?;
+        self.selected_catalog_at_ms = observed.map(|choice| choice.observed_at_ms);
+        Ok(())
+    }
+
+    fn turn_rpc_failure(&self, method: &'static str, error: &Value) -> Error {
+        let mut failure = rpc_failure(method, error);
+        if let Error::CodexRpc { detail, .. } = &mut failure {
+            let catalog = self.selected_catalog_at_ms.map_or_else(
+                || "model/list observation unavailable".to_owned(),
+                |at| format!("model/list advertised selected pair at {at} ms"),
+            );
+            let (tag, subject, reason) = turn_error_evidence(error);
+            *detail = Some(format!(
+                "; selected model={}, effort={}; catalog: {catalog}; provider tag: {tag}; message clue: {subject} {reason}",
+                self.options.model.id,
+                self.options
+                    .model
+                    .effort
+                    .as_ref()
+                    .map_or("provider default", Id::as_str),
+            ));
+        }
+        failure
     }
 
     #[cfg(target_os = "macos")]
@@ -1046,17 +1133,48 @@ impl CodexProtocol {
         method: &'static str,
         params: Value,
     ) -> Result<Value> {
+        self.rpc_with_timeout(process, method, params, CODEX_RPC_TIMEOUT)
+            .await
+    }
+    async fn rpc_with_timeout(
+        &mut self,
+        process: &mut StreamProcess,
+        method: &'static str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value> {
         require(
             crate::provider_methods::codex_rpc_supported(method),
             "Codex method is not integrated",
         )?;
+        let per_rpc_deadline = tokio::time::Instant::now() + timeout;
+        let deadline = self
+            .startup_deadline
+            .map_or(per_rpc_deadline, |startup| per_rpc_deadline.min(startup));
+        // A spent overall budget must not send another request whose response
+        // cannot be accepted. Send and receive share the same fixed deadline.
+        if tokio::time::Instant::now() >= deadline {
+            return Err(Error::CodexDeadline {
+                method,
+                phase: "before send",
+                traffic: "startup budget exhausted",
+            });
+        }
         self.next_id += 1;
         require(self.next_id <= 256, "Codex RPC bound")?;
         let id = self.next_id;
-        process
-            .send(&json!({"id":id,"method":method,"params":params}))
-            .await?;
-        tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::time::timeout_at(
+            deadline,
+            process.send(&json!({"id":id,"method":method,"params":params})),
+        )
+        .await
+        .map_err(|_| Error::CodexDeadline {
+            method,
+            phase: "send",
+            traffic: "no reply expected",
+        })??;
+        let mut notices = false;
+        tokio::time::timeout_at(deadline, async {
             loop {
                 let frame = process
                     .frame()
@@ -1065,6 +1183,7 @@ impl CodexProtocol {
                 let value = self.envelope(&frame)?;
                 if value.get("method").is_some() {
                     self.startup_notice(&value)?;
+                    notices = true;
                     continue;
                 }
                 require(value["id"] == id, "Codex unexpected RPC response")?;
@@ -1075,7 +1194,15 @@ impl CodexProtocol {
             }
         })
         .await
-        .map_err(|_| Error::Protocol("Codex initialization deadline"))?
+        .map_err(|_| Error::CodexDeadline {
+            method,
+            phase: "response",
+            traffic: if notices {
+                "notifications only"
+            } else {
+                "no complete frames"
+            },
+        })?
     }
     fn thread_request(&self, instructions: &str) -> Value {
         let effort = self.options.model.effort.as_ref().map(Id::as_str);
@@ -1339,7 +1466,7 @@ impl CodexProtocol {
                 "Codex unexpected turn response",
             )?;
             if let Some(error) = value.get("error") {
-                return Err(rpc_failure("turn/start", error));
+                return Err(self.turn_rpc_failure("turn/start", error));
             }
             let turn = identity(&value["result"]["turn"]["id"])?;
             require(
@@ -1710,7 +1837,7 @@ impl CodexProtocol {
                 }
                 if p["willRetry"] == false {
                     events.push(Event::Diagnostic(crate::runner::Diagnostic::from_error(
-                        &rpc_failure("turn/error", &p["error"]),
+                        &self.turn_rpc_failure("turn/error", &p["error"]),
                     )));
                 }
             }
@@ -1782,7 +1909,7 @@ impl CodexProtocol {
                             });
                         }
                         events.push(Event::Diagnostic(crate::runner::Diagnostic::from_error(
-                            &rpc_failure("turn/completed", &turn["error"]),
+                            &self.turn_rpc_failure("turn/completed", &turn["error"]),
                         )));
                         if tag == "contextWindowExceeded" {
                             Terminal::TokenLimit
@@ -1796,9 +1923,14 @@ impl CodexProtocol {
                     for call in self.calls.values_mut() {
                         call.completed = true;
                     }
-                    events.push(Event::Diagnostic(crate::runner::Diagnostic::notice(
-                        "Codex ended the turn with unresolved tool calls; they were abandoned",
-                    )));
+                    // The runner retains the last diagnostic. Do not replace
+                    // the scoped provider failure with this secondary notice.
+                    events.insert(
+                        0,
+                        Event::Diagnostic(crate::runner::Diagnostic::notice(
+                            "Codex ended the turn with unresolved tool calls; they were abandoned",
+                        )),
+                    );
                 }
                 self.completed = true;
                 let output = self
@@ -1991,13 +2123,23 @@ impl Protocol for CodexProtocol {
                 .as_bytes(),
             "Codex launch configuration changed",
         )?;
+        self.startup_deadline = Some(tokio::time::Instant::now() + INITIALIZE_TIMEOUT);
         let initialized = self.rpc(process, "initialize", initialize_params()).await?;
         require(
             initialized["codexHome"] == json!(self.options.account_home),
             "Codex account home changed",
         )?;
         text(&initialized["userAgent"], 1024)?;
-        process.send(&json!({"method":"initialized"})).await?;
+        tokio::time::timeout_at(
+            self.startup_deadline.expect("initialization budget"),
+            process.send(&json!({"method":"initialized"})),
+        )
+        .await
+        .map_err(|_| Error::CodexDeadline {
+            method: "initialized",
+            phase: "send",
+            traffic: "no reply expected",
+        })??;
         let account = self
             .rpc(process, "account/read", json!({"refreshToken":false}))
             .await?;
@@ -2071,16 +2213,10 @@ impl Protocol for CodexProtocol {
         )?;
         self.initialized = true;
         if self.options.metadata_only {
+            self.startup_deadline = None;
             return Ok(models);
         }
-        require(
-            models.iter().any(|m| {
-                m.id == self.options.model.id
-                    && (self.options.model.effort.is_none()
-                        || m.effort == self.options.model.effort)
-            }),
-            "Codex model or effort unavailable",
-        )?;
+        self.observe_selected_catalog(&models)?;
         let params = self.thread_request(instructions);
         let response = self.rpc(process, "thread/start", params).await?;
         self.thread_id = Some(self.thread_readback(&response)?);
@@ -2103,6 +2239,7 @@ impl Protocol for CodexProtocol {
             )?;
             self.native_ready = true;
         }
+        self.startup_deadline = None;
         Ok(models)
     }
     async fn start(&mut self, process: &mut StreamProcess, prompt: Prompt) -> Result<()> {

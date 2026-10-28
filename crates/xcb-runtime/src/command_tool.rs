@@ -741,6 +741,16 @@ fn publish(
     (result, effects)
 }
 
+/// Only a host-observed boot change can prove an unrecorded tool server
+/// stopped. The caller's --yes and the command guest's join prove neither.
+async fn recovery_boot(run: &RunRecord) -> Result<Option<String>> {
+    if run.capability_processes.values().any(Option::is_none) {
+        Ok(Some(crate::managed::host_boot_identity().await?))
+    } else {
+        Ok(None)
+    }
+}
+
 /// An owner can decline an unsubmitted command only when its durable job has
 /// no start record and no recovery file. A stopped provider group alone is
 /// never evidence that a started guest command joined.
@@ -750,7 +760,19 @@ pub fn discard_unstarted(
     expected_digest: &str,
 ) -> Result<RunRecord> {
     let root = default_root()?;
-    discard_unstarted_in(&root, store, run, expected_digest)
+    discard_unstarted_in(&root, store, run, expected_digest, None)
+}
+
+/// For a run with an unidentified tool server, obtain the boot witness from
+/// the trusted host observer before attempting the same no-start proof.
+pub async fn discard_unstarted_after_boot_change(
+    store: &Store,
+    run: &RunRecord,
+    expected_digest: &str,
+) -> Result<RunRecord> {
+    let root = default_root()?;
+    let boot = crate::managed::host_boot_identity().await?;
+    discard_unstarted_in(&root, store, run, expected_digest, Some(&boot))
 }
 
 fn discard_unstarted_in(
@@ -758,8 +780,9 @@ fn discard_unstarted_in(
     store: &Store,
     run: &RunRecord,
     expected_digest: &str,
+    current_boot: Option<&str>,
 ) -> Result<RunRecord> {
-    run.verify_recovery_stop()?;
+    run.verify_recovery_stop_with_boot(current_boot)?;
     let custody = run
         .command_custody
         .as_ref()
@@ -767,31 +790,43 @@ fn discard_unstarted_in(
     CommandBackend::mark_discarded(root, custody)?;
     // The positive no-start marker is durable before releasing custody. A
     // crash or stale digest leaves the run held; the same marker is retryable.
-    store.reconcile_command_custody(&run.id, expected_digest, custody)
+    store.reconcile_command_custody_with_boot(&run.id, expected_digest, custody, current_boot)
 }
 
 /// Explicit recovery reads the exact trusted guest receipt before clearing the
 /// pending marker. It never publishes staged workspace edits during recovery.
 pub async fn recover(store: &Store, run: &RunRecord, expected_digest: &str) -> Result<RunRecord> {
-    run.verify_recovery_stop()?;
+    let root = default_root()?;
+    let boot = recovery_boot(run).await?;
+    recover_in(&root, store, run, expected_digest, boot.as_deref()).await
+}
+
+async fn recover_in(
+    root: &Path,
+    store: &Store,
+    run: &RunRecord,
+    expected_digest: &str,
+    current_boot: Option<&str>,
+) -> Result<RunRecord> {
+    run.verify_recovery_stop_with_boot(current_boot)?;
     let custody = run
         .command_custody
         .as_ref()
         .ok_or(Error::Conflict("run has no command custody"))?;
-    let root = default_root()?;
-    let outcome = match CommandBackend::recover_recorded_join(&root, custody).map_err(|error| {
+    let outcome = match CommandBackend::recover_recorded_join(root, custody).map_err(|error| {
         Error::guided(
             format!(
-                "recorded command recovery file check failed: {error}; account custody retained"
+                "recorded recovery file for command {} is unusable: {error}; a custody-bound joined guest receipt is required; account custody retained",
+                custody.command_id
             ),
             format!("xcb recover {}", run.id),
         )
     })? {
         Some(outcome) => outcome,
-        None => CommandBackend::load(&root)
+        None => CommandBackend::load(root)
             .map_err(|error| {
                 Error::guided(
-                    format!("command backend check failed: {error}; account custody retained"),
+                    format!("no recorded joined guest receipt for command {}; backend check failed: {error}; account custody retained", custody.command_id),
                     format!("xcb recover {}", run.id),
                 )
             })?
@@ -799,7 +834,7 @@ pub async fn recover(store: &Store, run: &RunRecord, expected_digest: &str) -> R
             .await
             .map_err(|error| {
                 Error::guided(
-                    format!("guest command status check failed: {error}; account custody retained"),
+                    format!("guest status for command {} did not prove a join: {error}; account custody retained", custody.command_id),
                     format!("xcb recover {}", run.id),
                 )
             })?,
@@ -809,7 +844,9 @@ pub async fn recover(store: &Store, run: &RunRecord, expected_digest: &str) -> R
             "guest command stop is unproven; account custody retained",
         ));
     }
-    store.reconcile_command_custody(&run.id, expected_digest, custody)
+    // Repeat the same stop proof and digest check under the database writer
+    // lock. An unusable or absent guest witness never reaches this write.
+    store.reconcile_command_custody_with_boot(&run.id, expected_digest, custody, current_boot)
 }
 
 mod host;

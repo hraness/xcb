@@ -1,24 +1,46 @@
 name: Dependabot auto-merge
 
-# GITHUB_TOKEN merges suppress push workflows. Merge only after a successful
-# Check on the exact Dependabot head, using the existing release-tagger app's
+# GITHUB_TOKEN merges suppress push workflows. Drop any older auto-merge
+# request when Check starts; Required refuses to turn green until it is gone.
+# Only a successful completed Check may merge, using the release-tagger app's
 # contents:write token so the resulting push starts Check on main.
 on:
   workflow_run:
     workflows: [Check]
-    types: [completed]
+    types: [requested, completed]
 
 permissions:
   contents: read
 
+# Separate phases: a pending completed run must not replace the requested run
+# that clears a competing auto-merge request.
 concurrency:
-  group: dependabot-auto-merge-${{ github.event.workflow_run.head_sha }}
+  group: dependabot-auto-merge-${{ github.event.action }}-${{ github.event.workflow_run.head_sha }}
   cancel-in-progress: false
 
 jobs:
+  cleanup:
+    name: Clear competing Dependabot auto-merge
+    if: github.repository == 'hraness/xcb' && github.event.workflow_run.event == 'pull_request' && github.event.action == 'requested'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test the merge gate
+        run: python3 -I .github/scripts/dependabot-auto-merge.test.py
+      - name: Disable older auto-merge before Required succeeds
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I .github/scripts/dependabot-auto-merge.py disable
+
   merge:
     name: Merge checked Dependabot PR
-    if: github.repository == 'hraness/xcb' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success'
+    if: github.repository == 'hraness/xcb' && github.event.workflow_run.event == 'pull_request' && github.event.action == 'completed' && github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -38,7 +60,7 @@ jobs:
       - name: Mint the release-tagger token
         if: steps.select.outputs.number
         id: app
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           app-id: ${{ vars.RELEASE_TAGGER_APP_ID }}
           private-key: ${{ secrets.RELEASE_TAGGER_PRIVATE_KEY }}

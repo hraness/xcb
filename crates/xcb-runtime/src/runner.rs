@@ -69,6 +69,7 @@ impl Diagnostic {
             | Error::Conflict(_)
             | Error::Unavailable(_)
             | Error::CodexRpc { .. }
+            | Error::CodexDeadline { .. }
             | Error::CodexUsage { .. }
             | Error::CodexNotification { .. }
             | Error::CodexNativeTool { .. }
@@ -3933,7 +3934,8 @@ mod tests {
             Diagnostic::from_error(&Error::CodexRpc {
                 method: "turn/start",
                 code: -32000,
-                category: "permission denied"
+                category: "permission denied",
+                detail: None
             })
             .as_str(),
             "Codex turn/start failed (RPC -32000): permission denied"
@@ -5654,6 +5656,7 @@ mod tests {
                 method: "turn/start",
                 code: -32000,
                 category: crate::category::AUTHENTICATION,
+                detail: None,
             }),
             None,
         )
@@ -5673,6 +5676,7 @@ mod tests {
                 method: "turn/start",
                 code: -32000,
                 category: crate::category::CODEX_USAGE_LIMIT,
+                detail: None,
             }),
         )
         .await;
