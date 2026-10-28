@@ -1100,6 +1100,7 @@ fn error_notices_require_scope_and_do_not_persist_a_retried_failure() {
 fn usage_counts_caches_once_and_refuses_regression() {
     let value = json!({"totalTokens":150,"inputTokens":120,"cachedInputTokens":80,"cacheWriteInputTokens":10,"outputTokens":30,"reasoningOutputTokens":20});
     let (counters, total) = usage(&value).unwrap();
+    let counters = counters.unwrap();
     assert_eq!(
         (
             counters.input,
@@ -1120,6 +1121,123 @@ fn usage_counts_caches_once_and_refuses_regression() {
     changed["params"]["tokenUsage"]["total"]["outputTokens"] = json!(29);
     changed["params"]["tokenUsage"]["total"]["totalTokens"] = json!(149);
     assert!(c.accept(changed).is_err());
+}
+
+#[test]
+fn context_window_estimates_have_no_measured_breakdown() {
+    // Codex 0.159.0's fill_to_context_window produces exactly this shape,
+    // including a last-delta estimate with no measured token subtotals.
+    for total in [39_830, 70_142] {
+        let value = json!({"totalTokens":total,"inputTokens":0,"cachedInputTokens":0,
+            "cacheWriteInputTokens":0,"outputTokens":0,"reasoningOutputTokens":0});
+        assert_eq!(usage(&value).unwrap(), (None, total));
+    }
+    // The exception is not an escape hatch for partial, absent, invalid, or
+    // oversized counters; all known fields still need a coherent shape.
+    let value = json!({"totalTokens":39_830,"inputTokens":0,"cachedInputTokens":0,
+        "cacheWriteInputTokens":0,"outputTokens":0,"reasoningOutputTokens":0});
+    for (key, replacement) in [
+        ("inputTokens", json!(1)),
+        ("outputTokens", json!(1)),
+        ("cachedInputTokens", json!(1)),
+        ("cacheWriteInputTokens", json!(1)),
+        ("reasoningOutputTokens", json!(1)),
+        ("reasoningOutputTokens", Value::Null),
+        ("inputTokens", json!(-1)),
+        ("totalTokens", json!(xcb_core::usage::COUNTER_LIMIT + 1)),
+    ] {
+        let mut broken = value.clone();
+        broken[key] = replacement;
+        assert!(usage(&broken).is_err(), "{key}: {broken}");
+    }
+}
+
+#[test]
+fn completed_turn_keeps_context_window_estimates_unmeasured() {
+    for (total, last) in [(39_830, 20_000), (70_142, 0)] {
+        let mut c = started();
+        let answer =
+            json!({"id":"answer1","type":"agentMessage","text":"done","phase":"final_answer"});
+        c.accept(notice("item/started", answer.clone())).unwrap();
+        c.accept(notice("item/completed", answer)).unwrap();
+        let estimated = |tokens| {
+            json!({"totalTokens":tokens,"inputTokens":0,
+            "cachedInputTokens":0,"cacheWriteInputTokens":0,"outputTokens":0,"reasoningOutputTokens":0})
+        };
+        let (events, replies) = c.accept(json!({"method":"thread/tokenUsage/updated","params":{
+            "threadId":"thread1","turnId":"turn1","tokenUsage":{"total":estimated(total),"last":estimated(last)}
+        }})).unwrap();
+        assert!(events.is_empty() && replies.is_empty());
+        assert_eq!(c.total_tokens, total);
+        assert!(c.usage.is_none());
+        let (events, replies) = c
+            .accept(json!({"method":"turn/completed","params":{
+                "threadId":"thread1","turn":{"id":"turn1","status":"completed","error":null}
+            }}))
+            .unwrap();
+        assert!(replies.is_empty() && c.completed);
+        assert!(matches!(events.as_slice(), [Event::Result {
+            terminal: Terminal::Completed, text, models
+        }] if text == "done" && models.is_empty()));
+    }
+    // A later estimate invalidates earlier measured subtotals instead of
+    // persisting stale usage or emitting an invented zero output sample.
+    let mut c = started();
+    let measured = json!({"totalTokens":150,"inputTokens":120,"cachedInputTokens":80,
+        "outputTokens":30,"reasoningOutputTokens":20});
+    c.accept(json!({"method":"thread/tokenUsage/updated","params":{
+        "threadId":"thread1","turnId":"turn1","tokenUsage":{"total":measured,"last":measured}
+    }}))
+    .unwrap();
+    let estimated = json!({"totalTokens":39_830,"inputTokens":0,"cachedInputTokens":0,
+        "outputTokens":0,"reasoningOutputTokens":0});
+    let (events, _) = c
+        .accept(json!({"method":"thread/tokenUsage/updated","params":{
+            "threadId":"thread1","turnId":"turn1","tokenUsage":{"total":estimated,"last":estimated}
+        }}))
+        .unwrap();
+    assert!(events.is_empty() && c.usage.is_none());
+}
+
+#[test]
+fn malformed_usage_frames_still_fail_before_turn_completion() {
+    let estimate = json!({"totalTokens":39_830,"inputTokens":0,"cachedInputTokens":0,
+        "outputTokens":0,"reasoningOutputTokens":0});
+    for (total, last) in [
+        (
+            json!({"totalTokens":39_830,"inputTokens":1,"cachedInputTokens":0,
+            "outputTokens":0,"reasoningOutputTokens":0}),
+            estimate.clone(),
+        ),
+        (
+            estimate.clone(),
+            json!({"totalTokens":39_831,"inputTokens":0,
+            "cachedInputTokens":0,"outputTokens":0,"reasoningOutputTokens":0}),
+        ),
+        (
+            estimate.clone(),
+            json!({"totalTokens":1,"inputTokens":1,"cachedInputTokens":0,
+            "outputTokens":0,"reasoningOutputTokens":0}),
+        ),
+        (
+            json!({"totalTokens":39_830,"inputTokens":0,"cachedInputTokens":0,
+            "outputTokens":0}),
+            estimate.clone(),
+        ),
+    ] {
+        let mut c = started();
+        let answer =
+            json!({"id":"answer1","type":"agentMessage","text":"done","phase":"final_answer"});
+        c.accept(notice("item/started", answer.clone())).unwrap();
+        c.accept(notice("item/completed", answer)).unwrap();
+        assert!(
+            c.accept(json!({"method":"thread/tokenUsage/updated","params":{
+                "threadId":"thread1","turnId":"turn1","tokenUsage":{"total":total,"last":last}
+            }}))
+            .is_err()
+        );
+        assert!(!c.completed && c.usage.is_none());
+    }
 }
 
 #[test]
@@ -1733,7 +1851,7 @@ fn usage_tolerates_new_provider_counters_while_reconciling_known_ones() {
     value["futureProviderCounter"] = json!(9);
     let (counters, total) = usage(&value).unwrap();
     assert_eq!(total, 150);
-    assert_eq!(counters.output, 30);
+    assert_eq!(counters.unwrap().output, 30);
     // Drift is only tolerated on top of counters that still reconcile: a
     // broken total or a missing required counter still fails closed.
     for broken in [
@@ -1746,7 +1864,7 @@ fn usage_tolerates_new_provider_counters_while_reconciling_known_ones() {
     // An unreconciled total reports the provider's own counters so the next
     // drift incident is evidence, not an unlabeled failure.
     let error = usage(
-        &json!({"totalTokens":200,"inputTokens":120,"cachedInputTokens":80,"outputTokens":30}),
+        &json!({"totalTokens":200,"inputTokens":120,"cachedInputTokens":80,"outputTokens":30,"reasoningOutputTokens":0}),
     )
     .unwrap_err();
     assert!(
