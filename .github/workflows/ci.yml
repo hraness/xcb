@@ -307,14 +307,14 @@ jobs:
         run: python3 -I qualification/inbox-acceptance.py target/ci/xcb --evidence-dir "$RUNNER_TEMP"
       - name: Preserve inbox acceptance evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: inbox-acceptance-${{ matrix.os }}
           path: ${{ runner.temp }}/xcb-inbox-acceptance-*/
           if-no-files-found: ignore
           retention-days: 14
       - run: cp target/ci/xcb "xcb-${{ matrix.os }}"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: xcb-${{ matrix.os }}
           path: xcb-${{ matrix.os }}
@@ -348,7 +348,7 @@ jobs:
         run: python3 -I qualification/inbox-acceptance.py target/release/xcb --evidence-dir "$RUNNER_TEMP"
       - name: Preserve inbox acceptance evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: inbox-acceptance-ubuntu-22.04-arm
           path: ${{ runner.temp }}/xcb-inbox-acceptance-*/
@@ -427,7 +427,7 @@ jobs:
         run: node scripts/verify-site-browser.mjs
       - name: Save public page screenshots
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: site-browser
           path: ${{ runner.temp }}/site-browser
@@ -548,7 +548,7 @@ jobs:
           print("native", native, "typescript", ts)
           assert native == ts, "native and TypeScript probes disagree"
           EOF
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: linux-kernel-boundary-evidence
