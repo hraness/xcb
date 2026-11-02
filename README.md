@@ -1,3 +1,11 @@
+> **Retired.** Excalibur (xcb) routed coding tasks across Codex and Claude
+> Code subscriptions. Source and releases are preserved for reference.
+>
+> The project was retired on 2 November 2026 and is no longer maintained.
+> Its websites have been taken offline; [the last release](https://github.com/hraness/xcb/releases/latest)
+> remains available here. The setup instructions below are historical;
+> commands that download from the retired websites no longer work.
+
 <!-- hraness:xcb-landing:start -->
 # Excalibur (xcb)
 
@@ -18,11 +26,8 @@ built for unattended use. Sign in once, and agents route tasks by quota and
 health, coordinate through a backlog, and scale with resource pressure.
 <!-- hraness:xcb-landing:end -->
 
-**Status:** [Latest release](https://github.com/hraness/xcb/releases/latest)
-for macOS ARM64, Linux x86_64 and ARM64, and Windows x86_64; other hosts build
-from source. MIT licensed. Commands below match the latest release; a command
-that only exists in source appears in the
-[release notes](https://github.com/hraness/xcb/releases/latest) when it ships.
+MIT licensed. Historical releases support macOS ARM64, Linux x86_64 and
+ARM64, and Windows x86_64.
 
 [Site](https://xcb.sh) · [Docs](https://xcb.sh/docs) ·
 [Getting started](https://xcb.sh/docs/getting-started) ·
