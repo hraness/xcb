@@ -162,7 +162,7 @@ jobs:
           printf 'npm_path=%s\ngithub_path=%s\n' "$npm_writer_root" "$github_writer_root" >> "$GITHUB_OUTPUT"
       - name: Preserve the reviewed dependency-free npm writer
         id: writer_artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: xcb-release-writer-${{ github.run_attempt }}
           path: ${{ steps.writer_roots.outputs.npm_path }}
@@ -170,7 +170,7 @@ jobs:
           retention-days: 30
       - name: Preserve the reviewed dependency-free GitHub Release writer
         id: github_writer_artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: xcb-github-release-writer-${{ github.run_attempt }}
           path: ${{ steps.writer_roots.outputs.github_path }}
@@ -201,7 +201,7 @@ jobs:
           bun run ./scripts/release-artifact-checksum.ts write artifacts/*.tgz artifacts/SHA256SUMS
       - name: Preserve the exact release bytes
         id: release_artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: xcb-release-${{ github.run_attempt }}
           path: artifacts/
@@ -318,7 +318,7 @@ jobs:
         with:
           subject-path: ${{ runner.os == 'Windows' && 'artifacts/*.zip' || 'artifacts/*.tar.gz' }}
       - name: Preserve the exact native release assets
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: xcb-native-${{ matrix.platform }}-${{ github.run_attempt }}
           path: artifacts/
@@ -351,7 +351,7 @@ jobs:
         run: ./scripts/build-native.sh
       - name: Preserve exact unsigned input for the isolated signing job
         id: unsigned
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           # Deliberately cannot match ^xcb-native-<platform>-<attempt>$.
           name: xcb-unsigned-darwin-aarch64-${{ github.run_attempt }}
@@ -442,7 +442,7 @@ jobs:
         run: python3 -I scripts/sign-macos-release.py cleanup "$RUNNER_TEMP/xcb-apple-signing"
       - name: Preserve exact secret-free submitted candidate before waiting
         id: candidate
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           # A pending candidate must never match the final native asset names.
           name: xcb-apple-candidate-${{ github.run_attempt }}
@@ -453,7 +453,7 @@ jobs:
           retention-days: 30
       - name: Preserve non-secret submission diagnostic
         if: failure() || cancelled()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: xcb-apple-submission-${{ github.run_attempt }}
           path: ${{ runner.temp }}/xcb-apple-notarization.json
@@ -545,7 +545,7 @@ jobs:
           subject-path: signed-artifacts/*.tar.gz
       - name: Preserve exact signed macOS release assets
         id: signed
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: xcb-native-darwin-aarch64-${{ github.run_attempt }}
           path: signed-artifacts/
@@ -553,7 +553,7 @@ jobs:
           retention-days: 30
       - name: Preserve non-secret notarization submission diagnostic
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: xcb-apple-notarization-${{ github.run_attempt }}
           path: ${{ runner.temp }}/xcb-apple-notarization.json
