@@ -1124,8 +1124,8 @@ dependencies = [
 
 [[package]]
 name = "hraness-cli-kit"
-version = "1.1.2"
-source = "git+https://github.com/hraness/desktop-foundation?tag=v1.1.2#c6003c05a86ab9a188b8bc20dd4de5fe459affab"
+version = "2.0.0"
+source = "git+https://github.com/hraness/desktop-foundation?tag=v2.0.0#798be31fca87bbe9195e351cdf358c4d14eb42d4"
 dependencies = [
  "clap",
 ]
@@ -3294,7 +3294,7 @@ version = "0.20.12"
 dependencies = [
  "clap",
  "clap_complete",
- "hraness-cli-kit 1.1.2",
+ "hraness-cli-kit 2.0.0",
  "rusqlite",
  "rustix",
  "serde",
